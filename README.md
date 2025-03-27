@@ -47,6 +47,19 @@ The projects are focused on real-world applications of LLMs, multimodal AI, and 
 
 ---
 
+## 📦 Real-World Data Automation Projects
+
+These projects demonstrate public API integration, data scraping, and automation pipelines using Python.
+
+| Project | Description | Tech Stack |
+|--------|-------------|------------|
+| `camping-data` | Scrape and parse camping site data from Korean public OpenAPI | Python, Requests, XML |
+| `finance-data` | Retrieve and analyze stock data using PyKRX | Python, PyKRX |
+| `kakao-location` | Use Kakao REST API to search local place data | Python, Kakao API |
+| `nvidia-model-test` | OpenAI API environment configuration and testing | Python, OpenAI API |
+
+---
+
 ## 📫 Contact
 
 > Created & maintained by [Y]  
