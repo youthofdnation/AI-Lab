@@ -73,6 +73,23 @@ These projects demonstrate public API integration, data scraping, and automation
 
 ---
 
+## 🧪 Interactive LLM Apps (Streamlit & Gradio)
+
+This section contains hands-on practice with building interactive LLM-based applications using Streamlit and Gradio.
+
+| File | Description |
+|------|-------------|
+| `text.py`, `ui_component.py` | Streamlit UI 요소 실습 (텍스트, 입력, 선택 등) |
+| `data.py`, `graph.py` | Streamlit 데이터 출력 및 시각화 예제 |
+| `session.py` | 세션 상태 관리 및 인터랙션 실습 |
+| `gradio_single_chat.py` | 단일 사용자용 Gradio 기반 LLM 챗봇 |
+| `gradio_multi_chat.py` | 다중 턴 대화가 가능한 Gradio 기반 LLM 챗봇 |
+| `gradio_chatbot.ipynb` | Gradio 기반 챗봇 개발 과정 노트북 버전 |
+
+**사용 기술:** Python, Streamlit, Gradio, OpenAI API, seaborn, scikit-learn
+
+---
+
 ## 📫 Contact
 
 > Created & maintained by [Y]  
