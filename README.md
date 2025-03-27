@@ -60,6 +60,19 @@ These projects demonstrate public API integration, data scraping, and automation
 
 ---
 
+## 🤖 OpenAI Chatbot Lab
+
+| File | Description |
+|------|-------------|
+| `1. oai_basic.ipynb` | OpenAI API 기본 사용법 실습 |
+| `2. examples.ipynb` | 다양한 프롬프트 및 응답 예제 정리 |
+| `3. prompt engineering.ipynb` | 프롬프트 설계 기법 실습 |
+| `streamlit_multi_chat.py` | Streamlit 기반 멀티턴 LLM 챗봇 구현 (OpenAI GPT 모델 사용) |
+
+**기술 스택:** Python, OpenAI API, Streamlit
+
+---
+
 ## 📫 Contact
 
 > Created & maintained by [Y]  
