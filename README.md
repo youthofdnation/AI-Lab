@@ -17,7 +17,7 @@ The projects are focused on real-world applications of LLMs, multimodal AI, and 
 
 ---
 
-## 🧠 Projects
+## 🧠 Core AI Projects (LLMs, Agents, Diffusion)
 
 | Project | Description | Tech Stack |
 |--------|-------------|------------|
@@ -31,25 +31,59 @@ The projects are focused on real-world applications of LLMs, multimodal AI, and 
 
 ---
 
-## 📁 Folder Structure (Sample)
+## 🧪 Interactive LLM Apps (Streamlit & Gradio)
 
+| File | Description |
+|------|-------------|
+| `text.py`, `ui_component.py` | Streamlit UI elements (text input, selectors, layout) |
+| `data.py`, `graph.py` | Streamlit data visualization and display logic |
+| `session.py` | Session state & reactive logic example |
+| `gradio_single_chat.py` | Single-user LLM chatbot using Gradio |
+| `gradio_multi_chat.py` | Multi-turn chatbot using Gradio framework |
+| `gradio_chatbot.ipynb` | Notebook-based chatbot with Gradio interface |
 
+**Tech Stack:** Python, Streamlit, Gradio, OpenAI API, seaborn, scikit-learn
 
 ---
 
-## ✨ Skills & Tools
+## 🤖 OpenAI Chatbot Lab
 
-- **LLM**: GPT, RAG, LoRA Fine-tuning  
-- **Vision**: Stable Diffusion, OpenCV  
-- **Speech**: Whisper  
-- **Frameworks**: LangChain, Hugging Face Transformers, FastAPI, Gradio  
-- **Infra/ETC**: Git, Python, Jupyter, Google Colab
+| File | Description |
+|------|-------------|
+| `1. oai_basic.ipynb` | Basic OpenAI API usage example |
+| `2. examples.ipynb` | Prompt examples and usage variations |
+| `3. prompt engineering.ipynb` | Prompt tuning & engineering best practices |
+| `streamlit_multi_chat.py` | Streamlit-based multi-turn chatbot using GPT |
+
+**Tech Stack:** Python, OpenAI API, Streamlit
+
+---
+
+## 🗣️ Voice + Web Interaction Lab
+
+This section showcases real-time voice AI integration with web technologies like HTML5, FastAPI, WebSocket, and Streamlit.
+
+| Folder / File | Description | Tech Stack |
+|---------------|-------------|------------|
+| `notebooks/whisper.ipynb` | Speech-to-Text using OpenAI Whisper | Python, Whisper, Jupyter |
+| `notebooks/pyttsx3.ipynb` | Text-to-Speech (offline, system voice) | Python, pyttsx3 |
+| `notebooks/gTTS.ipynb` | Text-to-Speech using Google TTS | Python, gTTS |
+| `html/1. audio.html` | Browser-based voice recording & playback UI | HTML, JavaScript |
+| `html/2. camera.html` | Webcam stream interface (browser-based) | HTML, JavaScript |
+| `html/3. audio_stt_realtime.html` | Real-time voice recording → STT conversion | HTML, JS, WebSocket |
+| `html/4. tts.html` | Text input → TTS output via API | HTML, JS, FastAPI |
+| `fastapi/get_example.py` | FastAPI GET request example | Python, FastAPI |
+| `fastapi/post_example.py` | FastAPI POST (TTS) API endpoint | Python, FastAPI |
+| `fastapi/websocket_example.py` | WebSocket server for real-time audio | Python, FastAPI, WebSocket |
+| `websocket/simple_ws.py` | WebSocket client test script | Python, WebSocket |
+| `streamlit/streamlit_multi_chat.py` | Streamlit UI for multi-turn chat (TTS/STT) | Python, Streamlit |
+| `tts_audio/OMG.mp3` | Sample audio file (generated speech) | MP3 |
+
+**Tech Stack:** Python, FastAPI, Streamlit, WebSocket, gTTS, pyttsx3, Whisper, HTML5, JavaScript
 
 ---
 
 ## 📦 Real-World Data Automation Projects
-
-These projects demonstrate public API integration, data scraping, and automation pipelines using Python.
 
 | Project | Description | Tech Stack |
 |--------|-------------|------------|
@@ -60,33 +94,14 @@ These projects demonstrate public API integration, data scraping, and automation
 
 ---
 
-## 🤖 OpenAI Chatbot Lab
+## ✨ Skills & Tools
 
-| File | Description |
-|------|-------------|
-| `1. oai_basic.ipynb` | OpenAI API 기본 사용법 실습 |
-| `2. examples.ipynb` | 다양한 프롬프트 및 응답 예제 정리 |
-| `3. prompt engineering.ipynb` | 프롬프트 설계 기법 실습 |
-| `streamlit_multi_chat.py` | Streamlit 기반 멀티턴 LLM 챗봇 구현 (OpenAI GPT 모델 사용) |
-
-**기술 스택:** Python, OpenAI API, Streamlit
-
----
-
-## 🧪 Interactive LLM Apps (Streamlit & Gradio)
-
-This section contains hands-on practice with building interactive LLM-based applications using Streamlit and Gradio.
-
-| File | Description |
-|------|-------------|
-| `text.py`, `ui_component.py` | Streamlit UI 요소 실습 (텍스트, 입력, 선택 등) |
-| `data.py`, `graph.py` | Streamlit 데이터 출력 및 시각화 예제 |
-| `session.py` | 세션 상태 관리 및 인터랙션 실습 |
-| `gradio_single_chat.py` | 단일 사용자용 Gradio 기반 LLM 챗봇 |
-| `gradio_multi_chat.py` | 다중 턴 대화가 가능한 Gradio 기반 LLM 챗봇 |
-| `gradio_chatbot.ipynb` | Gradio 기반 챗봇 개발 과정 노트북 버전 |
-
-**사용 기술:** Python, Streamlit, Gradio, OpenAI API, seaborn, scikit-learn
+- **LLM**: GPT, RAG, LoRA Fine-tuning  
+- **Vision**: Stable Diffusion, OpenCV  
+- **Speech**: Whisper, gTTS, pyttsx3  
+- **Web**: Streamlit, Gradio, FastAPI, WebSocket, HTML5  
+- **Frameworks**: LangChain, Hugging Face Transformers  
+- **Infra/ETC**: Git, Python, Jupyter, Google Colab
 
 ---
 
