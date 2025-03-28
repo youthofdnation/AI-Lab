@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 음성 인식 (STT)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 20px;
+        }
+        #transcription {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            min-height: 100px;
+            background: #f9f9f9;
+            white-space: pre-wrap;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        #startBtn { background-color: #4CAF50; color: white; }
+        #stopBtn { background-color: #f44336; color: white; display: none; }
+        #visualizer {
+            width: 100%;
+            height: 100px;
+            background: #333;
+            margin-top: 20px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>실시간 음성 인식 (STT)</h1>
+    <p>마이크를 선택하고 음성을 텍스트로 변환하세요.</p>
+    
+    <label for="microphoneSelect">🎤 마이크 선택: </label>
+    <select id="microphoneSelect"></select>
+    
+    <button id="startBtn">음성 인식 시작</button>
+    <button id="stopBtn">음성 인식 중지</button>
+
+    <canvas id="visualizer"></canvas>
+
+    <h2>변환된 텍스트</h2>
+    <div id="transcription">여기에 텍스트가 표시됩니다.</div>
+
+    <script>
+        let recognition;
+        let isRecognizing = false;
+        let audioContext, analyser, microphone, dataArray, canvasContext;
+        let selectedMicId;
+
+        document.getElementById('startBtn').addEventListener('click', startRecognition);
+        document.getElementById('stopBtn').addEventListener('click', stopRecognition);
+        document.getElementById('microphoneSelect').addEventListener('change', event => {
+            selectedMicId = event.target.value;
+        });
+
+        async function getMicrophones() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const micSelect = document.getElementById('microphoneSelect');
+            micSelect.innerHTML = '';
+            
+            devices.filter(device => device.kind === 'audioinput').forEach(mic => {
+                let option = document.createElement('option');
+                option.value = mic.deviceId;
+                option.text = mic.label || `Microphone ${micSelect.length + 1}`;
+                micSelect.appendChild(option);
+            });
+            selectedMicId = micSelect.value;
+        }
+        
+        async function startRecognition() {
+            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+                alert("이 브라우저는 실시간 음성 인식을 지원하지 않습니다. Chrome을 사용하세요.");
+                return;
+            }
+            
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ko-KR';
+            recognition.continuous = true;
+            recognition.interimResults = true;
+
+            recognition.onstart = function() {
+                isRecognizing = true;
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'inline-block';
+                document.getElementById('transcription').textContent = "음성을 인식하는 중...";
+                startAudioVisualization();
+            };
+
+            recognition.onresult = function(event) {
+                let transcript = '';
+                for (let i = 0; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript + ' ';
+                }
+                document.getElementById('transcription').textContent = transcript;
+            };
+
+            recognition.onerror = function(event) {
+                console.error("음성 인식 오류:", event.error);
+                stopRecognition();
+            };
+
+            recognition.onend = function() {
+                isRecognizing = false;
+                document.getElementById('startBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+                stopAudioVisualization();
+            };
+
+            recognition.onsoundstart = function () {
+                console.log("소리가 감지됨!");
+            };
+            recognition.onspeechstart = function () {
+                console.log("음성이 감지됨!");
+            };
+            recognition.onspeechend = function () {
+                console.log("음성 입력 종료!");
+            };
+
+            console.log("음성 인식 시작 시도...");
+            recognition.start();
+            console.log("음성 인식 시작됨!");
+        }
+
+        function stopRecognition() {
+            if (recognition) {
+                recognition.stop();
+            }
+        }
+
+        async function startAudioVisualization() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: selectedMicId } });
+            microphone = audioContext.createMediaStreamSource(stream);
+            microphone.connect(analyser);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            canvasContext = document.getElementById('visualizer').getContext('2d');
+            drawVisualization();
+        }
+
+        function drawVisualization() {
+            if (!isRecognizing) return;
+            requestAnimationFrame(drawVisualization);
+            analyser.getByteFrequencyData(dataArray);
+            
+            const canvas = document.getElementById('visualizer');
+            const width = canvas.width;
+            const height = canvas.height;
+            const barWidth = (width / dataArray.length) * 2.5;
+            
+            canvasContext.clearRect(0, 0, width, height);
+            let x = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                const barHeight = (dataArray[i] / 255) * height;
+                canvasContext.fillStyle = `rgb(0, ${barHeight + 100}, 255)`;
+                canvasContext.fillRect(x, height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+
+        function stopAudioVisualization() {
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+        }
+
+        getMicrophones();
+    </script>
+</body>
+</html>
