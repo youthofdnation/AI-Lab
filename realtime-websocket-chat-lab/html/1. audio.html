@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>오디오 레코더 및 플레이어</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        h1 {
+            color: #333;
+        }
+        
+        .recorder-container {
+            margin: 30px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+        }
+        
+        .button-container {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        
+        #startRecording {
+            background-color: #4CAF50;
+            color: white;
+        }
+        
+        #stopRecording {
+            background-color: #f44336;
+            color: white;
+            display: none;
+        }
+        
+        #playRecording {
+            background-color: #2196F3;
+            color: white;
+            display: none;
+        }
+        
+        .status {
+            margin: 15px 0;
+            font-weight: bold;
+        }
+        
+        .timer {
+            font-size: 24px;
+            margin: 10px 0;
+            color: #555;
+        }
+        
+        .device-selector {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #eee;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        }
+        
+        select {
+            padding: 8px;
+            font-size: 16px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            width: 100%;
+            max-width: 400px;
+            margin-top: 10px;
+        }
+        
+        .refresh-btn {
+            background-color: #607D8B;
+            color: white;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>오디오 레코더 및 플레이어</h1>
+    
+    <div class="device-selector">
+        <label for="audioSource">마이크 선택:</label>
+        <select id="audioSource" disabled>
+            <option value="">마이크를 불러오는 중...</option>
+        </select>
+        <div>
+            <button id="refreshDevices" class="refresh-btn">마이크 목록 새로고침</button>
+        </div>
+    </div>
+    
+    <div class="recorder-container">
+        <div class="status" id="status">마이크를 선택하고 녹음 시작 버튼을 눌러주세요</div>
+        <div class="timer" id="timer">00:00</div>
+        
+        <div class="button-container">
+            <button id="startRecording">녹음 시작</button>
+            <button id="stopRecording">녹음 중지</button>
+            <button id="playRecording">녹음 재생</button>
+        </div>
+    </div>
+    
+    <audio id="audioPlayer" controls style="display: none;"></audio>
+    
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let audioBlob;
+        let audioUrl;
+        let recordingTimer;
+        let seconds = 0;
+        let isRecording = false;
+        let currentStream = null;
+        
+        const startButton = document.getElementById('startRecording');
+        const stopButton = document.getElementById('stopRecording');
+        const playButton = document.getElementById('playRecording');
+        const statusElement = document.getElementById('status');
+        const timerElement = document.getElementById('timer');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const audioSourceSelect = document.getElementById('audioSource');
+        const refreshDevicesButton = document.getElementById('refreshDevices');
+        
+        window.addEventListener('DOMContentLoaded', loadAudioDevices);
+        
+        async function loadAudioDevices() {
+            try {
+                audioSourceSelect.disabled = true;
+                audioSourceSelect.innerHTML = '<option value="">마이크를 불러오는 중...</option>';
+                
+                const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                tempStream.getTracks().forEach(track => track.stop());
+                
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioDevices = devices.filter(device => device.kind === 'audioinput');
+                
+                if (audioDevices.length === 0) {
+                    throw new Error('마이크를 찾을 수 없습니다.');
+                }
+                
+                audioSourceSelect.innerHTML = '';
+                
+                audioDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `마이크 ${index + 1}`;
+                    audioSourceSelect.appendChild(option);
+                });
+                
+                audioSourceSelect.disabled = false;
+                statusElement.textContent = '마이크를 선택하고 녹음 시작 버튼을 눌러주세요';
+                
+            } catch (error) {
+                console.error('마이크 목록 로드 오류:', error);
+                statusElement.textContent = `오류: ${error.message}`;
+                audioSourceSelect.innerHTML = '<option value="">마이크를 찾을 수 없습니다</option>';
+            }
+        }
+        
+        startButton.addEventListener('click', async () => {
+            try {
+                const selectedMicId = audioSourceSelect.value;
+                
+                if (!selectedMicId) {
+                    throw new Error('마이크를 선택해주세요.');
+                }
+                
+                if (currentStream) {
+                    currentStream.getTracks().forEach(track => track.stop());
+                }
+                
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        deviceId: { exact: selectedMicId }
+                    }
+                });
+                
+                currentStream = stream;
+                
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    audioUrl = URL.createObjectURL(audioBlob);
+                    
+                    audioPlayer.src = audioUrl;
+                    
+                    statusElement.textContent = '녹음이 완료되었습니다';
+                    playButton.style.display = 'inline-block';
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                
+                startTimer();
+                
+                statusElement.textContent = '녹음 중...';
+                startButton.style.display = 'none';
+                stopButton.style.display = 'inline-block';
+                audioSourceSelect.disabled = true;
+                
+                audioChunks = [];
+                
+            } catch (error) {
+                console.error('오디오 녹음 중 오류 발생:', error);
+                statusElement.textContent = `오류: ${error.message}`;
+            }
+        });
+        
+        stopButton.addEventListener('click', () => {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                
+                clearInterval(recordingTimer);
+                
+                stopButton.style.display = 'none';
+                startButton.style.display = 'inline-block';
+                audioSourceSelect.disabled = false;
+            }
+        });
+        
+        playButton.addEventListener('click', () => {
+            if (audioPlayer.src) {
+                audioPlayer.play();
+                statusElement.textContent = '녹음 재생 중...';
+                
+                audioPlayer.onended = () => {
+                    statusElement.textContent = '녹음이 완료되었습니다';
+                };
+            }
+        });
+        
+        refreshDevicesButton.addEventListener('click', loadAudioDevices);
+        
+        function startTimer() {
+            seconds = 0;
+            recordingTimer = setInterval(() => {
+                seconds++;
+                const minutes = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                timerElement.textContent = `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+        
+        window.addEventListener('beforeunload', () => {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+        });
+    </script>
+</body>
+</html>

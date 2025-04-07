@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>웹 카메라 스트리밍</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+        }
+        #video-container {
+            margin: 20px 0;
+            position: relative;
+        }
+        #video-stream {
+            width: 100%;
+            max-width: 640px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background-color: #f0f0f0;
+        }
+        .button-container {
+            margin: 15px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 0 5px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2a75f3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 10px;
+            font-style: italic;
+            color: #666;
+        }
+        #camera-select {
+            padding: 10px;
+            margin: 10px 0;
+            font-size: 16px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            width: 100%;
+            max-width: 400px;
+        }
+        .control-panel {
+            margin: 15px 0;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <h1>웹 카메라 스트리밍</h1>
+    
+    <div class="control-panel">
+        <label for="camera-select">카메라 선택:</label>
+        <select id="camera-select" disabled>
+            <option value="">카메라를 불러오는 중...</option>
+        </select>
+        <div class="button-container">
+            <button id="refresh-cameras">카메라 목록 새로고침</button>
+        </div>
+    </div>
+    
+    <div id="video-container">
+        <video id="video-stream" autoplay playsinline></video>
+    </div>
+    
+    <div class="button-container">
+        <button id="start-button">카메라 시작</button>
+        <button id="stop-button" disabled>카메라 중지</button>
+    </div>
+    
+    <p id="status">카메라 접근 권한을 허용해 주세요.</p>
+    
+    <script>
+        const videoElement = document.getElementById('video-stream');
+        const startButton = document.getElementById('start-button');
+        const stopButton = document.getElementById('stop-button');
+        const statusElement = document.getElementById('status');
+        const cameraSelect = document.getElementById('camera-select');
+        const refreshCamerasButton = document.getElementById('refresh-cameras');
+        
+        let mediaStream = null;
+        
+        async function loadCameraDevices() {
+            try {
+                cameraSelect.disabled = true;
+                cameraSelect.innerHTML = '<option value="">카메라를 불러오는 중...</option>';
+                
+                const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                tempStream.getTracks().forEach(track => track.stop()); 
+                
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                if (videoDevices.length === 0) {
+                    throw new Error('카메라 장치를 찾을 수 없습니다.');
+                }
+                
+                cameraSelect.innerHTML = '';
+                
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `카메라 ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+                
+                cameraSelect.disabled = false;
+                statusElement.textContent = '카메라를 선택하고 시작 버튼을 눌러주세요.';
+                
+            } catch (error) {
+                console.error('카메라 목록 로드 오류:', error);
+                statusElement.textContent = `오류: ${error.message}`;
+                cameraSelect.innerHTML = '<option value="">카메라를 찾을 수 없습니다</option>';
+            }
+        }
+        
+        async function startCamera() {
+            try {
+                const selectedCameraId = cameraSelect.value;
+                
+                if (!selectedCameraId) {
+                    throw new Error('카메라를 선택해주세요.');
+                }
+                
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        deviceId: { exact: selectedCameraId }
+                    },
+                    audio: false
+                });
+                
+                videoElement.srcObject = mediaStream;
+                
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                cameraSelect.disabled = true;
+                statusElement.textContent = '카메라가 활성화되었습니다.';
+                
+            } catch (error) {
+                console.error('카메라 접근 오류:', error);
+                statusElement.textContent = `오류: ${error.message}`;
+            }
+        }
+        
+        function stopCamera() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                
+                videoElement.srcObject = null;
+                mediaStream = null;
+                
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                cameraSelect.disabled = false;
+                
+                statusElement.textContent = '카메라가 중지되었습니다.';
+            }
+        }
+        
+        window.addEventListener('DOMContentLoaded', loadCameraDevices);
+        
+        startButton.addEventListener('click', startCamera);
+        stopButton.addEventListener('click', stopCamera);
+        refreshCamerasButton.addEventListener('click', loadCameraDevices);
+        
+        window.addEventListener('beforeunload', stopCamera);
+    </script>
+</body>
+</html>

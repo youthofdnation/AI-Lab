@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text to Speech (TTS) 예제</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 50px;
+        }
+        input, button {
+            padding: 10px;
+            font-size: 16px;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>텍스트를 입력하고 음성으로 변환해 보세요!</h2>
+    <input type="text" id="text-input" placeholder="여기에 텍스트를 입력하세요" size="40">
+    <button onclick="speakText()">음성 출력</button>
+
+    <script>
+        function speakText() {
+            const text = document.getElementById("text-input").value;
+            if (!text) {
+                alert("텍스트를 입력하세요!");
+                return;
+            }
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = "ko-KR"; // 한국어 설정
+            utterance.rate = 1; // 속도 (0.1 ~ 10)
+            utterance.pitch = 1; // 음높이 (0 ~ 2)
+
+            speechSynthesis.speak(utterance);
+        }
+    </script>
+
+</body>
+</html>
