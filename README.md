@@ -83,6 +83,20 @@ This section showcases real-time voice AI integration with web technologies like
 
 ---
 
+## 🌐 Real-Time WebSocket & Chat Lab 
+This lab focuses on real-time web communication using WebSocket protocol, FastAPI server, and Streamlit-based multi-turn chatbot.
+
+| Folder / File | Description | Tech Stack |
+|---------------|-------------|------------|
+| `fastapi/websocket_example.py` | FastAPI WebSocket server for real-time messaging | Python, FastAPI, WebSocket |
+| `websocket/simple_ws.py` | WebSocket client for sending/receiving messages | Python, websockets, asyncio |
+| `streamlit/streamlit_multi_chat.py` | Streamlit multi-turn chatbot with OpenAI GPT | Python, Streamlit, OpenAI API |
+| `run.sh` | Simple HTTP server to serve static files | Shell, Python HTTP Server |
+
+**Tech Stack:** Python, FastAPI, WebSocket, Streamlit, OpenAI API
+
+---
+
 ## 📦 Real-World Data Automation Projects
 
 | Project | Description | Tech Stack |
