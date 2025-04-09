@@ -132,28 +132,42 @@ Python, FastAPI, WebSocket, Whisper, HTML5, JavaScript, AudioContext API, Web Sp
 ---
 
 ## 📄 AI Document Assistant Lab
+
 This lab showcases an AI assistant that reads PDF documents and answers questions based on their content. It leverages LangChain, Sentence Transformers, and OpenAI API to build a context-aware Q&A system from uploaded documents.
 
-Folder / File	Description	Tech Stack
-1. langchain.ipynb	Basic LangChain usage notebook to build chains and agents	Python, LangChain, OpenAI API
-2. LCEL.ipynb	Practice notebook for LangChain Expression Language (LCEL)	Python, LangChain
-ask_pdf.ipynb	AI Q&A system for uploaded PDF documents	Python, LangChain, Sentence Transformers, OpenAI API
-소나기.pdf	Sample document (short novel 'Sonagi' by Hwang Sun-won)	PDF
-install.sh	Environment setup script (install dependencies)	Bash, pip
-Tech Stack:
+| Folder / File | Description | Tech Stack |
+|---------------|-------------|------------|
+| `1. langchain.ipynb` | Basic LangChain usage notebook to build chains and agents | Python, LangChain, OpenAI API |
+| `2. LCEL.ipynb` | Practice notebook for LangChain Expression Language (LCEL) | Python, LangChain |
+| `ask_pdf.ipynb` | AI Q&A system for uploaded PDF documents | Python, LangChain, Sentence Transformers, OpenAI API |
+| `소나기.pdf` | Sample document (short novel 'Sonagi' by Hwang Sun-won) | PDF |
+| `install.sh` | Environment setup script (install dependencies) | Bash, pip |
+
+**Tech Stack:**  
 Python, LangChain, Sentence Transformers, FAISS, OpenAI API, Jupyter Notebook
 
-Features:
+**Features:**
+- 📄 Upload any PDF and extract full text
+- 🧩 Sentence Transformers embedding for fast similarity search
+- 💬 Context-aware question answering based on document
+- 🖥️ Easy-to-use Jupyter notebooks for step-by-step exploration
+- ✅ Environment setup with `install.sh`
 
-📄 Upload any PDF and extract full text
+**Usage**
+1. Install dependencies:
+   ```bash
+   chmod +x install.sh
+   ./install.sh
+   ```
 
-🧩 Sentence Transformers embedding for fast similarity search
+2. Run Jupyter Notebook:
+   ```bash
+   jupyter notebook
+   ```
 
-💬 Context-aware question answering based on document
+3. Open `ask_pdf.ipynb`, upload your document, and start asking questions!
 
-🖥️ Easy-to-use Jupyter notebooks for step-by-step exploration
-
-✅ Environment setup with install.sh
+> ⚠️ *Note:* Please ensure to use `.env` file for API keys to avoid exposure. Do not hardcode sensitive information in notebooks.
 
 ---
 
