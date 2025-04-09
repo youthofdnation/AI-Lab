@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 음성 채팅 시스템</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        #visualizer {
+            width: 100%;
+            height: 80px;
+            background: #333;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .chat-messages {
+            flex: 1;
+            padding: 15px;
+            overflow-y: auto;
+            background: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 18px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #DCF8C6;
+            align-self: flex-end;
+            margin-left: auto;
+        }
+        .assistant-message {
+            background-color: #EAEAEA;
+            align-self: flex-start;
+        }
+        .message-container {
+            display: flex;
+            margin-bottom: 10px;
+        }
+        .message-info {
+            font-size: 0.8em;
+            color: #777;
+            margin-bottom: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+        }
+        #startBtn { background-color: #4CAF50; color: white; }
+        #stopBtn { background-color: #f44336; color: white; display: none; }
+        .status-indicator {
+            padding: 5px 10px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            font-size: 14px;
+            margin-left: 10px;
+            color: #666;
+        }
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            padding: 10px 15px;
+            background-color: #f0f0f0;
+            border-radius: 18px;
+            margin-bottom: 15px;
+            width: fit-content;
+        }
+        .typing-dot {
+            height: 8px;
+            width: 8px;
+            background-color: #777;
+            border-radius: 50%;
+            margin: 0 2px;
+            animation: typing-animation 1.5s infinite;
+        }
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes typing-animation {
+            0% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+            100% { transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>AI 음성 채팅 시스템</h1>
+        <p>말씀하시면 AI가 대답합니다</p>
+    </div>
+    
+    <div class="controls">
+        <label for="microphoneSelect">🎤 마이크: </label>
+        <select id="microphoneSelect"></select>
+        
+        <button id="startBtn">음성 인식 시작</button>
+        <button id="stopBtn">음성 인식 중지</button>
+        
+        <div id="status" class="status-indicator">대기 중</div>
+    </div>
+
+    <canvas id="visualizer"></canvas>
+
+    <div class="chat-container">
+        <div id="chatMessages" class="chat-messages">
+            <div class="message-container">
+                <div class="message assistant-message">
+                    <div class="message-info">AI 어시스턴트</div>
+                    안녕하세요! 음성 채팅을 시작하려면 '음성 인식 시작' 버튼을 눌러주세요.
+                </div>
+            </div>
+            <div class="typing-indicator" id="typingIndicator">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let recognition;
+        let isRecognizing = false;
+        let audioContext, analyser, microphone, dataArray, canvasContext;
+        let selectedMicId;
+        let chatHistory = [];
+        let synthesisVoice = null;
+        const API_URL = 'http://localhost:8000/chat'; // FastAPI 서버 URL
+        let isFetching = false;
+
+        // 시작 메시지를 채팅 히스토리에 추가
+        chatHistory.push({
+            role: "assistant", 
+            content: "안녕하세요! 음성 채팅을 시작하려면 '음성 인식 시작' 버튼을 눌러주세요."
+        });
+
+        document.getElementById('startBtn').addEventListener('click', startRecognition);
+        document.getElementById('stopBtn').addEventListener('click', stopRecognition);
+        document.getElementById('microphoneSelect').addEventListener('change', event => {
+            selectedMicId = event.target.value;
+        });
+
+        // 마이크 목록 가져오기
+        async function getMicrophones() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const micSelect = document.getElementById('microphoneSelect');
+                micSelect.innerHTML = '';
+                
+                devices.filter(device => device.kind === 'audioinput').forEach(mic => {
+                    let option = document.createElement('option');
+                    option.value = mic.deviceId;
+                    option.text = mic.label || `마이크 ${micSelect.length + 1}`;
+                    micSelect.appendChild(option);
+                });
+                selectedMicId = micSelect.value;
+            } catch (error) {
+                console.error("마이크 목록을 가져오는 중 오류 발생:", error);
+                alert("마이크 접근에 문제가 발생했습니다. 권한을 확인해주세요.");
+            }
+        }
+
+        // 음성 인식 시작
+        async function startRecognition() {
+            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+                alert("이 브라우저는 실시간 음성 인식을 지원하지 않습니다. Chrome을 사용하세요.");
+                return;
+            }
+            
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ko-KR';
+            recognition.continuous = true;
+            recognition.interimResults = true;
+
+            recognition.onstart = function() {
+                isRecognizing = true;
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'inline-block';
+                document.getElementById('status').textContent = "듣는 중...";
+                startAudioVisualization();
+            };
+
+            let finalTranscript = '';
+
+            recognition.onresult = function(event) {
+                let interimTranscript = '';
+                
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const transcript = event.results[i][0].transcript;
+                    
+                    if (event.results[i].isFinal) {
+                        finalTranscript += transcript + ' ';
+                    } else {
+                        interimTranscript += transcript;
+                    }
+                }
+                
+                // 최종 인식 결과가 있으면 메시지로 추가
+                if (finalTranscript.trim() !== '') {
+                    addMessage('user', finalTranscript.trim());
+                    sendToServer(finalTranscript.trim());
+                    finalTranscript = ''; // 초기화
+                }
+                
+                document.getElementById('status').textContent = interimTranscript || "듣는 중...";
+            };
+
+            recognition.onerror = function(event) {
+                console.error("음성 인식 오류:", event.error);
+                document.getElementById('status').textContent = `오류: ${event.error}`;
+                stopRecognition();
+            };
+
+            recognition.onend = function() {
+                isRecognizing = false;
+                document.getElementById('startBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+                document.getElementById('status').textContent = "대기 중";
+                stopAudioVisualization();
+            };
+
+            try {
+                recognition.start();
+                console.log("음성 인식 시작됨!");
+            } catch (error) {
+                console.error("음성 인식 시작 실패:", error);
+                alert("음성 인식을 시작할 수 없습니다.");
+            }
+        }
+
+        // 음성 인식 중지
+        function stopRecognition() {
+            if (recognition) {
+                recognition.stop();
+            }
+        }
+
+        // 음성 인식 일시 중지 함수
+        function pauseRecognition() {
+            if (recognition && isRecognizing) {
+                recognition.stop();
+                isRecognizing = false;
+                document.getElementById('status').textContent = "응답 대기 중...";
+            }
+        }
+
+        // 음성 인식 재개 함수
+        function resumeRecognition() {
+            if (recognition && !isRecognizing) {
+                try {
+                    recognition.start();
+                    isRecognizing = true;
+                    document.getElementById('status').textContent = "듣는 중...";
+                    console.log("음성 인식 재개됨");
+                } catch (error) {
+                    console.error("음성 인식 재개 실패:", error);
+                    document.getElementById('startBtn').style.display = 'inline-block';
+                    document.getElementById('stopBtn').style.display = 'none';
+                    document.getElementById('status').textContent = "대기 중";
+                }
+            }
+        }
+
+        // 오디오 시각화 시작
+        async function startAudioVisualization() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { deviceId: selectedMicId ? { exact: selectedMicId } : undefined } 
+                });
+                microphone = audioContext.createMediaStreamSource(stream);
+                microphone.connect(analyser);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                const canvas = document.getElementById('visualizer');
+                canvasContext = canvas.getContext('2d');
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+                
+                drawVisualization();
+            } catch (error) {
+                console.error("오디오 시각화 시작 오류:", error);
+                alert("마이크 접근에 문제가 발생했습니다. 권한을 확인해주세요.");
+            }
+        }
+
+        // 시각화 그리기
+        function drawVisualization() {
+            if (!isRecognizing || !analyser) return;
+            
+            requestAnimationFrame(drawVisualization);
+            analyser.getByteFrequencyData(dataArray);
+            
+            const canvas = document.getElementById('visualizer');
+            const width = canvas.width;
+            const height = canvas.height;
+            const barWidth = (width / dataArray.length) * 2.5;
+            
+            canvasContext.clearRect(0, 0, width, height);
+            let x = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                const barHeight = (dataArray[i] / 255) * height;
+                canvasContext.fillStyle = `rgb(0, ${barHeight + 100}, 255)`;
+                canvasContext.fillRect(x, height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+
+        // 오디오 시각화 중지
+        function stopAudioVisualization() {
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+        }
+
+        // 메시지 추가
+        function addMessage(role, content) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message-container';
+
+            const message = document.createElement('div');
+            message.className = `message ${role}-message`;
+            
+            const messageInfo = document.createElement('div');
+            messageInfo.className = 'message-info';
+            messageInfo.textContent = role === 'user' ? '사용자' : 'AI 어시스턴트';
+            
+            message.appendChild(messageInfo);
+            message.appendChild(document.createTextNode(content));
+            
+            messageDiv.appendChild(message);
+            chatMessages.appendChild(messageDiv);
+            
+            // 메시지 영역 스크롤 맨 아래로
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            // 채팅 히스토리에 추가
+            chatHistory.push({ role: role, content: content });
+        }
+
+        // 서버로 메시지 전송
+        async function sendToServer(message) {
+            if (isFetching) return; // 이미 요청 중이면 중복 요청 방지
+            
+            isFetching = true;
+            showTypingIndicator(true);
+            
+            // 음성 인식 중지 (서버 응답 대기 중)
+            pauseRecognition();
+            
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        messages: chatHistory
+                    }),
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP 오류! 상태: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const assistantMessage = data.response;
+                
+                addMessage('assistant', assistantMessage);
+                speakText(assistantMessage);
+                
+            } catch (error) {
+                console.error("서버 요청 중 오류 발생:", error);
+                addMessage('assistant', "죄송합니다. 서버와 통신 중 오류가 발생했습니다. 다시 시도해주세요.");
+                // 오류 발생 시 음성 인식 재개
+                resumeRecognition();
+            } finally {
+                isFetching = false;
+                showTypingIndicator(false);
+            }
+        }
+
+        // 텍스트를 음성으로 변환
+        function speakText(text) {
+            if (!('speechSynthesis' in window)) {
+                console.error("이 브라우저는 음성 합성을 지원하지 않습니다.");
+                resumeRecognition(); // 음성 합성이 지원되지 않으면 음성 인식 재개
+                return;
+            }
+            
+            // 이전 음성이 재생 중이면 중지
+            window.speechSynthesis.cancel();
+            
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'ko-KR';
+            utterance.rate = 2; // 속도 (0.1 ~ 10)
+            utterance.pitch = 1; // 음높이 (0 ~ 2)
+            
+            // 음성 시작/종료 이벤트 핸들러 추가
+            utterance.onstart = function() {
+                console.log("음성 출력 시작");
+                // 음성 출력 중일 때는 음성 인식 중지 상태 유지
+            };
+            
+            utterance.onend = function() {
+                console.log("음성 출력 완료");
+                // 음성 출력이 완료되면 음성 인식 재개
+                resumeRecognition();
+            };
+            
+            utterance.onerror = function(event) {
+                console.error("음성 출력 오류:", event);
+                resumeRecognition(); // 오류 발생 시 음성 인식 재개
+            };
+            
+            // 음성 설정
+            if (!synthesisVoice) {
+                // 처음 사용 시 한국어 음성 찾기
+                setTimeout(() => {
+                    const voices = window.speechSynthesis.getVoices();
+                    for (let voice of voices) {
+                        if (voice.lang.includes('ko')) {
+                            synthesisVoice = voice;
+                            break;
+                        }
+                    }
+                    
+                    if (synthesisVoice) {
+                        utterance.voice = synthesisVoice;
+                    }
+                    
+                    window.speechSynthesis.speak(utterance);
+                }, 100);
+            } else {
+                utterance.voice = synthesisVoice;
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        // 음성 목록 로드 - 브라우저에 따라 이벤트 리스너 필요
+        window.speechSynthesis.onvoiceschanged = function() {
+            const voices = window.speechSynthesis.getVoices();
+            for (let voice of voices) {
+                if (voice.lang.includes('ko')) {
+                    synthesisVoice = voice;
+                    break;
+                }
+            }
+        };
+
+        // 타이핑 인디케이터 표시/숨김
+        function showTypingIndicator(show) {
+            const indicator = document.getElementById('typingIndicator');
+            indicator.style.display = show ? 'flex' : 'none';
+            
+            // 보이게 할 때 스크롤 맨 아래로
+            if (show) {
+                const chatMessages = document.getElementById('chatMessages');
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        }
+
+        // 초기화
+        window.onload = function() {
+            getMicrophones();
+        };
+
+        // 창 크기 변경 시 캔버스 크기 조정
+        window.addEventListener('resize', function() {
+            if (canvasContext) {
+                const canvas = document.getElementById('visualizer');
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket 채팅</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        #chat-messages { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; }
+        .message { margin-bottom: 5px; }
+        .sent { color: blue; text-align: right; }
+        .received { color: black; }
+        .system { color: gray; font-style: italic; text-align: center; }
+        .input-area { display: flex; margin-top: 10px; }
+        input, button { padding: 5px; }
+        input { flex-grow: 1; margin-right: 5px; }
+    </style>
+</head>
+<body>
+    <h2>WebSocket 채팅 클라이언트</h2>
+    
+    <div>
+        <input type="text" id="server-url" value="ws://localhost:8000/ws">
+        <button id="connect-button">연결</button>
+        <span id="status">연결 상태: 끊김</span>
+    </div>
+    
+    <div id="chat-messages"></div>
+    
+    <div class="input-area">
+        <input type="text" id="username" placeholder="사용자 이름" value="사용자">
+        <input type="text" id="message" placeholder="메시지 입력..." disabled>
+        <button id="send-button" disabled>전송</button>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const messagesEl = document.getElementById('chat-messages');
+        const serverUrlEl = document.getElementById('server-url');
+        const connectBtnEl = document.getElementById('connect-button');
+        const usernameEl = document.getElementById('username');
+        const messageEl = document.getElementById('message');
+        const sendBtnEl = document.getElementById('send-button');
+        
+        let socket = null;
+        let connected = false;
+        
+        function updateStatus(isConnected, message) {
+            connected = isConnected;
+            
+            if (isConnected) {
+                statusEl.textContent = '연결 상태: 연결됨';
+                connectBtnEl.textContent = '연결 끊기';
+                messageEl.disabled = false;
+                sendBtnEl.disabled = false;
+            } else {
+                statusEl.textContent = `연결 상태: ${message || '끊김'}`;
+                connectBtnEl.textContent = '연결';
+                messageEl.disabled = true;
+                sendBtnEl.disabled = true;
+            }
+        }
+        
+        function addMessage(text, type) {
+            const msgEl = document.createElement('div');
+            msgEl.className = `message ${type}`;
+            msgEl.textContent = text;
+            messagesEl.appendChild(msgEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        
+        connectBtnEl.addEventListener('click', () => {
+            if (connected) {
+                if (socket) socket.close();
+            } else {
+                const url = serverUrlEl.value.trim();
+                if (!url) {
+                    alert('서버 URL을 입력하세요');
+                    return;
+                }
+                
+                try {
+                    socket = new WebSocket(url);
+                    
+                    socket.onopen = () => {
+                        updateStatus(true);
+                        addMessage('서버에 연결되었습니다', 'system');
+                    };
+                    
+                    socket.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.message) {
+                                addMessage(`[${data.time || ''}] ${data.message}`, 'received');
+                            } else {
+                                addMessage(event.data, 'received');
+                            }
+                        } catch (e) {
+                            addMessage(event.data, 'received');
+                        }
+                    };
+                    
+                    socket.onerror = () => {
+                        updateStatus(false, '오류 발생');
+                        addMessage('연결 오류가 발생했습니다', 'system');
+                    };
+                    
+                    socket.onclose = () => {
+                        updateStatus(false);
+                        addMessage('서버와 연결이 종료되었습니다', 'system');
+                    };
+                    
+                } catch (error) {
+                    alert('WebSocket 연결 중 오류 발생: ' + error.message);
+                }
+            }
+        });
+        
+        sendBtnEl.addEventListener('click', sendMessage);
+        messageEl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+        
+        function sendMessage() {
+            if (!connected || !socket) return;
+            
+            const username = usernameEl.value.trim() || '사용자';
+            const message = messageEl.value.trim();
+            
+            if (message) {
+                socket.send(`${username}: ${message}`);
+                addMessage(`${username}: ${message}`, 'sent');
+                messageEl.value = '';
+            }
+        }
+    </script>
+</body>
+</html>

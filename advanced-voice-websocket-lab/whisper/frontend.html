@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 음성 인식</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
+        button, select { padding: 10px 20px; margin: 10px; font-size: 16px; }
+        #recognizedText { margin-top: 20px; font-size: 18px; font-weight: bold; }
+        canvas { display: block; margin: 20px auto; background: #f0f0f0; }
+        #timer { font-size: 16px; margin-top: 10px; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>실시간 음성 인식</h1>
+    
+    <label for="audioSource">🎙️ 오디오 입력 장치 선택:</label>
+    <select id="audioSource"></select>
+
+    <button id="startRecording">🎤 녹음 시작</button>
+    <button id="stopRecording" style="display: none;">⏹️ 녹음 중지</button>
+
+    <p id="status">버튼을 눌러 녹음을 시작하세요.</p>
+    <div id="timer">녹음 시간: 0초</div>
+    <div id="recognizedText">인식된 텍스트: </div>
+
+    <canvas id="waveform" width="600" height="150"></canvas>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let ws;
+        let isRecording = false;
+        let audioContext, analyser, dataArray, source;
+        let canvas, canvasCtx;
+        let recordingInterval;
+        let timerInterval;
+        let timeElapsed = 0;
+        
+        // 녹음 시간 설정 (밀리초)
+        const recordingDuration = 3000; // 3초
+
+        async function getAudioDevices() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioSelect = document.getElementById("audioSource");
+            audioSelect.innerHTML = ""; 
+
+            const audioDevices = devices.filter(device => device.kind === "audioinput");
+            audioDevices.forEach((device, index) => {
+                let option = document.createElement("option");
+                option.value = device.deviceId;
+                option.text = device.label || `Microphone ${index + 1}`;
+                audioSelect.appendChild(option);
+            });
+        }
+
+        async function startRecording() {
+            try {
+                const audioSelect = document.getElementById("audioSource");
+                const deviceId = audioSelect.value;
+                const constraints = { audio: { deviceId: deviceId ? { exact: deviceId } : undefined } };
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                // WebSocket 연결
+                ws = new WebSocket("ws://localhost:8000/ws");
+                
+                ws.onopen = () => {
+                    console.log("WebSocket 연결됨");
+                    startRecordingCycle(stream);
+                };
+
+                ws.onmessage = (event) => {
+                    document.getElementById("recognizedText").textContent = "인식된 텍스트: " + event.data;
+                };
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+                
+                canvas = document.getElementById("waveform");
+                canvasCtx = canvas.getContext("2d");
+                
+                document.getElementById("startRecording").style.display = "none";
+                document.getElementById("stopRecording").style.display = "inline-block";
+                document.getElementById("status").textContent = "녹음 중...";
+                
+                // 타이머 시작
+                timeElapsed = 0;
+                updateTimer();
+                timerInterval = setInterval(updateTimer, 1000);
+                
+                // 파형 그리기 시작
+                isRecording = true;
+                drawWaveform();
+            } catch (error) {
+                console.error("녹음 오류:", error);
+            }
+        }
+        
+        function startRecordingCycle(stream) {
+            if (!isRecording) return;
+            
+            // 이전 청크 초기화
+            audioChunks = [];
+            
+            // 새 미디어 레코더 생성
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = () => {
+                if (ws.readyState === WebSocket.OPEN && audioChunks.length > 0) {
+                    // 녹음된 데이터를 서버로 전송
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    ws.send(audioBlob);
+                    console.log("3초 녹음 데이터 전송 완료");
+                    
+                    // 녹음 계속하기
+                    if (isRecording) {
+                        startRecordingCycle(stream);
+                    }
+                }
+            };
+            
+            // 녹음 시작
+            mediaRecorder.start();
+            console.log("새 녹음 세션 시작");
+            
+            // 지정된 시간 후에 녹음 중지
+            setTimeout(() => {
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                }
+            }, recordingDuration);
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+            }
+            
+            // 타이머 중지
+            clearInterval(timerInterval);
+
+            document.getElementById("startRecording").style.display = "inline-block";
+            document.getElementById("stopRecording").style.display = "none";
+            document.getElementById("status").textContent = "녹음이 중지되었습니다.";
+        }
+        
+        function updateTimer() {
+            if (isRecording) {
+                document.getElementById("timer").textContent = `녹음 시간: ${timeElapsed}초`;
+                timeElapsed++;
+            }
+        }
+
+        function drawWaveform() {
+            if (!isRecording) return;
+            requestAnimationFrame(drawWaveform);
+            
+            analyser.getByteTimeDomainData(dataArray);
+            canvasCtx.fillStyle = "white";
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = "blue";
+            canvasCtx.beginPath();
+
+            const sliceWidth = canvas.width / dataArray.length;
+            let x = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                const y = (dataArray[i] / 255.0) * canvas.height;
+                i === 0 ? canvasCtx.moveTo(x, y) : canvasCtx.lineTo(x, y);
+                x += sliceWidth;
+            }
+
+            canvasCtx.stroke();
+        }
+
+        document.getElementById("startRecording").addEventListener("click", startRecording);
+        document.getElementById("stopRecording").addEventListener("click", stopRecording);
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(getAudioDevices).catch(err => console.error("오디오 장치 접근 오류:", err));
+    </script>
+</body>
+</html>
