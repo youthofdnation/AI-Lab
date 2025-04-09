@@ -97,6 +97,40 @@ This lab focuses on real-time web communication using WebSocket protocol, FastAP
 
 ---
 
+## 🌟 Advanced Voice + WebSocket Chat System
+
+This is an advanced real-time voice recognition and chat system, integrating FastAPI, WebSocket, and Whisper for voice recognition, and frontend technologies for user-friendly web UI. 🎤🗨️
+
+| Folder / File | Description | Tech Stack |
+|---------------|-------------|------------|
+| `backend.py` | FastAPI server handling WebSocket audio stream and Whisper speech recognition | Python, FastAPI, Whisper |
+| `frontend.html` | Main frontend UI for real-time voice recognition & chat (microphone input, visualization, text-to-speech) | HTML, JavaScript, Web Audio API |
+| `web_socket.html` | Simple WebSocket text chat client | HTML, JavaScript |
+| `web_socket_cli.py` | Command-line WebSocket client for real-time text chat | Python, asyncio, websockets |
+| `install.sh` | Environment setup script (install dependencies) | Bash, pip |
+| `.env` | Environment variables (OpenAI API Key etc.) | - |
+
+**Tech Stack:**  
+Python, FastAPI, WebSocket, Whisper, HTML5, JavaScript, AudioContext API, Web Speech API, asyncio, pydub, soundfile, librosa
+
+**Features:**
+- 🎙️ Real-time speech-to-text from browser microphone
+- 🔁 3-second audio streaming loop to server
+- 💬 FastAPI WebSocket server to process audio and return recognized text
+- 🖥️ Clean web frontend with audio visualizer
+- 🧩 Chat history and typing indicator
+- 🧑‍💻 Command-line WebSocket client support
+- ✅ Easy installation with `install.sh`
+
+> ⚠️ *Note:* Make sure you run the FastAPI server before opening the frontend page.
+
+**Usage**
+1. Run the backend server:
+   ```bash
+   uvicorn backend:app --reload --host 0.0.0.0 --port 8000
+
+---
+
 ## 📦 Real-World Data Automation Projects
 
 | Project | Description | Tech Stack |
