@@ -133,6 +133,28 @@ Python, FastAPI, WebSocket, Whisper, HTML5, JavaScript, AudioContext API, Web Sp
 
 ## 📄 AI Document Assistant Lab
 
+AI가 PDF 문서를 읽고, 그 내용에 기반해 질문에 답변하는 시스템입니다. LangChain, Sentence Transformers, OpenAI API를 활용하여 업로드된 문서 기반 컨텍스트 Q&A 기능을 구현합니다.
+
+| Folder / File | Description | Tech Stack |
+|---------------|-------------|------------|
+| `1. langchain.ipynb` | LangChain 기초 사용법, 체인 및 에이전트 구축 실습 | Python, LangChain, OpenAI API |
+| `2. LCEL.ipynb` | LangChain Expression Language (LCEL) 실습 노트북 | Python, LangChain |
+| `ask_pdf.ipynb` | 업로드된 PDF 문서 기반 AI Q&A 시스템 | Python, LangChain, Sentence Transformers, OpenAI API |
+| `소나기.pdf` | 샘플 문서 (황순원의 단편 소설 '소나기') | PDF |
+
+**Tech Stack:**  
+Python, LangChain, Sentence Transformers, FAISS, OpenAI API, Jupyter Notebook
+
+**Features:**
+- 📄 PDF 업로드 후 전체 텍스트 추출
+- 🧩 문장 임베딩 기반 유사도 검색 (Sentence Transformers 사용)
+- 💬 문서 기반 문맥 질문 응답
+- 🖥️ Jupyter 노트북으로 손쉬운 실습
+
+---
+
+## 📄 AI Document Assistant Lab
+
 This lab showcases an AI assistant that reads PDF documents and answers questions based on their content. It leverages LangChain, Sentence Transformers, and OpenAI API to build a context-aware Q&A system from uploaded documents.
 
 | Folder / File | Description | Tech Stack |
