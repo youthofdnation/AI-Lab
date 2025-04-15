@@ -153,6 +153,24 @@ Python, LangChain, Sentence Transformers, FAISS, OpenAI API, Jupyter Notebook
 
 ---
 
+### 📂 RAG 기반 PDF Q&A Web App 확장
+
+업로드된 PDF로부터 벡터 임베딩을 생성하고, 이를 기반으로 실시간 질의응답이 가능한 웹 애플리케이션을 개발했습니다. Gradio 및 Streamlit을 활용한 두 가지 UI 버전을 제공합니다.
+
+| File | Description | Tech Stack |
+|------|-------------|------------|
+| `ingest.py` | PDF를 로드하고 텍스트 분할 후 FAISS 벡터 저장소 구축 | Python, LangChain, FAISS |
+| `ask_pdf.py` | Gradio 기반 챗봇 UI, 실시간 RAG 질의응답 구현 | Python, Gradio, OpenAI API |
+| `streamlit_rag.py` | Streamlit 기반 챗봇 UI, 세션 기반 대화 기록 관리 | Python, Streamlit, OpenAI API |
+
+**Features:**
+- 📄 PDF 문서 텍스트를 자동 추출 및 분할
+- 🔎 임베딩 기반 유사도 검색을 통한 문맥 추출
+- 💬 GPT-4o-mini 모델 기반 스트리밍 응답
+- 🧑‍💻 Gradio / Streamlit UI 모두 지원
+
+---
+
 ## 📦 Real-World Data Automation Projects
 
 | Project | Description | Tech Stack |
