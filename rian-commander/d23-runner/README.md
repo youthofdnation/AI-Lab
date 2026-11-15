@@ -65,3 +65,19 @@ No D23 full training, 1Q software installation, source deletion or production ch
 - **1Q installation, enrollment and live remote job end-to-end checks remain NOT DONE.** Desktop Commander currently reports 1Q offline; the ChatGPT environment doesn't expose 1Q RIAN Commander tools.
 
 Operator must issue enrollment code only after the user confirms the runner's verified local installation; it expires after ten minutes. Do not include operator credential or signing keys in a chat or shell command.
+
+
+### Separate ChatGPT D23 operator MCP deployed (2026-11-15)
+
+- URL: `https://rian-d23-operator-mcp-production.up.railway.app/mcp`
+- Railway service: `rian-d23-operator-mcp` (separate from fleet's `rian-commander-oauth-gateway`)
+- Scope: `d23:request` (fleet read-only scope `fleet:read` remains unchanged and inaccessible through this service).
+- Tools: `rian_d23_request_audit`, `rian_d23_job_status`, `rian_d23_read_result`.
+- **ChatGPT MCP tools cannot approve, execute arbitrary commands, modify files or start D23 training.** Request returns a browser-only approval URL. Human owner enters the existing owner password on that separate approval page; only then does the broker receive approval for one allowlisted observation.
+- Railway staging applied, deployment SUCCESS. Live test confirms health=200 ready=true, d23 scope metadata=200, anonymous MCP=401, authorized loopback OAuth client registration=201, disallowed callback=400. Temporary live test function deleted.
+- Approval flow and new MCP tools are **not yet tested end-to-end in ChatGPT/Codex**; explicit client registration/login remains.
+- 1Q one-shot D23 Runner is already installed and enrolled and previously completed one approved observation E2E. Automated polling is **not installed**; the operator must explicitly enable the 1Q scheduled task.
+- Auto-poller source: `enable-poller.ps1`. For permitted manual installation, download the file from a pinned GitHub commit into `C:\Users\M\AppData\Local\RIANCommander\D23RestrictedRunner` and run `& ...\enable-poller.ps1 -Enable`. In read-only mode it reports task status without changes; `-Disable` removes it.
+- Latest automated checks on Windows, Linux and Bun: `eba7238426e4aa7d0c72291348c3d62179df35d2` workflow succeeded.
+- Local remote command tools were blocked by Desktop Commander subscription quota; no remote write/task creation was attempted after the quota failure.
+- Separate approval UI requires user interaction. Do not paste owner password or API tokens into the chat or store them in GitHub.
