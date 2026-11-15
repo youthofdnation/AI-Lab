@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         working-directory: rian-commander/d23-runner
         run: |
-          foreach ($path in @('install-local.ps1','enroll-local.ps1','run-once.ps1')) {
+          foreach ($path in @('install-local.ps1','enroll-local.ps1','run-once.ps1','bootstrap-1q.ps1')) {
             $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath $path))
           }
 
