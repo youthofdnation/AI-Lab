@@ -65,6 +65,19 @@ jobs:
           Write-Output 'Windows PowerShell 5.1 pinned bootstrap verification PASS.'
 
 
+      - name: Verify Scheduled Task policy can be built (no registration)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 2)
+          $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -File "runner.ps1" -Run'
+          $identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $principal=New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
+          $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+          if (-not $trigger -or -not $action -or -not $principal -or -not $settings) { throw 'Task Scheduler preflight failed' }
+          Write-Output 'Task Scheduler creation objects PASS; no task registered.'
+
   broker-test:
     runs-on: ubuntu-latest
     steps:
