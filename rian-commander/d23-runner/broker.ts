@@ -18,8 +18,19 @@ export class D23Broker {
   this.db.exec("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL)");
  }
  event(id:string,evt:string,at:number){this.db.query("INSERT INTO events(job_id,event,at) VALUES(?,?,?)").run(id,evt,at)}
+ expire(at=unix()){
+  this.db.transaction(()=>{
+   const stale=this.db.query("SELECT id FROM jobs WHERE (state='PENDING_APPROVAL' AND created_at<?) OR (state='APPROVED' AND approved_at<?) OR (state='LEASED' AND expires_at<?)").all(at-600,at-600,at) as Array<{id:string}>;
+   for(const item of stale){
+    this.db.query("UPDATE jobs SET state='EXPIRED' WHERE id=?").run(item.id);
+    this.event(item.id,"expired",at);
+   }
+  })();
+ }
+
  request(device:string,task:string,at=unix()){
   if(device!==DEVICE||task!==TASK)throw Error("scope_denied");
+  this.expire(at);
   const pending=this.db.query("SELECT count(*) AS n FROM jobs WHERE state IN ('PENDING_APPROVAL','APPROVED','LEASED')").get() as {n:number};
   if(pending.n>=3)throw Error("queue_full");
   const id=nonce();
@@ -34,6 +45,7 @@ export class D23Broker {
   })();return {job_id:id,state:"APPROVED"};
  }
  lease(at=unix()){
+  this.expire(at);
   return this.db.transaction(()=>{
    const job=this.db.query("SELECT id FROM jobs WHERE state='APPROVED' AND approved_at>=? ORDER BY approved_at,id LIMIT 1").get(at-600) as {id:string}|null;
    if(!job)return null;
