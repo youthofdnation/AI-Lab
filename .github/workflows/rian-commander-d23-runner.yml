@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         working-directory: rian-commander/d23-runner
         run: |
-          foreach ($path in @('install-local.ps1','enroll-local.ps1','run-once.ps1','bootstrap-1q.ps1')) {
+          foreach ($path in @('install-local.ps1','enroll-local.ps1','run-once.ps1','bootstrap-1q.ps1','enable-poller.ps1')) {
             $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath $path))
           }
 
@@ -78,3 +78,9 @@ jobs:
       - name: TypeScript compile and syntax
         working-directory: rian-commander/d23-runner
         run: bun build broker-server.ts --target=bun --outfile=/tmp/rian-d23-broker-check.js
+      - name: Build separate operator OAuth MCP gateway
+        working-directory: rian-commander/d23-runner
+        run: bun build operator-gateway.ts --target=bun --outfile=/tmp/rian-d23-operator-check.js
+      - name: Validate D23 operator scope / no automatic approval tool
+        working-directory: rian-commander/d23-runner
+        run: bun test operator-gateway.test.ts
