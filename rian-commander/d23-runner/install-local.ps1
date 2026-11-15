@@ -19,8 +19,14 @@ foreach ($name in $files) {
 }
 $py = Get-Command 'python' -ErrorAction SilentlyContinue
 if (-not $py) { throw 'Python is required before installing.' }
-$tests = & python -m unittest discover -s $source -p 'test_*.py' -v 2>&1
-if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed: installation aborted.' }
+# Python unittest writes even successful verbose results to stderr by default.
+# Windows PowerShell 5.1 can treat stderr as NativeCommandError with Stop.
+# Write test output to stdout and rely on exit code for the pass/fail decision.
+$testCode = "import sys,unittest; suite=unittest.defaultTestLoader.discover(sys.argv[1],pattern='test_*.py'); result=unittest.TextTestRunner(stream=sys.stdout,verbosity=1).run(suite); sys.exit(0 if result.wasSuccessful() else 1)"
+$tests = & python -c $testCode $source
+$testExit = $LASTEXITCODE
+if ($testExit -ne 0) { throw ('Unit tests failed: ' + ($tests -join ' ')) }
+if (($tests -join ' ') -notmatch 'Ran\s+\d+\s+tests?') { throw 'Unit tests produced no valid summary: installation aborted.' }
 $dest = Join-Path $env:LOCALAPPDATA 'RIANCommander\D23RestrictedRunner'
 if (-not $Install) {
     [pscustomobject]@{
