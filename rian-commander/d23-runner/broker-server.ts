@@ -24,6 +24,19 @@ Bun.serve({hostname:"0.0.0.0",port,async fetch(req){
  const url=new URL(req.url),p=url.pathname,m=req.method;
  if(p==="/health"&&m==="GET")return respond({ok:true,service:"rian-d23-restricted-broker",readonly_fleet_unchanged:true});
  try{
+  if(p==="/v1/d23/enrollment/invite"&&m==="POST"){
+   if(!trusted(req,operator))return respond({error:"unauthorized"},401);
+   const x=await json(req);
+   if(Object.keys(x).join(",")!=="device"||x.device!==DEVICE)return respond({error:"scope_denied"},403);
+   return respond(broker.issueEnrollment(x.device),201);
+  }
+  if(p==="/v1/d23/enrollment/claim"&&m==="POST"){
+   const x=await json(req);
+   if(Object.keys(x).sort().join(",")!=="code,device"||x.device!==DEVICE)return respond({error:"enrollment_denied"},403);
+   broker.claimEnrollment(x.device,x.code);
+   return respond({device:DEVICE,registered:true,runner_token:runner,task_key:signing},
+     200);
+  }
   if(p==="/v1/d23/requests"&&m==="POST"){
    if(!trusted(req,operator))return respond({error:"unauthorized"},401);
    const x=await json(req);
