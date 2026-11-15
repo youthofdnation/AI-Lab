@@ -51,6 +51,19 @@ jobs:
             throw 'PowerShell 5.1 installer verification failed'
           }
           Write-Output 'Windows PowerShell 5.1 dry-run PASS; no installation performed.'
+      - name: Verify pinned GitHub bootstrap on Windows PowerShell 5.1 (no installation)
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: rian-commander/d23-runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:COMPUTERNAME = 'DESKTOP-1QGT8D6'
+          $output = & .\bootstrap-1q.ps1
+          if (-not ($output -match 'Files verified; no installation performed')) {
+            throw 'Pinned Bootstrap dry-run did not complete successfully'
+          }
+          Write-Output 'Windows PowerShell 5.1 pinned bootstrap verification PASS.'
+
 
   broker-test:
     runs-on: ubuntu-latest
