@@ -36,6 +36,19 @@ class RunnerSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"payload_fields"):check(x,KEY,TIME)
     def test_bad_nonce(self):
         with self.assertRaisesRegex(ValueError,"nonce_invalid"):check(document(nonce="../a"),KEY,TIME)
+    def test_short_key_rejected(self):
+        with self.assertRaisesRegex(ValueError,"key_missing"):check(document(),b"small",TIME)
+    def test_none_key_rejected(self):
+        with self.assertRaisesRegex(ValueError,"key_missing"):check(document(),None,TIME)
+    def test_zero_duration_rejected(self):
+        with self.assertRaisesRegex(ValueError,"expired"):check(document(issued_at=TIME+1,expires_at=TIME+1),KEY,TIME)
+    def test_invalid_timestamp_type(self):
+        with self.assertRaisesRegex(ValueError,"invalid_times"):check(document(issued_at="not_time"),KEY,TIME)
+    def test_unexpected_top_level_fields(self):
+        d=document();d["argv"]=["cmd.exe"]
+        with self.assertRaisesRegex(ValueError,"manifest_fields"):check(d,KEY,TIME)
+    def test_future_issued_at(self):
+        with self.assertRaisesRegex(ValueError,"expired"):check(document(issued_at=TIME+35,expires_at=TIME+200),KEY,TIME)
 
 if __name__=="__main__":
     unittest.main()
