@@ -27,3 +27,17 @@ jobs:
       - name: Python compile check
         working-directory: rian-commander/d23-runner
         run: python -m py_compile runner.py test_runner.py
+
+  broker-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.8'
+      - name: D23 broker authorization, durability and signature tests
+        working-directory: rian-commander/d23-runner
+        run: bun test broker.test.ts
+      - name: TypeScript compile and syntax
+        working-directory: rian-commander/d23-runner
+        run: bun build broker-server.ts --target=bun --outfile=/tmp/rian-d23-broker-check.js
