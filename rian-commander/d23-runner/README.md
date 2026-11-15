@@ -3,7 +3,7 @@
 ## Purpose
 A scoped extension for DESKTOP-1QGT8D6. It does NOT change the existing Commander fleet's read-only tools or 1Q agent permissions (`can_exec=false`, `can_write=false`).
 
-It is **not yet deployed or installed**. Do not claim remote execution is ready.
+**Deployment status (2026-11-15):** The isolated broker is deployed on Railway with a dedicated 1GB persistent volume, but the 1Q runner is **not installed or enrolled**. No remote execution has occurred. Do not claim 1Q remote execution is ready.
 
 ### Components
 
@@ -30,9 +30,22 @@ bun test broker.test.ts
 bun build broker-server.ts --target=bun --outfile=/tmp/rian-d23-broker-check.js
 ```
 
+### Deployed isolated broker (2026-11-15)
+
+- Service: `rian-d23-restricted-broker` (Railway project `rian-commander`)
+- Public hostname: `rian-d23-restricted-broker-production.up.railway.app`
+- Database: persistent `/data/d23-jobs.sqlite`, separate `rian-d23-broker-data` volume (1 GB)
+- Health endpoint: `GET /health`
+- No task submission or approval is exposed via the existing fleet read-only MCP.
+- **Safe live tests completed:** no-auth and wrong-role requests refused, arbitrary task/device rejected, requests remain unapproved, jobs persisted through a broker redeploy, no runner lease/remote execution occurred.
+- Temporary verification service removed after tests.
+- Staged production credentials live only in Railway variables; DO NOT place them in documentation or chat.
+- 1GB Railway persistent storage and broker compute can add usage charges.
+- The unapproved test job remains in the database until the defined 600-second expiry is checked and processed; it cannot be leased without separate approval.
+
 ### Missing before release
 1. Independent security review; operational lease reconciliation, multi-instance locking, rate limits and operator audit.
-2. Provision a durable broker volume, set secure credentials, deploy isolated broker **without** modifying existing relay.
+2. **Completed on 2026-11-15:** a dedicated Railway broker was deployed with separate operator/approver/runner/signing secrets and 1GB /data volume. HTTP checks passed for anonymous denial (401), wrong-role denial (401), unsafe device/task denial (403), no-job lease (null) and unapproved-job lease (null). SQLite pending job persisted across a broker redeploy.
 3. Explicit local admin installation/enrollment of the 1Q runner and secure task signing key.
 4. Run 1Q mock/observation end-to-end and show status JSON read through the existing fleet MCP.
 5. Add ChatGPT operator/approver workflows under a new narrowly scoped permission. Never elevate `fleet:read` to execution.
