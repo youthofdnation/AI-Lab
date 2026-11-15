@@ -26,7 +26,13 @@ jobs:
         run: python -m unittest discover -v
       - name: Python compile check
         working-directory: rian-commander/d23-runner
-        run: python -m py_compile runner.py test_runner.py
+        run: python -m py_compile runner.py runner_client.py test_runner.py test_runner_client.py
+      - name: Verify PowerShell installer parses without touching system
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: rian-commander/d23-runner
+        run: |
+          $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath 'install-local.ps1'))
 
   broker-test:
     runs-on: ubuntu-latest
