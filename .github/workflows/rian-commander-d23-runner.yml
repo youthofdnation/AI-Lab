@@ -1,0 +1,29 @@
+name: RIAN Commander D23 restricted runner
+on:
+  push:
+    branches: [feature/rian-commander-d23-restricted-runner]
+  pull_request:
+    paths:
+      - 'rian-commander/d23-runner/**'
+      - '.github/workflows/rian-commander-d23-runner.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runner-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit test fixed D23 Runner policy
+        working-directory: rian-commander/d23-runner
+        run: python -m unittest discover -v
+      - name: Python compile check
+        working-directory: rian-commander/d23-runner
+        run: python -m py_compile runner.py test_runner.py
