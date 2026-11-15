@@ -36,3 +36,29 @@ test("durable sqlite state survives restart",()=>{
  const again=new D23Broker(path,KEY);expect((again.inspect(j.job_id) as any).state).toBe("APPROVED");again.close();
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
+
+test("stale approved job is expired, never leased",()=>{
+ const b=broker();
+ const j=b.request(DEVICE,TASK,5000);
+ b.approve(j.job_id,5001);
+ expect(b.lease(5702)).toBeNull();
+ expect((b.inspect(j.job_id) as any).state).toBe("EXPIRED");
+ b.close();
+});
+test("expired lease cannot be reissued or completed",()=>{
+ const b=broker();
+ const j=b.request(DEVICE,TASK,5000);
+ b.approve(j.job_id,5000);
+ const lease=b.lease(5001)!;
+ expect(b.lease(5242)).toBeNull();
+ expect((b.inspect(j.job_id) as any).state).toBe("EXPIRED");
+ expect(()=>b.complete(j.job_id,lease.manifest.payload.nonce,"status-20261115-190000-deadbeef.json",5242)).toThrow("not_completable");
+ b.close();
+});
+test("expired jobs free the capped queue",()=>{
+ const b=broker();
+ for(let i=0;i<3;i++) b.request(DEVICE,TASK,5000);
+ expect(()=>b.request(DEVICE,TASK,5001)).toThrow("queue_full");
+ expect(b.request(DEVICE,TASK,5700).state).toBe("PENDING_APPROVAL");
+ b.close();
+});
