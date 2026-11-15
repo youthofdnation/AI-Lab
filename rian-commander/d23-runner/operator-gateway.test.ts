@@ -28,7 +28,7 @@ test("approval cannot be obtained from an MCP tool call",()=>{
 });
 test("rejects arbitrary device, arbitrary tools, and query arguments",()=>{
   expect(c).toContain('const device="DESKTOP-1QGT8D6"');
-  expect(c).toContain('const task="D23_AUDIT_READONLY_V1"');
+  expect(c).toMatch(/task="D23_AUDIT_READONLY_V1"/);
   expect(c).toContain('function safeArgs(name,a)');
   expect(c).toContain('Object.keys(a).length!==0');
   expect(c).toContain('Object.keys(a).length!==1');
