@@ -1,0 +1,77 @@
+[CmdletBinding()]
+param(
+    [switch]$Install,
+    [switch]$Upgrade
+)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$expected = 'DESKTOP-1QGT8D6'
+if ($env:COMPUTERNAME -ne $expected) {
+    throw 'Refusing installation: this package targets DESKTOP-1QGT8D6 only.'
+}
+$source = Split-Path -Parent $MyInvocation.MyCommand.Path
+$files = @('runner.py','runner_client.py','enroll-local.ps1','run-once.ps1')
+foreach ($name in $files) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source $name) -PathType Leaf)) {
+        throw "Missing runner component: $name"
+    }
+}
+$py = Get-Command 'python' -ErrorAction SilentlyContinue
+if (-not $py) { throw 'Python is required before installing.' }
+# Python unittest writes even successful verbose results to stderr by default.
+# Windows PowerShell 5.1 can treat stderr as NativeCommandError with Stop.
+# Write test output to stdout and rely on exit code for the pass/fail decision.
+$testCode = "import sys,unittest; suite=unittest.defaultTestLoader.discover(sys.argv[1],pattern='test_*.py'); result=unittest.TextTestRunner(stream=sys.stdout,verbosity=1).run(suite); sys.exit(0 if result.wasSuccessful() else 1)"
+$tests = & python -c $testCode $source
+$testExit = $LASTEXITCODE
+if ($testExit -ne 0) { throw ('Unit tests failed: ' + ($tests -join ' ')) }
+if (($tests -join ' ') -notmatch 'Ran\s+\d+\s+tests?') { throw 'Unit tests produced no valid summary: installation aborted.' }
+$dest = Join-Path $env:LOCALAPPDATA 'RIANCommander\D23RestrictedRunner'
+if (-not $Install) {
+    [pscustomobject]@{
+        Device = $expected
+        Mode = 'VerifyOnly'
+        Tests = 'PASS'
+        InstallRequested = $false
+        Destination = $dest
+        Changes = 'None'
+    } | ConvertTo-Json -Compress
+    exit 0
+}
+if ((Test-Path -LiteralPath $dest) -and -not $Upgrade) {
+    throw 'Target exists: explicit -Upgrade required, no files changed.'
+}
+$parent = Split-Path -Parent $dest
+New-Item -ItemType Directory -Path $parent -Force | Out-Null
+$staging = Join-Path $parent ('D23Runner-stage-' + [guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $staging -ErrorAction Stop | Out-Null
+    $inventory = @()
+    foreach ($name in $files) {
+        $from = Join-Path $source $name
+        $to = Join-Path $staging $name
+        Copy-Item -LiteralPath $from -Destination $to -ErrorAction Stop
+        $a = (Get-FileHash -LiteralPath $from -Algorithm SHA256).Hash
+        $b = (Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash
+        if ($a -ne $b) { throw "Hash verification failed: $name" }
+        $inventory += [pscustomobject]@{ File = $name; SHA256 = $a }
+    }
+    $receipt = [pscustomobject]@{
+        Product = 'RIAN Commander Restricted D23 Runner'
+        Device = $expected
+        InstalledUtc = [DateTime]::UtcNow.ToString('o')
+        AutorunEnabled = $false
+        ExistingCommanderModified = $false
+        SecretsStored = $false
+        Files = $inventory
+    }
+    $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $staging 'install-receipt.json') -Encoding UTF8
+    if (Test-Path -LiteralPath $dest) {
+        throw 'Upgrade replacement needs a reviewed procedure; original remains intact.'
+    }
+    Move-Item -LiteralPath $staging -Destination $dest -ErrorAction Stop
+    Write-Output "Installed without service registration: $dest"
+} finally {
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+}
