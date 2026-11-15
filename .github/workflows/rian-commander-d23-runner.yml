@@ -32,7 +32,9 @@ jobs:
         shell: pwsh
         working-directory: rian-commander/d23-runner
         run: |
-          $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath 'install-local.ps1'))
+          foreach ($path in @('install-local.ps1','enroll-local.ps1','run-once.ps1')) {
+            $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath $path))
+          }
 
   broker-test:
     runs-on: ubuntu-latest
