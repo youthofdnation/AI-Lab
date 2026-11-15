@@ -11,7 +11,8 @@ It is **not yet deployed or installed**. Do not claim remote execution is ready.
 - `broker.ts`: SQLite-backed durable jobs; fixed task type, explicit approval, one-time leasing, expiry and completion metadata.
 - `broker-server.ts`: separate broker API protected by *three distinct credentials* (operator, approver, runner). The fleet OAuth `fleet:read` credential cannot submit jobs.
 - `runner_client.py`: explicit one-shot `--once` polling; requires HTTPS, blocks redirects and unknown endpoints, checks signed manifest before observation, then acknowledges completion.
-- `test_*.py`, `broker.test.ts`: Windows/Linux runner tests, Bun job broker tests.
+- `install-local.ps1`: Windows-only, defaults to verification without installing; explicit `-Install` copies verified files to the current 1Q user's application-data directory, with **no background startup** and no credentials.
+- `test_*.py`, `broker.test.ts`: Windows/Linux runner tests, Bun job broker tests, Windows installer syntax check.
 
 ### Safety invariants
 - The only task is `D23_AUDIT_READONLY_V1`. Not a training trigger.
@@ -30,7 +31,7 @@ bun build broker-server.ts --target=bun --outfile=/tmp/rian-d23-broker-check.js
 ```
 
 ### Missing before release
-1. Independent security review; robust expiry/recovery handling, multi-instance locking, rate limits and operator audit.
+1. Independent security review; operational lease reconciliation, multi-instance locking, rate limits and operator audit.
 2. Provision a durable broker volume, set secure credentials, deploy isolated broker **without** modifying existing relay.
 3. Explicit local admin installation/enrollment of the 1Q runner and secure task signing key.
 4. Run 1Q mock/observation end-to-end and show status JSON read through the existing fleet MCP.
