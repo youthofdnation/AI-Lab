@@ -11,7 +11,7 @@ if ($env:COMPUTERNAME -ne $expected) {
     throw 'Refusing installation: this package targets DESKTOP-1QGT8D6 only.'
 }
 $source = Split-Path -Parent $MyInvocation.MyCommand.Path
-$files = @('runner.py','runner_client.py')
+$files = @('runner.py','runner_client.py','enroll-local.ps1','run-once.ps1')
 foreach ($name in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $name) -PathType Leaf)) {
         throw "Missing runner component: $name"
