@@ -3,12 +3,12 @@ param([switch]$Install)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if ($env:COMPUTERNAME -ne 'DESKTOP-1QGT8D6') { throw 'Only DESKTOP-1QGT8D6 is permitted.' }
-$commit='dfaa84dfbd13e5ba75091f7992c19675da4ddfb2'
+$commit='024c9811e8b8c23d6c587b7b8b8ccaaa587b7c4e'
 $base='https://raw.githubusercontent.com/youthofdnation/AI-Lab/' + $commit + '/rian-commander/d23-runner/'
 $sha=@{
   'runner.py'='e579ccee1711c7dc872818a867822cff00a17f4d'
   'runner_client.py'='ac044cb2d785a1af648e6cc8cd5f3e8b9365ab35'
-  'install-local.ps1'='19bd1d8b76b76261f2e4c4f142b43afee44b6f52'
+  'install-local.ps1'='b39155015f28daf9bcca8c197716b08f679838f0'
   'enroll-local.ps1'='28bf12c2fa627536974f27bd120707d8e7d520dc'
   'run-once.ps1'='8c9fcaf36daccd3d16720b4ad8af5a1620ee5d1a'
   'test_runner.py'='1481baa3713985cb4220145b8576936613d71305'
