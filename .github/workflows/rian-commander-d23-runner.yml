@@ -36,6 +36,22 @@ jobs:
             $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath $path))
           }
 
+      - name: Verify actual installer under Windows PowerShell 5.1 (no installation)
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: rian-commander/d23-runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:COMPUTERNAME = 'DESKTOP-1QGT8D6'
+          $output = & .\install-local.ps1
+          if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Install preflight returned nonzero' }
+          $raw = $output | Out-String
+          $result = $raw | ConvertFrom-Json
+          if ($result.Mode -ne 'VerifyOnly' -or $result.Tests -ne 'PASS' -or $result.Changes -ne 'None') {
+            throw 'PowerShell 5.1 installer verification failed'
+          }
+          Write-Output 'Windows PowerShell 5.1 dry-run PASS; no installation performed.'
+
   broker-test:
     runs-on: ubuntu-latest
     steps:
