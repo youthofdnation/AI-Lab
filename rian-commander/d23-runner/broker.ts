@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 export const DEVICE = "DESKTOP-1QGT8D6";
 export const TASK = "D23_AUDIT_READONLY_V1";
@@ -16,8 +16,30 @@ export class D23Broker {
   if(path!==":memory:")this.db.exec("PRAGMA journal_mode=WAL;");
   this.db.exec("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,task TEXT NOT NULL,device TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,approved_at INTEGER,leased_at INTEGER,expires_at INTEGER,job_nonce TEXT UNIQUE,completed_at INTEGER,result_path TEXT)");
   this.db.exec("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL)");
+  this.db.exec("CREATE TABLE IF NOT EXISTS enrollment_invites(code_hash TEXT PRIMARY KEY,device TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,claimed_at INTEGER)");
  }
  event(id:string,evt:string,at:number){this.db.query("INSERT INTO events(job_id,event,at) VALUES(?,?,?)").run(id,evt,at)}
+ issueEnrollment(device:string,at=unix()){
+  if(device!==DEVICE)throw Error("scope_denied");
+  const code=nonce();
+  const digest=createHash("sha256").update(code).digest("hex");
+  this.db.transaction(()=>{
+   this.db.query("UPDATE enrollment_invites SET expires_at=? WHERE device=? AND claimed_at IS NULL AND expires_at>?").run(at-1,device,at);
+   this.db.query("INSERT INTO enrollment_invites(code_hash,device,created_at,expires_at) VALUES(?,?,?,?)").run(digest,device,at,at+600);
+   this.event("enrollment","invite_issued",at);
+  })();
+  return {device,enrollment_code:code,expires_at:at+600};
+ }
+ claimEnrollment(device:string,code:string,at=unix()){
+  if(device!==DEVICE||typeof code!=="string"||!/^[A-Za-z0-9_-]{32}$/.test(code))throw Error("enrollment_denied");
+  const digest=createHash("sha256").update(code).digest("hex");
+  this.db.transaction(()=>{
+   const r=this.db.query("UPDATE enrollment_invites SET claimed_at=? WHERE code_hash=? AND device=? AND claimed_at IS NULL AND expires_at>?").run(at,digest,device,at);
+   if(r.changes!==1)throw Error("enrollment_denied");
+   this.event("enrollment","invite_claimed",at);
+  })();
+  return {device,registered:true};
+ }
  expire(at=unix()){
   this.db.transaction(()=>{
    const stale=this.db.query("SELECT id FROM jobs WHERE (state='PENDING_APPROVAL' AND created_at<?) OR (state='APPROVED' AND approved_at<?) OR (state='LEASED' AND expires_at<?)").all(at-600,at-600,at) as Array<{id:string}>;
