@@ -2,10 +2,10 @@
 import { createHmac,createHash,randomBytes,scryptSync,timingSafeEqual } from "node:crypto";
 const env=Bun.env;
 const origin=(env.RIAN_GATEWAY_PUBLIC_URL||"").replace(/\/+$/,"");
-const resource=origin+"/mcp",secret=env.RIAN_OAUTH_SIGNING_SECRET||"",pw=env.RIAN_OWNER_PASSWORD||"";
+const resource=origin+"/mcp",masterSecret=env.RIAN_OAUTH_SIGNING_SECRET||"",secret=createHmac("sha256",masterSecret).update("rian-d23-operator-v1").digest("base64url"),pw=env.RIAN_OWNER_PASSWORD||"";
 const backend=env.RIAN_D23_BROKER_URL||"",backendKey=env.RIAN_D23_OPERATOR_TOKEN||"",approvalKey=env.RIAN_D23_APPROVER_TOKEN||"";
 const readback=env.RIAN_FLEET_READBACK_URL||"",readbackKey=env.RIAN_FLEET_READBACK_TOKEN||"";
-const authReady=origin.startsWith("https://")&&secret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-d23-restricted-broker-production.up.railway.app"&&backendKey.length>=48&&approvalKey.length>=48&&readback==="https://rian-commander-relay-production.up.railway.app/mcp/gateway-readonly"&&readbackKey.length>=48;
+const authReady=origin.startsWith("https://")&&masterSecret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-d23-restricted-broker-production.up.railway.app"&&backendKey.length>=48&&approvalKey.length>=48&&readback==="https://rian-commander-relay-production.up.railway.app/mcp/gateway-readonly"&&readbackKey.length>=48;
 const pwHash=authReady?scryptSync(pw,createHash("sha256").update("rian-commander-owner-password-v1:"+secret).digest().subarray(0,16),32):null;
 const devices=["DESKTOP-EEMFO3L","DESKTOP-1QGT8D6","DESKTOP-S0UV4D1","Oui-MacStudio.local"];
 const codes=new Map(),refreshSpent=new Map(),loginFailures=new Map();
