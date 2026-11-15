@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:COMPUTERNAME -ne 'DESKTOP-1QGT8D6') { throw 'This enrollment is restricted to DESKTOP-1QGT8D6.' }
 if ([string]::IsNullOrEmpty($EnrollmentCode)) { $EnrollmentCode = Read-Host -Prompt 'Enter one-time D23 registration code' }
-if ($EnrollmentCode -notmatch '^[A-Za-z0-9_-]{32}
+if ($EnrollmentCode -notmatch '^[A-Za-z0-9_-]{32}$') { throw 'Invalid enrollment code.' }
 $url = [Uri]::new($BrokerUrl)
 if ($url.Scheme -ne 'https' -or $url.Host -ne 'rian-d23-restricted-broker-production.up.railway.app' -or $url.AbsolutePath -ne '/' -or $url.Query -or $url.Fragment -or $url.UserInfo) { throw 'Untrusted broker URL.' }
 $installDir=Join-Path $env:LOCALAPPDATA 'RIANCommander\D23RestrictedRunner'
