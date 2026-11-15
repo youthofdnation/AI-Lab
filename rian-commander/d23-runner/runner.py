@@ -17,6 +17,7 @@ def canonical(v):
     return json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
 
 def check(document,key,now=None):
+    if not isinstance(key,bytes) or len(key)<32:raise ValueError("key_missing")
     if not isinstance(document,dict) or set(document)!={"payload","mac"}:raise ValueError("manifest_fields")
     p=document["payload"]
     if not isinstance(p,dict) or set(p)!={"device","task","issued_at","expires_at","nonce"}:raise ValueError("payload_fields")
@@ -24,7 +25,7 @@ def check(document,key,now=None):
     if not isinstance(p["nonce"],str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}",p["nonce"]):raise ValueError("nonce_invalid")
     if not isinstance(p["issued_at"],int) or not isinstance(p["expires_at"],int):raise ValueError("invalid_times")
     t=int(now if now is not None else dt.datetime.now(dt.timezone.utc).timestamp())
-    if p["issued_at"]>t+30 or p["expires_at"]<=t or p["expires_at"]-p["issued_at"]>300:raise ValueError("expired")
+    if p["issued_at"]>t+30 or p["expires_at"]<=t or p["expires_at"]<=p["issued_at"] or p["expires_at"]-p["issued_at"]>300:raise ValueError("expired")
     signature=document["mac"]
     if not isinstance(signature,str) or not re.fullmatch("[a-f0-9]{64}",signature):raise ValueError("mac_invalid")
     if not hmac.compare_digest(hmac.new(key,canonical(p),hashlib.sha256).hexdigest(),signature):raise ValueError("invalid_signature")
@@ -50,11 +51,12 @@ def execute(doc,key,folder=OUT,now=None):
     p=check(doc,key,now)
     if os.name=="nt" and folder.resolve()!=OUT.resolve():raise ValueError("output_root_denied")
     folder.mkdir(parents=True,exist_ok=True)
+    if folder.is_symlink() or (hasattr(folder,"is_junction") and folder.is_junction()):raise ValueError("result_folder_link_denied")
     (folder/(".nonce-"+p["nonce"])).open("x").close()
     result=collect()
     result["request_nonce_hash"]=hashlib.sha256(p["nonce"].encode()).hexdigest()[:16]
     stamp=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    target=folder/("status-"+stamp+".json")
+    target=folder/("status-"+stamp+"-"+hashlib.sha256(p["nonce"].encode()).hexdigest()[:8]+".json")
     with target.open("x",encoding="utf-8") as f:json.dump(result,f,ensure_ascii=False,indent=2)
     return target
 
