@@ -62,3 +62,46 @@ test("expired jobs free the capped queue",()=>{
  expect(b.request(DEVICE,TASK,5700).state).toBe("PENDING_APPROVAL");
  b.close();
 });
+
+test("one-time 1Q enrollment challenge denies replay",()=>{
+ const b=broker();const invite=b.issueEnrollment(DEVICE,5000);
+ expect(invite.device).toBe(DEVICE);
+ expect(invite.enrollment_code).toMatch(/^[A-Za-z0-9_-]{32}$/);
+ expect(invite.expires_at).toBe(5600);
+ expect(b.claimEnrollment(DEVICE,invite.enrollment_code,5001).registered).toBe(true);
+ expect(()=>b.claimEnrollment(DEVICE,invite.enrollment_code,5002)).toThrow("enrollment_denied");
+ b.close();
+});
+test("1Q enrollment cannot be claimed by wrong device or modified code",()=>{
+ const b=broker();const invite=b.issueEnrollment(DEVICE,5000);
+ expect(()=>b.claimEnrollment("OTHER",invite.enrollment_code,5001)).toThrow("enrollment_denied");
+ expect(()=>b.claimEnrollment(DEVICE,invite.enrollment_code.slice(0,-2)+"xx",5001)).toThrow("enrollment_denied");
+ expect(b.claimEnrollment(DEVICE,invite.enrollment_code,5002).registered).toBe(true);
+ b.close();
+});
+test("expired enrollment cannot be redeemed",()=>{
+ const b=broker();const invite=b.issueEnrollment(DEVICE,5000);
+ expect(()=>b.claimEnrollment(DEVICE,invite.enrollment_code,5600)).toThrow("enrollment_denied");
+ b.close();
+});
+test("new enrollment invitation invalidates prior invitation",()=>{
+ const b=broker();const first=b.issueEnrollment(DEVICE,5000);
+ const newer=b.issueEnrollment(DEVICE,5001);
+ expect(()=>b.claimEnrollment(DEVICE,first.enrollment_code,5002)).toThrow("enrollment_denied");
+ expect(b.claimEnrollment(DEVICE,newer.enrollment_code,5002).registered).toBe(true);
+ b.close();
+});
+test("enrollment invitation persists in SQLite and only digest stored",()=>{
+ const dir=mkdtempSync(join(tmpdir(),"rian-d23-enroll-"));const path=join(dir,"jobs.db");
+ try {
+  const b=new D23Broker(path,KEY);
+  const first=b.issueEnrollment(DEVICE,5000);
+  const row=b.db.query("SELECT code_hash,device FROM enrollment_invites").get() as {code_hash:string,device:string};
+  expect(row.code_hash).not.toContain(first.enrollment_code);
+  expect(row.code_hash).toMatch(/^[a-f0-9]{64}$/);
+  b.close();
+  const reopened=new D23Broker(path,KEY);
+  expect(reopened.claimEnrollment(DEVICE,first.enrollment_code,5001).registered).toBe(true);
+  reopened.close();
+ } finally {rmSync(dir,{recursive:true,force:true})}
+});
