@@ -51,3 +51,17 @@ bun build broker-server.ts --target=bun --outfile=/tmp/rian-d23-broker-check.js
 5. Add ChatGPT operator/approver workflows under a new narrowly scoped permission. Never elevate `fleet:read` to execution.
 
 No D23 full training, 1Q software installation, source deletion or production changes occur merely from these files.
+
+
+### 2026-11-15 one-time enrollment development
+
+- Deployed a new **1Q-only** invitation API to the isolated Railway D23 broker without changing the existing read-only MCP.
+- `POST /v1/d23/enrollment/invite` requires the operator credential and a matching device, then creates one 10-minute invitation. Do not log invitation codes.
+- `POST /v1/d23/enrollment/claim` verifies and consumes the invitation once, delivering runner credentials only over HTTPS. This is a device onboarding prototype; production should additionally use device attestation, throttling and credential rotation.
+- `enroll-local.ps1` prompts for the code locally on 1Q and stores credentials under the current Windows user's DPAPI protection (no secrets printed).
+- `run-once.ps1` defaults to verification; an explicit `-Run` enables one allowlisted observation cycle after a separate task approval.
+- `bootstrap-1q.ps1` downloads pinned GitHub files and validates Git blob hashes; defaults to **verification only**, and `-Install` performs a local installation without enrollment, scheduling, training or changing the existing Commander agent.
+- GitHub Actions on Windows/Linux and Bun completed successfully on commit `3b35253b70b5`.
+- **1Q installation, enrollment and live remote job end-to-end checks remain NOT DONE.** Desktop Commander currently reports 1Q offline; the ChatGPT environment doesn't expose 1Q RIAN Commander tools.
+
+Operator must issue enrollment code only after the user confirms the runner's verified local installation; it expires after ten minutes. Do not include operator credential or signing keys in a chat or shell command.
