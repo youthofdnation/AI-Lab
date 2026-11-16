@@ -74,3 +74,13 @@ test("browser approval form uses same-origin referrer policy; OAuth keeps no-ref
  expect(gateway).toContain('"referrer-policy":referrerPolicy');
  expect(gateway).toContain('"referrer-policy":"no-referrer"');
 });
+
+test("central queue rejects writes and commands unless EEMF has verified owner approval",()=>{
+ expect(relay).toContain('function queue(n,act,args,ownerApproved=false)');
+ expect(relay).toContain('if(act==="write_file"||act==="run_command"){if(n!=="DESKTOP-EEMFO3L"||ownerApproved!==true)');
+ expect(relay).toContain('const j=queue(args.device,m[name],Object.fromEntries(Object.entries(args).filter(([k])=>k!=="device")),ownerApproved);');
+ expect(relay).toContain('j=queue(x.device,x.action,x.arguments||{});');
+ expect(relay).toContain('if((name==="rian_write_file"||name==="rian_run_command")&&(args?.device!=="DESKTOP-EEMFO3L"||!ownerApproved))');
+ expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
+ expect(relay).toContain('const raw=await runTool(eemfNames[name],{device:EEMF_DEVICE,...args},isSensitive);');
+});
