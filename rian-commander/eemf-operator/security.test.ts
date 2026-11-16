@@ -53,7 +53,6 @@ test("local PC opt-in must be explicit and has rollback",()=>{
 });
 
 test("EEMF admin route cannot bypass owner proof",()=>{
- expect(relay).toContain('&& !ownerApproved')===false; // guard uses minified condition with no space
  expect(relay).toContain('&&!ownerApproved)throw Error("EEMFO3L execution requires signed owner approval")');
  expect(relay).toContain('function checkEEMFApproval(req,name,args)');
  expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
