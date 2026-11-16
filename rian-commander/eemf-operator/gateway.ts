@@ -3,8 +3,8 @@ import { createHmac,createHash,randomBytes,scryptSync,timingSafeEqual } from "no
 const env=Bun.env;
 const origin=(env.RIAN_GATEWAY_PUBLIC_URL||"").replace(/\/+$/,"");
 const resource=origin+"/mcp",masterSecret=env.RIAN_OAUTH_SIGNING_SECRET||"",secret=createHmac("sha256",masterSecret).update("rian-eemf-owner-operator-v1").digest("base64url"),pw=env.RIAN_OWNER_PASSWORD||"";
-const backend=env.RIAN_EEMF_BACKEND_URL||"",backendKey=env.RIAN_EEMF_ADMIN_TOKEN||"";
-const authReady=origin.startsWith("https://")&&masterSecret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-commander-relay-production.up.railway.app/mcp"&&backendKey.length>=40;
+const backend=env.RIAN_EEMF_BACKEND_URL||"",backendKey=env.RIAN_EEMF_GATEWAY_TOKEN||"";
+const authReady=origin.startsWith("https://")&&masterSecret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-commander-relay-production.up.railway.app/mcp/eemf-owner"&&backendKey.length>=48;
 const pwHash=authReady?scryptSync(pw,createHash("sha256").update("rian-commander-owner-password-v1:"+secret).digest().subarray(0,16),32):null;
 const devices=["DESKTOP-EEMFO3L","DESKTOP-1QGT8D6","DESKTOP-S0UV4D1","Oui-MacStudio.local"];
 const codes=new Map(),refreshSpent=new Map(),loginFailures=new Map();
@@ -86,7 +86,7 @@ function safeArgs(name,args){
  throw Error("Unknown tool");
 }
 async function relay(name,args){
- const r=await fetch(backend,{method:"POST",redirect:"error",headers:{authorization:"Bearer "+backendKey,"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:{device,...args}}}),signal:AbortSignal.timeout(42000)});
+ const r=await fetch(backend,{method:"POST",redirect:"error",headers:{authorization:"Bearer "+backendKey,"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}),signal:AbortSignal.timeout(42000)});
  if(!r.ok)throw Error("Relay HTTP "+r.status);
  const v=await r.json();if(v.error||v.result?.isError)throw Error("Relay denied");
  let parsed;
@@ -95,7 +95,7 @@ async function relay(name,args){
 }
 async function sendBackend(name,args){
  if(name==="rian_eemf_status"||name==="rian_eemf_list_directory"||name==="rian_eemf_read_file"){
-  const target={rian_eemf_status:"rian_status",rian_eemf_list_directory:"rian_list_directory",rian_eemf_read_file:"rian_read_file"}[name];
+  const target=name;
   const val=await relay(target,args);
   if(JSON.stringify(val).length>100000)throw Error("Result too large");
   return {content:[{type:"text",text:JSON.stringify(val)}]};
@@ -108,9 +108,9 @@ async function sendBackend(name,args){
  const actionId=rand(32);
  if(actionQueue.size>80){for(const [id,x] of actionQueue){if(x.exp<now()||x.status==="COMPLETE")actionQueue.delete(id)}}
  if(actionQueue.size>80)throw Error("Action queue full");
- const operation=name==="rian_eemf_request_command"?"rian_run_command":"rian_write_file";
+ const operation=name==="rian_eemf_request_command"?"rian_eemf_run_command":"rian_eemf_write_file";
  actionQueue.set(actionId,{operation,args,status:"PENDING_APPROVAL",exp:now()+300});
- return {content:[{type:"text",text:JSON.stringify({action_id:actionId,device,status:"PENDING_APPROVAL",preview:operation==="rian_run_command"?{argv:args.argv,cwd:args.cwd||null,timeout:args.timeout}:{path:args.path,overwrite:args.overwrite,contentLength:args.content.length},approval_url:origin+"/approve/"+actionId,expires_in_seconds:300,note:"No command or write was executed. Open the separate approval URL, review the exact action, and confirm with owner password."})}]};
+ return {content:[{type:"text",text:JSON.stringify({action_id:actionId,device,status:"PENDING_APPROVAL",preview:operation==="rian_eemf_run_command"?{argv:args.argv,cwd:args.cwd||null,timeout:args.timeout}:{path:args.path,overwrite:args.overwrite,contentLength:args.content.length},approval_url:origin+"/approve/"+actionId,expires_in_seconds:300,note:"No command or write was executed. Open the separate approval URL, review the exact action, and confirm with owner password."})}]};
 }
 function loginPage(ticketData,msg=""){return html('<h1>RIAN Commander — EEMFO3L 운영 연결</h1><p>이 서버는 EEMFO3L 파일 조회를 제공하고, 명령 실행과 파일 수정은 건별로 별도 브라우저 승인을 요구합니다. 다른 PC 실행 권한은 제공하지 않습니다.</p>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/oauth/approve"><input type="hidden" name="request" value="'+escape(ticketData)+'"><label for="password">소유자 암호</label><input name="password" id="password" type="password" minlength="20" autocomplete="current-password" required><button type="submit">EEMF 운영 연결 승인</button></form>')}
 function passwordOK(provided){
@@ -119,7 +119,7 @@ function passwordOK(provided){
  return timingSafeEqual(hash,pwHash);
 }
 function actionPage(id,item,msg=""){
- const description=item.operation==="rian_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
+ const description=item.operation==="rian_eemf_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
  const approval=ticket({type:"eemf-action-approval",id,exp:now()+240,nonce:rand(16)});
  return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>작업 내용을 반드시 검토하세요. 실행 또는 파일 변경은 승인 후에만 수행됩니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(approval)+'"><label for="password">소유자 암호</label><input name="password" type="password" minlength="20" required><button type="submit">표시된 작업 1회 승인 및 실행</button></form>')
 }
