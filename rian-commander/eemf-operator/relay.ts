@@ -1,5 +1,5 @@
 
-import {timingSafeEqual,randomUUID} from "node:crypto";
+import {timingSafeEqual,randomUUID,createHmac,createHash} from "node:crypto";
 const ADMIN=Bun.env.RIAN_ADMIN_TOKEN||"";
 const KEYS=JSON.parse(Bun.env.RIAN_DEVICE_KEYS_JSON||"{}");
 const CONFIGURED=ADMIN.length>=40&&Object.keys(KEYS).length>0&&!Object.values(KEYS).some(x=>typeof x!=="string"||x.length<40);
@@ -22,7 +22,7 @@ function tools(){return [
 {name:"rian_read_file",description:"Read UTF-8 file within permitted root",inputSchema:{type:"object",properties:{device:dev,path:{type:"string"}},required:["device","path"]}},
 {name:"rian_write_file",description:"Write text file if enabled",inputSchema:{type:"object",properties:{device:dev,path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["device","path","content"]}},
 {name:"rian_run_command",description:"Execute program without shell if enabled",inputSchema:{type:"object",properties:{device:dev,argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["device","argv"]}}]}
-async function runTool(name,args){if(name==="rian_devices")return{devices:listing()};const m={rian_status:"status",rian_list_directory:"list_directory",rian_read_file:"read_file",rian_write_file:"write_file",rian_run_command:"run_command"};if(!m[name])throw Error("Invalid tool");if(!online(args.device))throw Error("Device offline: "+args.device);const j=queue(args.device,m[name],Object.fromEntries(Object.entries(args).filter(([k])=>k!=="device")));for(let i=0;i<112;i++){if(j.state==="done")return j.result;if(j.state==="expired")throw Error("Job expired");await new Promise(r=>setTimeout(r,250))}throw Error("Job pending "+j.id)}
+async function runTool(name,args,ownerApproved=false){if(name==="rian_devices")return{devices:listing()};if(args?.device==="DESKTOP-EEMFO3L"&&(name==="rian_write_file"||name==="rian_run_command")&&!ownerApproved)throw Error("EEMFO3L execution requires signed owner approval");const m={rian_status:"status",rian_list_directory:"list_directory",rian_read_file:"read_file",rian_write_file:"write_file",rian_run_command:"run_command"};if(!m[name])throw Error("Invalid tool");if(!online(args.device))throw Error("Device offline: "+args.device);const j=queue(args.device,m[name],Object.fromEntries(Object.entries(args).filter(([k])=>k!=="device")));for(let i=0;i<112;i++){if(j.state==="done")return j.result;if(j.state==="expired")throw Error("Job expired");await new Promise(r=>setTimeout(r,250))}throw Error("Job pending "+j.id)}
 async function mcp(r){if(!isAdmin(r))return error("Unauthorized",401);const x=await body(r);const id=x.id;if(x.method==="notifications/initialized")return new Response(null,{status:202});let result;if(x.method==="initialize")result={protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"rian-commander",version:"0.2.0"}};else if(x.method==="tools/list")result={tools:tools()};else if(x.method==="ping")result={};else if(x.method==="tools/call"){try{result={content:[{type:"text",text:JSON.stringify(await runTool(x.params?.name,x.params?.arguments||{}))}]}}catch(e){result={content:[{type:"text",text:String(e.message)}],isError:true}}}else return reply({jsonrpc:"2.0",id:id??null,error:{code:-32601,message:"Unknown method"}});return id===undefined?new Response(null,{status:202}):reply({jsonrpc:"2.0",id,result})}
 
 
@@ -167,6 +167,24 @@ async function mcpRead1Q(r){
    Existing four-PC read-only tools are unchanged. */
 const EEMF_DEVICE="DESKTOP-EEMFO3L";
 const EEMF_TOKEN=Bun.env.RIAN_EEMF_GATEWAY_TOKEN||"";
+const EEMF_APPROVAL_SECRET=Bun.env.RIAN_EEMF_APPROVAL_SECRET||"";
+const eemfApprovalUsed=new Map();
+function checkEEMFApproval(req,name,args){
+ const proof=req.headers.get("x-rian-eemf-approved")||"";
+ if(EEMF_APPROVAL_SECRET.length<48||proof.length>2000)return false;
+ const parts=proof.split(".");
+ if(parts.length!==2||!/^[A-Za-z0-9_-]+$/.test(parts[0])||!/^[a-f0-9]{64}$/.test(parts[1]))return false;
+ const expected=createHmac("sha256",EEMF_APPROVAL_SECRET).update(parts[0]).digest("hex");
+ if(!equal(expected,parts[1]))return false;
+ let claim;try{claim=JSON.parse(Buffer.from(parts[0],"base64url").toString("utf8"))}catch{return false}
+ const now=Math.floor(Date.now()/1000);
+ if(!claim||claim.name!==name||!Number.isInteger(claim.exp)||claim.exp<now||claim.exp>now+65||typeof claim.nonce!=="string"||!/^[a-f0-9]{32}$/.test(claim.nonce)||claim.sha256!==createHash("sha256").update(JSON.stringify(args)).digest("hex"))return false;
+ for(const [key,value] of eemfApprovalUsed){if(value<=now)eemfApprovalUsed.delete(key)}
+ if(eemfApprovalUsed.has(claim.nonce))return false;
+ eemfApprovalUsed.set(claim.nonce,claim.exp);
+ return true;
+}
+
 function isEEMFGateway(req){
  return EEMF_TOKEN.length>=48&&equal(req.headers.get("Authorization"),"Bearer "+EEMF_TOKEN);
 }
@@ -220,7 +238,9 @@ async function mcpEEMFOwner(req){
   try{
    const name=x.params?.name;
    const args=eemfArgs(name,x.params?.arguments||{});
-   const raw=await runTool(eemfNames[name],{device:EEMF_DEVICE,...args});
+   const isSensitive=(name==="rian_eemf_run_command"||name==="rian_eemf_write_file");
+   if(isSensitive&&!checkEEMFApproval(req,name,args))throw Error("Owner approval proof required");
+   const raw=await runTool(eemfNames[name],{device:EEMF_DEVICE,...args},isSensitive);
    result={content:[{type:"text",text:JSON.stringify(raw)}]};
   }catch(e){result={isError:true,content:[{type:"text",text:String(e.message).slice(0,250)}]}}
  }else return reply({jsonrpc:"2.0",id:id??null,error:{code:-32601,message:"Unknown method"}});
