@@ -91,6 +91,7 @@ async function relay(name,args){
  const v=await r.json();if(v.error||v.result?.isError)throw Error("Relay denied");
  let parsed;
  try{parsed=JSON.parse(v.result?.content?.[0]?.text||"{}")}catch{throw Error("Invalid relay result")}
+ if(parsed.ok!==true)throw Error("EEMFO3L agent rejected the operation");
  return parsed;
 }
 async function sendBackend(name,args){
