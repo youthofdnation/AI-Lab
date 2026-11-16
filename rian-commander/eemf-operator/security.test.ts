@@ -1,0 +1,53 @@
+import {test, expect} from "bun:test";
+import {readFileSync} from "node:fs";
+const read=(file:string)=>readFileSync(new URL(file,import.meta.url),"utf8");
+const relay=read("./relay.ts"),gateway=read("./gateway.ts"),optin=read("./enable-eemf-owner.ps1");
+
+test("EEMF relay requires separate credential and cannot be used as global admin",()=>{
+ expect(relay).toContain('const EEMF_DEVICE="DESKTOP-EEMFO3L"');
+ expect(relay).toContain('RIAN_EEMF_GATEWAY_TOKEN');
+ expect(relay).toContain('EEMF_TOKEN.length>=48');
+ expect(relay).toContain('if(!isEEMFGateway(req))return error("Unauthorized",401)');
+ expect(relay).toContain('if(Object.hasOwn(raw,"device"))throw Error("Device override denied")');
+ expect(relay).toContain('if(p==="/mcp/eemf-owner"&&method==="POST")');
+});
+test("legacy fleet read-only endpoints remain identical and exposed",()=>{
+ for(const x of ['/mcp/gateway-readonly','/mcp/fleet-readonly','/mcp/readonly-1q'])
+  expect(relay).toContain(x);
+ expect(relay).toContain('if(p==="/mcp/gateway-readonly"&&method==="POST")return await mcpFleetGateway(r)');
+});
+test("EEMF request commands require browser-only explicit approval",()=>{
+ for(const x of ["rian_eemf_request_command","rian_eemf_request_write","rian_eemf_action_status","rian_eemf_read_file"])
+   expect(gateway).toContain('name:"'+x+'"');
+ expect(gateway).toContain('item.status="RUNNING"');
+ expect(gateway).toContain('passwordOK(f.get("password")');
+ expect(gateway).toContain('if(!item||item.exp<now()||item.status!=="PENDING_APPROVAL")');
+ expect(gateway).toContain('manual_approval_required:true');
+ expect(gateway).not.toContain('name:"rian_run_command"');
+});
+test("separate OAuth scope and no root/admin broad relay token",()=>{
+ expect(gateway).toContain('role:"eemf-owner"');
+ expect(gateway).toContain('scope:"eemf:operate"');
+ expect(gateway).toContain('rian-eemf-owner-operator-v1');
+ expect(gateway).toContain('RIAN_EEMF_GATEWAY_TOKEN');
+ expect(gateway).not.toContain('RIAN_EEMF_ADMIN_TOKEN');
+ expect(gateway).not.toContain('RIAN_ADMIN_TOKEN');
+ expect(gateway).not.toContain('fleet:read');
+});
+test("relay and gateway restrict relative paths and sensitive files",()=>{
+ expect(relay).toContain('function eemfRelativePath');
+ expect(relay).toContain('Path outside home');
+ expect(relay).toContain('Sensitive EEMF path');
+ expect(gateway).toContain('function safePath');
+ expect(gateway).toContain('Sensitive path denied');
+ expect(gateway).toContain('parsed.ok!==true');
+});
+test("local PC opt-in must be explicit and has rollback",()=>{
+ expect(optin).toContain("param([switch]$Enable,[switch]$Disable");
+ expect(optin).toContain("if($env:COMPUTERNAME -ine 'DESKTOP-EEMFO3L')");
+ expect(optin).toContain('if(-not $Enable -and -not $Disable)');
+ expect(optin).toContain('$settings.can_exec=$target');
+ expect(optin).toContain('$settings.can_write=$target');
+ expect(optin).toContain("Set-Acl -LiteralPath $config");
+ expect(optin).toContain("mode=if($Enable){'OwnerOptIn'}else{'OwnerReverted'}");
+});
