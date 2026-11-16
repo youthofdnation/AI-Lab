@@ -39,3 +39,18 @@ The original `rian-commander-oauth-gateway` remains a four-PC, read-only fleet M
 5. Only then run the existing local Proton query script after confirming its usage and data freshness. Live Proton availability is not implied by the existence of local export files.
 
 No access tokens, owner password, Proton content, or private key material belongs in GitHub, chat, or test logs.
+
+
+## Additional security hardening (2026-11-16)
+
+Relay and EEMFO3L OAuth gateway now require a **second, short-lived HMAC approval proof** for any write or command, bound to the exact operation, arguments, nonce and expiration. The original relay admin MCP code path rejects EEMFO3L writes and command execution without an internal verified approval flag; it cannot silently bypass the browser approval page. The gateway creates that proof only after the owner signs into its independent per-action approval page. Replay nonces are cached temporarily on the relay.
+
+Both services were deployed via the existing Railway project and returned SUCCESS; Windows and Bun checks passed. A subsequent attempt to invoke privileged negative tests via an automated Railway test harness was blocked by the execution tool's safety checks. Therefore **live post-hardening command denial is not yet demonstrated**, and EEMFO3L local command/write opt-in must be treated as pending explicit owner action and a final E2E check.
+
+Current local EEMFO3L agent status: `can_exec=false`, `can_write=false`; read-only status and Documents/RIAN-Proton-Tools directory listing verified. Other PCs' permissions are unchanged.
+
+## Operator next step
+
+On DESKTOP-EEMFO3L, review the pinned `enable-eemf-owner.ps1` source and run it without arguments to see permission status. Run `-Enable` locally only after agreeing to per-action remote command/file approvals. `-Disable` reverts the device flags.
+
+To use in a regular ChatGPT web conversation, the user must separately create and authorize a custom MCP plugin/app with the endpoint `https://rian-eemf-owner-gateway-production.up.railway.app/mcp` if account/workspace policies provide that option. A Codex-only MCP connection does not make the tool appear in another ChatGPT chat. Official support for full MCP write actions may depend on Business/Enterprise/Edu entitlements.
