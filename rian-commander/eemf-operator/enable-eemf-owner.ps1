@@ -5,9 +5,9 @@ Set-StrictMode -Version Latest
 
 if($env:COMPUTERNAME -ine 'DESKTOP-EEMFO3L'){throw 'Only DESKTOP-EEMFO3L may enable its operating permissions.'}
 if($Enable -and $Disable){throw 'Choose one operation.'}
-$home=Join-Path $env:LOCALAPPDATA 'RIANCommander'
-$config=Join-Path $home 'config.json'
-$agent=Join-Path $home 'agent.ps1'
+$agentDir=Join-Path $env:LOCALAPPDATA 'RIANCommander'
+$config=Join-Path $agentDir 'config.json'
+$agent=Join-Path $agentDir 'agent.ps1'
 if(!(Test-Path -LiteralPath $config -PathType Leaf) -or !(Test-Path -LiteralPath $agent -PathType Leaf)){throw 'Existing RIAN Commander agent is not installed.'}
 $settings=Get-Content -LiteralPath $config -Raw -Encoding UTF8 | ConvertFrom-Json
 if($settings.device -ne 'DESKTOP-EEMFO3L' -or $settings.server -ne 'https://rian-commander-relay-production.up.railway.app'){throw 'Wrong device or server.'}
@@ -24,7 +24,7 @@ $settings.can_exec=$target
 $settings.can_write=$target
 # Save ACL-identical replacement to avoid weakening the device-token protection.
 $oldAcl=Get-Acl -LiteralPath $config
-$tmp=Join-Path $home ('config-'+[guid]::NewGuid().ToString('N')+'.tmp')
+$tmp=Join-Path $agentDir ('config-'+[guid]::NewGuid().ToString('N')+'.tmp')
 try{
  $json=$settings | ConvertTo-Json -Depth 5
  [System.IO.File]::WriteAllText($tmp,$json,(New-Object System.Text.UTF8Encoding($false)))
