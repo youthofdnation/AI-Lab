@@ -36,7 +36,7 @@ test("separate OAuth scope and no root/admin broad relay token",()=>{
 });
 test("relay and gateway restrict relative paths and sensitive files",()=>{
  expect(relay).toContain('function eemfRelativePath');
- expect(relay).toContain('Path outside home');
+ expect(relay).toContain('EEMF path outside home');
  expect(relay).toContain('Sensitive EEMF path');
  expect(gateway).toContain('function safePath');
  expect(gateway).toContain('Sensitive path denied');
