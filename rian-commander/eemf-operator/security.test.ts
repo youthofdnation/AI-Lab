@@ -66,3 +66,11 @@ test("gateway issues signed proof only in browser-approved command path",()=>{
  expect(gateway).toContain('passwordOK(f.get("password")');
  expect(gateway).toContain('execProofKey.length>=48');
 });
+
+test("browser approval form uses same-origin referrer policy; OAuth keeps no-referrer",()=>{
+ expect(gateway).toContain('function html(body,status=200,referrerPolicy="no-referrer")');
+ expect(gateway).toContain('200,"same-origin")');
+ expect(gateway).toContain('if(originHeader&&originHeader!==origin)');
+ expect(gateway).toContain('"referrer-policy":referrerPolicy');
+ expect(gateway).toContain('"referrer-policy":"no-referrer"');
+});
