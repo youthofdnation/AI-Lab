@@ -45,10 +45,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $scriptText = Get-Content -LiteralPath 'enable-eemf-owner.ps1' -Raw
-          $tokens = $null; $errors = $null
+          $tokens = $null
+          $errors = $null
           $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptText,[ref]$tokens,[ref]$errors)
           if ($errors.Count -ne 0) { throw 'Script parsing failure' }
-          $bad = @($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -match '^\$HOME
-}, $true))
-          if($bad.Count -gt 0) {throw 'PowerShell automatic HOME variable cannot be assigned'}
+          $assignments = @($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst]}, $true))
+          $blocked = @($assignments | Where-Object { $_.Left.Extent.Text.ToLowerInvariant() -eq ('$' + 'home') })
+          if ($blocked.Count -gt 0) { throw 'PowerShell automatic HOME variable cannot be assigned' }
           Write-Output 'PowerShell reserved HOME variable check PASS.'
