@@ -3,8 +3,8 @@ import { createHmac,createHash,randomBytes,scryptSync,timingSafeEqual } from "no
 const env=Bun.env;
 const origin=(env.RIAN_GATEWAY_PUBLIC_URL||"").replace(/\/+$/,"");
 const resource=origin+"/mcp",masterSecret=env.RIAN_OAUTH_SIGNING_SECRET||"",secret=createHmac("sha256",masterSecret).update("rian-eemf-owner-operator-v1").digest("base64url"),pw=env.RIAN_OWNER_PASSWORD||"";
-const backend=env.RIAN_EEMF_BACKEND_URL||"",backendKey=env.RIAN_EEMF_GATEWAY_TOKEN||"";
-const authReady=origin.startsWith("https://")&&masterSecret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-commander-relay-production.up.railway.app/mcp/eemf-owner"&&backendKey.length>=48;
+const backend=env.RIAN_EEMF_BACKEND_URL||"",backendKey=env.RIAN_EEMF_GATEWAY_TOKEN||"",execProofKey=env.RIAN_EEMF_APPROVAL_SECRET||"";
+const authReady=origin.startsWith("https://")&&masterSecret.length>=43&&pw.length>=20,bridgeReady=backend==="https://rian-commander-relay-production.up.railway.app/mcp/eemf-owner"&&backendKey.length>=48&&execProofKey.length>=48;
 const pwHash=authReady?scryptSync(pw,createHash("sha256").update("rian-commander-owner-password-v1:"+secret).digest().subarray(0,16),32):null;
 const devices=["DESKTOP-EEMFO3L","DESKTOP-1QGT8D6","DESKTOP-S0UV4D1","Oui-MacStudio.local"];
 const codes=new Map(),refreshSpent=new Map(),loginFailures=new Map();
@@ -85,8 +85,15 @@ function safeArgs(name,args){
  }
  throw Error("Unknown tool");
 }
-async function relay(name,args){
- const r=await fetch(backend,{method:"POST",redirect:"error",headers:{authorization:"Bearer "+backendKey,"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}),signal:AbortSignal.timeout(42000)});
+async function relay(name,args,ownerApproved=false){
+ const headers={"authorization":"Bearer "+backendKey,"content-type":"application/json"};
+ if(ownerApproved){
+  if(name!=="rian_eemf_run_command"&&name!=="rian_eemf_write_file")throw Error("Invalid privileged action");
+  const claim={name,exp:now()+45,nonce:randomBytes(16).toString("hex"),sha256:createHash("sha256").update(JSON.stringify(args)).digest("hex")};
+  const packed=Buffer.from(JSON.stringify(claim)).toString("base64url");
+  headers["x-rian-eemf-approved"]=packed+"."+createHmac("sha256",execProofKey).update(packed).digest("hex");
+ }
+ const r=await fetch(backend,{method:"POST",redirect:"error",headers,body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}),signal:AbortSignal.timeout(42000)});
  if(!r.ok)throw Error("Relay HTTP "+r.status);
  const v=await r.json();if(v.error||v.result?.isError)throw Error("Relay denied");
  let parsed;
@@ -155,7 +162,7 @@ Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||3000),async fetch(req){
   loginFailures.delete(key);
   item.status="RUNNING";
   try{
-   const r=await relay(item.operation,item.args);
+   const r=await relay(item.operation,item.args,true);
    item.status="COMPLETE";item.done=now();
    item.summary=JSON.stringify(r).slice(0,30000);
    return html('<h1>작업 완료</h1><p>ChatGPT에서 작업 ID로 결과를 확인할 수 있습니다.</p>');
