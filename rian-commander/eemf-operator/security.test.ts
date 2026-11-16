@@ -51,3 +51,19 @@ test("local PC opt-in must be explicit and has rollback",()=>{
  expect(optin).toContain("Set-Acl -LiteralPath $config");
  expect(optin).toContain("mode=if($Enable){'OwnerOptIn'}else{'OwnerReverted'}");
 });
+
+test("EEMF admin route cannot bypass owner proof",()=>{
+ expect(relay).toContain('&& !ownerApproved')===false; // guard uses minified condition with no space
+ expect(relay).toContain('&&!ownerApproved)throw Error("EEMFO3L execution requires signed owner approval")');
+ expect(relay).toContain('function checkEEMFApproval(req,name,args)');
+ expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
+ expect(relay).toContain('eemfApprovalUsed.has(claim.nonce)');
+ expect(relay).toContain('createHash("sha256").update(JSON.stringify(args))');
+});
+test("gateway issues signed proof only in browser-approved command path",()=>{
+ expect(gateway).toContain('if(ownerApproved){');
+ expect(gateway).toContain('headers["x-rian-eemf-approved"]');
+ expect(gateway).toContain('relay(item.operation,item.args,true)');
+ expect(gateway).toContain('passwordOK(f.get("password")');
+ expect(gateway).toContain('execProofKey.length>=48');
+});
