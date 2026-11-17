@@ -50,7 +50,7 @@ describe("trusted session authorization source checks",()=>{
  test("write/ordinary commands still require individual approval",()=>{
    expect(source).toContain('name==="rian_eemf_request_command"');
    expect(source).toContain('name==="rian_eemf_request_write"');
-   expect(source).toContain('actionQueue.set(actionId,{operation,args,status:"PENDING_APPROVAL"');
+   expect(source).toContain('actionQueue.set(actionId,{operation,args,clientId,status:"PENDING_APPROVAL"');
  });
 });
 
@@ -100,5 +100,51 @@ describe("real trusted session state transitions (no network, no command executi
   await expect(trustedDispatch("rian_eemf_trusted_session_status",{session_id:id},"rian.other")).rejects.toThrow();
   await expect(trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:id},"rian.other")).rejects.toThrow();
   trustedSessions.get(id).state="REVOKED";
+ });
+});
+
+describe("chat-native developer environment checks (strict scope only)",()=>{
+ const profile="dev-version-checks-v1",dir="Documents";
+ const good=(argv:string[],timeout=15)=>validateTrustedMailCommand({argv,cwd:dir,timeout},profile);
+ test.each(["python","git","node"])("allows exact %s --version",bin=>{
+  expect(good([bin,"--version"]).argv).toEqual([bin,"--version"]);
+  expect(good([bin,"--version"]).cwd).toBe(dir);
+ });
+ test("rejects arbitrary code, shell and state-changing operations",()=>{
+  const denied=[
+   ["python","-c","print(1)"],["git","checkout","main"],["git","status"],["git","reset","--hard"],
+   ["node","-e","console.log(1)"],["powershell","-Command","dir"],["cmd","/c","dir"],
+   ["Python","--version"],["python","--version","--extra"],["python","--version\n"]
+  ];
+  for(const argv of denied)expect(()=>good(argv)).toThrow();
+ });
+ test("rejects workspace changes and elevated timeouts",()=>{
+  expect(()=>validateTrustedMailCommand({argv:["python","--version"],cwd:"Documents/Other",timeout:15},profile)).toThrow();
+  expect(()=>validateTrustedMailCommand({argv:["python","--version"],cwd:"Documents",timeout:31},profile)).toThrow();
+  expect(()=>validateTrustedMailCommand({argv:["python","--version"],cwd:"Documents",timeout:15,overwrite:true},profile)).toThrow();
+ });
+ test("mail profiles cannot execute the developer commands",()=>{
+  expect(()=>validateTrustedMailCommand({argv:["python","--version"],cwd:dir}, "outlook-local-metadata-v1")).toThrow();
+  expect(()=>validateTrustedMailCommand({argv:["python","--version"],cwd:dir}, "proton-local-readonly-v1")).toThrow();
+ });
+ test("new developer profile is bound to one client and revocable",async()=>{
+  const request=newTrustedSession("rian.dev-test-client",profile);
+  const info=JSON.parse(request.content[0].text);
+  expect(info.profile).toBe(profile);
+  expect(info.state).toBe("PENDING_APPROVAL");
+  const own=JSON.parse((await trustedDispatch("rian_eemf_trusted_session_status",{session_id:info.session_id},"rian.dev-test-client")).content[0].text);
+  expect(own.state).toBe("PENDING_APPROVAL");
+  expect(own.workspace).toBe(dir);
+  await expect(trustedDispatch("rian_eemf_trusted_session_status",{session_id:info.session_id},"rian.not-owner")).rejects.toThrow();
+  const revoked=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:info.session_id},"rian.dev-test-client")).content[0].text);
+  expect(revoked.state).toBe("REVOKED");
+  await expect(trustedDispatch("rian_eemf_run_trusted_command",{session_id:info.session_id,argv:["python","--version"],cwd:dir,timeout:15},"rian.dev-test-client")).rejects.toThrow("inactive");
+ });
+ test("existing chat-native command tool reuses only approved profile and owner client",()=>{
+  expect(source).toContain("eligibleTrustProfile");
+  expect(source).toContain('if(approval_mode!=="each")');
+  expect(source).toContain('s.clientId===clientId');
+  expect(source).toContain('if(s.sourceHash!==digest)');
+  expect(source).toContain('relay("rian_eemf_run_command",safe,true)');
  });
 });
