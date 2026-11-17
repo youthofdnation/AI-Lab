@@ -53,7 +53,7 @@ test("local PC opt-in must be explicit and has rollback",()=>{
 });
 
 test("EEMF admin route cannot bypass owner proof",()=>{
- expect(relay).toContain('&&!ownerApproved)throw Error("EEMFO3L execution requires signed owner approval")');
+ expect(relay).toContain('if((name==="rian_write_file"||name==="rian_run_command")&&(args?.device!=="DESKTOP-EEMFO3L"||!ownerApproved))');
  expect(relay).toContain('function checkEEMFApproval(req,name,args)');
  expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
  expect(relay).toContain('eemfApprovalUsed.has(claim.nonce)');
