@@ -65,6 +65,10 @@ function ownedSession(id,clientId){
  if(!session||session.clientId!==clientId)throw Error("Unknown trusted session");
  return session;
 }
+function auditTrusted(event,id,extra={}){
+ const sessionDigest=createHash("sha256").update(id).digest("hex").slice(0,14);
+ console.info("RIAN_TRUSTED_AUDIT",JSON.stringify({event,session_digest:sessionDigest,at:now(),...extra}));
+}
 function currentSessionState(session,at=now()){
  if(session.state==="PENDING_APPROVAL"&&session.requestUntil<=at)session.state="EXPIRED";
  if(session.state==="ACTIVE"&&(session.validUntil<=at||session.remaining<=0))session.state="EXPIRED";
@@ -167,7 +171,7 @@ function newTrustedSession(clientId){
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
-  if(s.clientId===clientId&&(state==="PENDING_APPROVAL"||state==="ACTIVE"))throw Error("Existing pending or active trusted session: "+id);
+  if(s.clientId===clientId&&(state==="PENDING_APPROVAL"||state==="VERIFYING"||state==="ACTIVE"))throw Error("Existing pending or active trusted session: "+id);
  }
  if(trustedSessions.size>=40){
   for(const [id,s] of trustedSessions){if(["EXPIRED","REVOKED"].includes(currentSessionState(s)))trustedSessions.delete(id)}
@@ -175,6 +179,7 @@ function newTrustedSession(clientId){
  if(trustedSessions.size>=40)throw Error("Trusted session capacity reached");
  const id=rand(32);
  trustedSessions.set(id,{clientId,state:"PENDING_APPROVAL",requestUntil:now()+TRUSTED_REQUEST_TTL,validUntil:null,remaining:0,sourceHash:null,busy:false,attempts:0});
+ auditTrusted("requested",id,{profile:TRUSTED_PROFILE});
  return sessionReply({session_id:id,state:"PENDING_APPROVAL",device,profile:TRUSTED_PROFILE,approval_url:origin+"/session/approve/"+id,request_expires_in:TRUSTED_REQUEST_TTL,duration_after_approval_seconds:TRUSTED_DURATION_SECONDS,maximum_calls:TRUSTED_MAX_CALLS,warning:"Requires owner password in browser; no commands execute before approval."});
 }
 async function trustedDispatch(name,args,clientId){
@@ -183,6 +188,7 @@ async function trustedDispatch(name,args,clientId){
  if(name==="rian_eemf_trusted_session_status")return sessionReply(sessionSummary(args.session_id,s));
  if(name==="rian_eemf_revoke_trusted_session"){
   s.state="REVOKED";s.remaining=0;
+  auditTrusted("revoked",args.session_id);
   return sessionReply(sessionSummary(args.session_id,s));
  }
  if(name!=="rian_eemf_run_trusted_command")throw Error("Unsupported session action");
@@ -198,7 +204,9 @@ async function trustedDispatch(name,args,clientId){
   if(currentSessionState(s)!=="ACTIVE")throw Error("Trusted session no longer active");
   // Consume a quota unit before submitting so failures cannot evade limits.
   s.remaining--;
+  auditTrusted("command_submitted",session_id,{remaining:s.remaining});
   const out=await relay("rian_eemf_run_command",safe,true);
+  auditTrusted("command_completed",session_id,{remaining:s.remaining});
   return sessionReply({session_id,device,profile:TRUSTED_PROFILE,state:currentSessionState(s),remaining_calls:s.remaining,command:safe.argv,execution:out});
  }finally{s.busy=false}
 }
@@ -281,6 +289,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
    if(s.state!=="VERIFYING"||s.requestUntil<=now())throw Error("Approval expired or revoked");
    s.sourceHash=sourceHash;
    s.state="ACTIVE";s.validUntil=now()+TRUSTED_DURATION_SECONDS;s.remaining=TRUSTED_MAX_CALLS;
+   auditTrusted("activated",proof.id,{expires_at:s.validUntil,max_calls:TRUSTED_MAX_CALLS});
    return html("<h1>읽기 전용 세션 승인 완료</h1><p>DESKTOP-EEMFO3L Proton 색인 상태·제목 검색을 30분간 최대 60회 허용했습니다. ChatGPT에서 상태를 조회하고 필요 시 즉시 취소할 수 있습니다.</p>");
   }catch{
    s.state="REVOKED";s.remaining=0;
