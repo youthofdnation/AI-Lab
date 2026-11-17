@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -50,7 +50,7 @@ describe("trusted session authorization source checks",()=>{
  test("write/ordinary commands still require individual approval",()=>{
    expect(source).toContain('name==="rian_eemf_request_command"');
    expect(source).toContain('name==="rian_eemf_request_write"');
-   expect(source).toContain('actionQueue.set(actionId,{operation,args,clientId,status:"PENDING_APPROVAL"');
+   expect(source).toContain('actionQueue.set(actionId,{operation,args,clientId,status:"PENDING_APPROVAL",issuedAt,exp:issuedAt+ttl}');
  });
 });
 
@@ -146,5 +146,32 @@ describe("chat-native developer environment checks (strict scope only)",()=>{
   expect(source).toContain('s.clientId===clientId');
   expect(source).toContain('if(s.sourceHash!==digest)');
   expect(source).toContain('relay("rian_eemf_run_command",safe,true)');
+ });
+});
+
+describe("approval request TTL hardening (bug: GET 200 then POST 409 7 seconds later)",()=>{
+ const cmd=(argv:string[],cwd="Documents",timeout=15)=>approvalRequestSeconds("rian_eemf_run_command",{argv,cwd,timeout});
+ test.each(["python","git","node"])("%s version check has thirty minute approval time",bin=>{
+  expect(cmd([bin,"--version"])).toBe(1800);
+ });
+ test("dangerous or out of scope commands keep short 5-minute approval",()=>{
+  expect(cmd(["python","-c","print(1)"])).toBe(300);
+  expect(cmd(["git","status"])).toBe(300);
+  expect(cmd(["powershell","-Command","whoami"])).toBe(300);
+  expect(cmd(["python","--version"],"Documents/private")).toBe(300);
+  expect(cmd(["python","--version"],"Documents",60)).toBe(300);
+ });
+ test("writes and mail searches do not inherit extended approvals",()=>{
+  expect(approvalRequestSeconds("rian_eemf_write_file",{path:"Documents/test.txt",content:"demo",overwrite:false})).toBe(300);
+  expect(approvalRequestSeconds("rian_eemf_run_command",{argv:["python","outlook_bridge.py","doctor"],cwd:"Documents/rian-outlook-bridge",timeout:20})).toBe(300);
+ });
+ test("source displays expiration and preserves signed browser form and owner approval",()=>{
+  expect(source).toContain("const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600");
+  expect(source).toContain("const ttl=approvalRequestSeconds(operation,args),issuedAt=now()");
+  expect(source).toContain("exp:issuedAt+ttl");
+  expect(source).toContain("expires_at:issuedAt+ttl");
+  expect(source).toContain("승인 요청 만료 시각");
+  expect(source).toContain('const proof=ticket({type:"eemf-action-approval"');
+  expect(source).toContain('passwordOK(f.get("password")');
  });
 });
