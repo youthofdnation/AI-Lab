@@ -162,7 +162,48 @@ async function relay(name,args,ownerApproved=false){
  if(parsed.ok!==true)throw Error("EEMFO3L agent rejected the operation");
  return parsed;
 }
-async function sendBackend(name,args){
+function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
+function newTrustedSession(clientId){
+ if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
+ for(const [id,s] of trustedSessions){
+  const state=currentSessionState(s);
+  if(s.clientId===clientId&&(state==="PENDING_APPROVAL"||state==="ACTIVE"))throw Error("Existing pending or active trusted session: "+id);
+ }
+ if(trustedSessions.size>=40){
+  for(const [id,s] of trustedSessions){if(["EXPIRED","REVOKED"].includes(currentSessionState(s)))trustedSessions.delete(id)}
+ }
+ if(trustedSessions.size>=40)throw Error("Trusted session capacity reached");
+ const id=rand(32);
+ trustedSessions.set(id,{clientId,state:"PENDING_APPROVAL",requestUntil:now()+TRUSTED_REQUEST_TTL,validUntil:null,remaining:0,sourceHash:null,busy:false,attempts:0});
+ return sessionReply({session_id:id,state:"PENDING_APPROVAL",device,profile:TRUSTED_PROFILE,approval_url:origin+"/session/approve/"+id,request_expires_in:TRUSTED_REQUEST_TTL,duration_after_approval_seconds:TRUSTED_DURATION_SECONDS,maximum_calls:TRUSTED_MAX_CALLS,warning:"Requires owner password in browser; no commands execute before approval."});
+}
+async function trustedDispatch(name,args,clientId){
+ if(name==="rian_eemf_request_trusted_session")return newTrustedSession(clientId);
+ const s=ownedSession(args.session_id,clientId),state=currentSessionState(s);
+ if(name==="rian_eemf_trusted_session_status")return sessionReply(sessionSummary(args.session_id,s));
+ if(name==="rian_eemf_revoke_trusted_session"){
+  s.state="REVOKED";s.remaining=0;
+  return sessionReply(sessionSummary(args.session_id,s));
+ }
+ if(name!=="rian_eemf_run_trusted_command")throw Error("Unsupported session action");
+ if(state!=="ACTIVE"||s.remaining<=0)throw Error("Trusted session inactive or expired; browser reapproval required");
+ if(s.busy)throw Error("Trusted session busy; concurrent commands are not allowed");
+ // Validate twice: tool arguments were previously checked; guard again at authorization.
+ const {session_id, ...raw}=args;
+ const safe=validateTrustedMailCommand(raw);
+ s.busy=true;
+ try{
+  const digest=await trustedSourceDigest();
+  if(s.sourceHash!==digest){s.state="REVOKED";s.remaining=0;throw Error("Trusted script changed; session revoked")};
+  if(currentSessionState(s)!=="ACTIVE")throw Error("Trusted session no longer active");
+  // Consume a quota unit before submitting so failures cannot evade limits.
+  s.remaining--;
+  const out=await relay("rian_eemf_run_command",safe,true);
+  return sessionReply({session_id,device,profile:TRUSTED_PROFILE,state:currentSessionState(s),remaining_calls:s.remaining,command:safe.argv,execution:out});
+ }finally{s.busy=false}
+}
+async function sendBackend(name,args,clientId){
+ if(name==="rian_eemf_request_trusted_session"||name==="rian_eemf_trusted_session_status"||name==="rian_eemf_run_trusted_command"||name==="rian_eemf_revoke_trusted_session")return trustedDispatch(name,args,clientId);
  if(name==="rian_eemf_status"||name==="rian_eemf_list_directory"||name==="rian_eemf_read_file"){
   const target=name;
   const val=await relay(target,args);
@@ -288,7 +329,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
   if(x.method==="initialize")result={protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"rian-eemf-owner",version:"1.0.0"}};
   else if(x.method==="tools/list")result={tools};
   else if(x.method==="ping")result={};
-  else if(x.method==="tools/call"){try{let name=x.params?.name,args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args)}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
+  else if(x.method==="tools/call"){try{let name=x.params?.name,args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args,token.client_id)}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
   else return res({jsonrpc:"2.0",id,error:{code:-32601,message:"Unknown method"}});
   return res({jsonrpc:"2.0",id,result});
  }
