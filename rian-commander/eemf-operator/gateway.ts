@@ -46,9 +46,57 @@ const tools=[
 {name:"rian_eemf_read_file",description:"Read UTF-8 text within EEMFO3L allowed home root",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
 {name:"rian_eemf_request_command",description:"DRAFT a command execution on EEMFO3L requiring a separate explicit browser approval. Does not execute yet.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["argv"],additionalProperties:false}},
 {name:"rian_eemf_request_write",description:"DRAFT a write to a permitted text file on EEMFO3L requiring browser approval. Does not write yet.",inputSchema:{type:"object",properties:{path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["path","content"],additionalProperties:false}},
+{name:"rian_eemf_request_trusted_session",description:"Request a 30-minute read-only Proton local mail status/search session requiring a separate owner password approval. No write, sync or arbitrary commands.",inputSchema:{type:"object",properties:{},additionalProperties:false}},
+{name:"rian_eemf_trusted_session_status",description:"Check your specific session state, expiry and remaining calls.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
+{name:"rian_eemf_run_trusted_command",description:"Execute ONLY fixed Proton local status or subject-search commands within an approved time-limited session.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"},argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["session_id","argv","cwd"],additionalProperties:false}},
+{name:"rian_eemf_revoke_trusted_session",description:"Revoke your active read-only trusted session immediately.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
 {name:"rian_eemf_action_status",description:"Inspect a previously requested action result using the returned action_id",inputSchema:{type:"object",properties:{action_id:{type:"string"}},required:["action_id"],additionalProperties:false}}
 ];
 const actionQueue=new Map();
+const trustedSessions=new Map();
+const TRUSTED_PROFILE="proton-local-readonly-v1";
+const TRUSTED_CWD="Documents/RIAN-Proton-Tools";
+const TRUSTED_SOURCE=TRUSTED_CWD+"/proton_mail_query.py";
+const TRUSTED_DURATION_SECONDS=1800, TRUSTED_MAX_CALLS=60, TRUSTED_REQUEST_TTL=300;
+const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
+function ownedSession(id,clientId){
+ if(!validSessionId(id)||!clientId)throw Error("Invalid session");
+ const session=trustedSessions.get(id);
+ if(!session||session.clientId!==clientId)throw Error("Unknown trusted session");
+ return session;
+}
+function currentSessionState(session,at=now()){
+ if(session.state==="PENDING_APPROVAL"&&session.requestUntil<=at)session.state="EXPIRED";
+ if(session.state==="ACTIVE"&&(session.validUntil<=at||session.remaining<=0))session.state="EXPIRED";
+ return session.state;
+}
+export function validateTrustedMailCommand(raw){
+ if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k)))throw Error("Unapproved command fields");
+ if(raw.cwd!==TRUSTED_CWD)throw Error("Trusted workspace only");
+ const argv=raw.argv;
+ if(!Array.isArray(argv)||argv.length<3||argv.length>6||argv.some(x=>typeof x!=="string"||!x||x.length>120||/[\x00-\x1f\x7f]/.test(x)))throw Error("Invalid argv");
+ if(argv[0]!=="python"||argv[1]!=="proton_mail_query.py")throw Error("Command not in trusted allowlist");
+ if(argv[2]==="status"){
+  if(argv.length!==3)throw Error("Unexpected status arguments");
+ }else if(argv[2]==="search"){
+  if(argv.length!==4&&argv.length!==6)throw Error("Invalid search command");
+  if(!argv[3].trim()||argv[3].startsWith("-"))throw Error("Invalid search query");
+  if(argv.length===6&&(argv[4]!=="--limit"||!/^\d{1,2}$/.test(argv[5])||Number(argv[5])<1||Number(argv[5])>20))throw Error("Search limit denied");
+ }else throw Error("Only local Proton subject search and status are trusted");
+ const timeout=raw.timeout===undefined?30:raw.timeout;
+ if(!Number.isInteger(timeout)||timeout<1||timeout>45)throw Error("Trusted timeout denied");
+ return {argv:[...argv],cwd:TRUSTED_CWD,timeout};
+}
+async function trustedSourceDigest(){
+ const fileResult=await relay("rian_eemf_read_file",{path:TRUSTED_SOURCE});
+ const content=fileResult?.result?.content;
+ if(typeof content!=="string"||content.length<50||content.length>25000)throw Error("Trusted script unavailable");
+ return createHash("sha256").update(content,"utf8").digest("hex");
+}
+function sessionSummary(id,session){
+ return {session_id:id,device,profile:TRUSTED_PROFILE,state:currentSessionState(session),expires_at:session.validUntil||null,remaining_calls:session.remaining,maximum_calls:TRUSTED_MAX_CALLS,workspace:TRUSTED_CWD};
+}
+
 function safePath(value){
  if(typeof value!=="string"||value.length>512||!value.trim()||/[\x00-\x1f]/.test(value))throw Error("Invalid path");
  const path=value.replaceAll("\\","/");
@@ -64,6 +112,19 @@ function safeArgs(name,args){
  if(name==="rian_eemf_list_directory"||name==="rian_eemf_read_file"){
   if(Object.keys(args).length!==1||!Object.hasOwn(args,"path"))throw Error("Unexpected args");
   return {path:safePath(args.path)};
+ }
+ if(name==="rian_eemf_request_trusted_session"){
+  if(Object.keys(args).length)throw Error("Unexpected trusted session parameters");
+  return {};
+ }
+ if(name==="rian_eemf_trusted_session_status"||name==="rian_eemf_revoke_trusted_session"){
+  if(Object.keys(args).length!==1||!validSessionId(args.session_id))throw Error("Invalid trusted session ID");
+  return {session_id:args.session_id};
+ }
+ if(name==="rian_eemf_run_trusted_command"){
+  if(Object.keys(args).some(k=>!["session_id","argv","cwd","timeout"].includes(k))||!validSessionId(args.session_id))throw Error("Invalid trusted request");
+  const {session_id,...command}=args;
+  return {session_id,...validateTrustedMailCommand(command)};
  }
  if(name==="rian_eemf_action_status"){
   if(Object.keys(args).length!==1||typeof args.action_id!=="string"||!/^[A-Za-z0-9_-]{32,64}$/.test(args.action_id))throw Error("Invalid action reference");
@@ -135,7 +196,7 @@ async function form(req){let s=await req.text();if(s.length>10000)throw Error("l
 function issue(clientId){let claims={sub:"rian-owner",scope:"eemf:operate",client_id:clientId,role:"eemf-owner"};return {access_token:jwt({...claims,typ:"access",aud:resource},1800),token_type:"Bearer",expires_in:1800,scope:"eemf:operate",refresh_token:jwt({...claims,typ:"refresh",aud:origin+"/oauth/token",jti:rand(24)},86400)}}
 function denied(){return res({error:"unauthorized",message:"OAuth sign-in required"},401,{"www-authenticate":'Bearer resource_metadata="'+origin+'/.well-known/oauth-protected-resource", scope="eemf:operate"'})}
 const meta={issuer:origin,authorization_endpoint:origin+"/oauth/authorize",token_endpoint:origin+"/oauth/token",registration_endpoint:origin+"/oauth/register",response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],token_endpoint_auth_methods_supported:["none"],scopes_supported:["eemf:operate","offline_access"],authorization_response_iss_parameter_supported:true,client_id_metadata_document_supported:false};
-Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||3000),async fetch(req){
+if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||3000),async fetch(req){
  let u=new URL(req.url),p=u.pathname,m=req.method;
  if(p==="/health"&&m==="GET")return res({alive:true,version:"0.5.0",oauth_configured:authReady,backend_configured:bridgeReady,ready:authReady&&bridgeReady,read_only:false,manual_approval_required:true,device_only:"DESKTOP-EEMFO3L"});
  if(p==="/"&&m==="GET")return html("<h1>RIAN Commander</h1><p>ChatGPT 원격 MCP 연결. PC 조회를 위해 로그인 승인이 필요합니다.</p>");
