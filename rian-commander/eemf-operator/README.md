@@ -54,3 +54,30 @@ Current local EEMFO3L agent status: `can_exec=false`, `can_write=false`; read-on
 On DESKTOP-EEMFO3L, review the pinned `enable-eemf-owner.ps1` source and run it without arguments to see permission status. Run `-Enable` locally only after agreeing to per-action remote command/file approvals. `-Disable` reverts the device flags.
 
 To use in a regular ChatGPT web conversation, the user must separately create and authorize a custom MCP plugin/app with the endpoint `https://rian-eemf-owner-gateway-production.up.railway.app/mcp` if account/workspace policies provide that option. A Codex-only MCP connection does not make the tool appear in another ChatGPT chat. Official support for full MCP write actions may depend on Business/Enterprise/Edu entitlements.
+
+
+## 2026-11-17 — Bounded read-only trusted sessions (deployed)
+
+**Status:** Code and unit tests complete, deployed to the existing `rian-eemf-owner-gateway` service on Railway; deployment SUCCESS. **Browser approval and authenticated ChatGPT tool calls for the NEW session tools have not yet been tested E2E**, because the existing conversation's plugin tool schema still exposes only the previous six tools.
+
+### Four new MCP tools
+
+- `rian_eemf_request_trusted_session`: returns a browser approval URL and a pending session ID; does not execute a command.
+- `rian_eemf_trusted_session_status`: reports state, expiration, and remaining call allowance, bound to the requesting OAuth client.
+- `rian_eemf_run_trusted_command`: accepts a session ID and ONLY a validated Proton local status/subject-search command within the approved workspace.
+- `rian_eemf_revoke_trusted_session`: revokes the session immediately without needing the original password.
+
+The owner approves **once** in the independent HTTPS browser page by entering the existing owner password. Activation permits up to **30 minutes or 60 command invocations**, whichever comes first. The permission is fixed to DESKTOP-EEMFO3L and the exact Proton local read-only profile. Each command is protected by a separate, one-use HMAC relay approval proof. The trusted script's SHA-256 is compared with the approval-time version before each invocation. Commands are serialized; no extra calls execute after expiry, exhaustion, or revocation. Requester OAuth client IDs must match. Logs contain session ID digests and lifecycle metadata, not passwords or mail query strings.
+
+**Allowed** in `Documents/RIAN-Proton-Tools`: `python proton_mail_query.py status` and `python proton_mail_query.py search TERM [--limit 1..20]`.
+
+**NOT allowed:** Proton body reads, `--full-text`, `--all`, Proton ingest/sync, Outlook sync, file writes, arbitrary PowerShell/Python, other computers, or unrestricted terminal execution. These still require separate approval or a new reviewed profile.
+
+### Limitations and next step
+
+- Sessions are in the gateway's process memory; restarting/redeploying it immediately invalidates all active grants (fail closed).
+- The central relay privileged queue guard in the PR remains **unmerged and not deployed**; do not describe public multi-user isolation as complete.
+- CI validates the command allowlist, OAuth client isolation, real session lifecycle transitions, expiry, revocation, max-call enforcement, existing per-command approval and PowerShell script compatibility.
+- To verify E2E, refresh/reconnect the personal `rian_eemf_owner` ChatGPT MCP connection so the new four tools are discovered; request a session, approve once in the browser, execute two allowed commands without additional password prompts, then revoke and verify refusal.
+- For Outlook's `outlook_bridge.py sync --days 180 --max-messages 3000`, the source reads IMAP and writes a local index but may exceed the current synchronous relay limit. Build an independently approved durable background job workflow before admitting it to a trusted profile. Confirm employer policy and data-retention requirements.
+
