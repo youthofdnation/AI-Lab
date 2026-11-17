@@ -24,7 +24,7 @@ jobs:
           bun build relay.ts --target=bun --outfile=/tmp/rian-eemf-relay.js
       - name: Assert distinct credentials and explicit approval gates
         working-directory: rian-commander/eemf-operator
-        run: bun test security.test.ts
+        run: bun test security.test.ts trusted-session.test.ts
   powershell-policy:
     runs-on: windows-latest
     steps:
