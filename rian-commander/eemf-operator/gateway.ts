@@ -233,6 +233,17 @@ function actionPage(id,item,msg=""){
  const approval=ticket({type:"eemf-action-approval",id,exp:now()+240,nonce:rand(16)});
  return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>작업 내용을 반드시 검토하세요. 실행 또는 파일 변경은 승인 후에만 수행됩니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(approval)+'"><label for="password">소유자 암호</label><input name="password" type="password" minlength="20" required><button type="submit">표시된 작업 1회 승인 및 실행</button></form>',200,"same-origin")
 }
+function trustedSessionPage(id,s){
+ const nonce=ticket({type:"eemf-trusted-session-approval",id,exp:now()+240,nonce:rand(16)});
+ return html('<h1>EEMFO3L 읽기 전용 세션 승인</h1>'+
+ '<p>대상 장치: DESKTOP-EEMFO3L</p><p>프로필: Proton 로컬 메일 색인 상태와 제목 검색</p>'+
+ '<p>허용: python proton_mail_query.py status / search TERM --limit 1..20</p>'+
+ '<p>허용하지 않음: 메일 본문 읽기, 전체 검색, 파일 수정, 동기화, PowerShell 실행, 임의 스크립트, 다른 PC 제어</p>'+
+ '<p>승인 후 30분 또는 최대 60회 중 먼저 도달한 조건에 따라 만료됩니다. ChatGPT에서 즉시 취소할 수 있습니다. 현재 소유자 암호는 이 세션 시작에만 사용합니다.</p>'+
+ '<form method="POST" action="/session/activate"><input type="hidden" name="request" value="'+escape(nonce)+'">'+
+ '<label for="password">소유자 암호</label><input id="password" name="password" type="password" autocomplete="current-password" minlength="20" required>'+
+ '<button type="submit">이 범위의 읽기 전용 세션 승인</button></form>',200,"same-origin");
+}
 async function form(req){let s=await req.text();if(s.length>10000)throw Error("large");return new URLSearchParams(s)}
 function issue(clientId){let claims={sub:"rian-owner",scope:"eemf:operate",client_id:clientId,role:"eemf-owner"};return {access_token:jwt({...claims,typ:"access",aud:resource},1800),token_type:"Bearer",expires_in:1800,scope:"eemf:operate",refresh_token:jwt({...claims,typ:"refresh",aud:origin+"/oauth/token",jti:rand(24)},86400)}}
 function denied(){return res({error:"unauthorized",message:"OAuth sign-in required"},401,{"www-authenticate":'Bearer resource_metadata="'+origin+'/.well-known/oauth-protected-resource", scope="eemf:operate"'})}
@@ -244,6 +255,38 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
  if(!authReady)return res({error:"OAuth setup incomplete"},503);
  if((p==="/.well-known/oauth-protected-resource"||p==="/.well-known/oauth-protected-resource/mcp")&&m==="GET")return res({resource,authorization_servers:[origin],scopes_supported:["eemf:operate","offline_access"]});
  if((p==="/.well-known/oauth-authorization-server"||p==="/.well-known/openid-configuration")&&m==="GET")return res(meta);
+ if(/^\/session\/approve\/[A-Za-z0-9_-]{32,64}$/.test(p)&&m==="GET"){
+  const id=p.slice("/session/approve/".length),s=trustedSessions.get(id);
+  if(!s||currentSessionState(s)!=="PENDING_APPROVAL")return html("<h1>세션 요청이 만료되었거나 이미 처리되었습니다.</h1>",409);
+  return trustedSessionPage(id,s);
+ }
+ if(p==="/session/activate"&&m==="POST"){
+  const originHeader=req.headers.get("origin");
+  if(originHeader!==origin)return html("<h1>다른 출처의 승인 요청 차단</h1>",403);
+  let values;try{values=await form(req)}catch{return html("<h1>잘못된 승인 양식</h1>",400)}
+  const proof=unticket(values.get("request")||"");
+  if(!proof||proof.type!=="eemf-trusted-session-approval"||!validSessionId(proof.id))return html("<h1>승인 링크가 만료되었습니다.</h1>",400);
+  const s=trustedSessions.get(proof.id);
+  if(!s||currentSessionState(s)!=="PENDING_APPROVAL")return html("<h1>승인 대기 세션이 없습니다.</h1>",409);
+  const ip=(req.headers.get("cf-connecting-ip")||req.headers.get("x-forwarded-for")||"global").split(",")[0].slice(0,60),key="eemf-trusted:"+ip;
+  let failure=loginFailures.get(key)||{count:0,until:now()+600};
+  if(failure.until<now())failure={count:0,until:now()+600};
+  if(failure.count>=6)return html("<h1>암호 시도 횟수 초과</h1>",429);
+  if(!passwordOK(values.get("password")||"")){failure.count++;loginFailures.set(key,failure);return html("<h1>소유자 암호 불일치</h1>",401)}
+  loginFailures.delete(key);
+  // Race-safe state switch: multiple overlapping approval POSTs cannot activate twice.
+  s.state="VERIFYING";
+  try{
+   const sourceHash=await trustedSourceDigest();
+   if(s.state!=="VERIFYING"||s.requestUntil<=now())throw Error("Approval expired or revoked");
+   s.sourceHash=sourceHash;
+   s.state="ACTIVE";s.validUntil=now()+TRUSTED_DURATION_SECONDS;s.remaining=TRUSTED_MAX_CALLS;
+   return html("<h1>읽기 전용 세션 승인 완료</h1><p>DESKTOP-EEMFO3L Proton 색인 상태·제목 검색을 30분간 최대 60회 허용했습니다. ChatGPT에서 상태를 조회하고 필요 시 즉시 취소할 수 있습니다.</p>");
+  }catch{
+   s.state="REVOKED";s.remaining=0;
+   return html("<h1>세션 활성화 실패</h1><p>원격 스크립트 무결성이나 PC 연결을 확인해야 합니다.</p>",409)
+  }
+ }
  if(/^\/approve\/[A-Za-z0-9_-]{32,64}$/.test(p)&&m==="GET"){
   const id=p.slice("/approve/".length),item=actionQueue.get(id);
   if(!item||item.exp<now()||item.status!=="PENDING_APPROVAL")return html("<h1>작업이 만료되거나 이미 처리되었습니다.</h1>",409);
