@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -51,5 +51,54 @@ describe("trusted session authorization source checks",()=>{
    expect(source).toContain('name==="rian_eemf_request_command"');
    expect(source).toContain('name==="rian_eemf_request_write"');
    expect(source).toContain('actionQueue.set(actionId,{operation,args,status:"PENDING_APPROVAL"');
+ });
+});
+
+describe("real trusted session state transitions (no network, no command execution)",()=>{
+ test("new session starts pending and is linked to one OAuth client",()=>{
+  const result=newTrustedSession("rian.clientA");
+  const payload=JSON.parse(result.content[0].text);
+  expect(payload.state).toBe("PENDING_APPROVAL");
+  expect(payload.maximum_calls).toBe(60);
+  expect(payload.duration_after_approval_seconds).toBe(1800);
+  const saved=ownedSession(payload.session_id,"rian.clientA");
+  expect(saved.state).toBe("PENDING_APPROVAL");
+  expect(()=>ownedSession(payload.session_id,"rian.otherClient")).toThrow("Unknown trusted session");
+  saved.state="REVOKED";
+ });
+ test("rejects second active/pending session for the same client",()=>{
+  const res=newTrustedSession("rian.clientB"),id=JSON.parse(res.content[0].text).session_id;
+  expect(()=>newTrustedSession("rian.clientB")).toThrow("Existing pending or active trusted session");
+  trustedSessions.get(id).state="REVOKED";
+  expect(JSON.parse(newTrustedSession("rian.clientB").content[0].text).state).toBe("PENDING_APPROVAL");
+ });
+ test("pending session expires without approval",()=>{
+  const res=newTrustedSession("rian.clientC"),id=JSON.parse(res.content[0].text).session_id,s=trustedSessions.get(id);
+  expect(currentSessionState(s,s.requestUntil-1)).toBe("PENDING_APPROVAL");
+  expect(currentSessionState(s,s.requestUntil)).toBe("EXPIRED");
+ });
+ test("active session expires at deadline and when quota runs out",()=>{
+  const res=newTrustedSession("rian.clientD"),id=JSON.parse(res.content[0].text).session_id,s=trustedSessions.get(id);
+  s.state="ACTIVE";s.validUntil=2000;s.remaining=2;
+  expect(currentSessionState(s,1999)).toBe("ACTIVE");
+  expect(currentSessionState(s,2000)).toBe("EXPIRED");
+  const other=newTrustedSession("rian.clientE");
+  const d=trustedSessions.get(JSON.parse(other.content[0].text).session_id);
+  d.state="ACTIVE";d.validUntil=5000;d.remaining=0;
+  expect(currentSessionState(d,3000)).toBe("EXPIRED");
+ });
+ test("immediate revocation prevents subsequent authorized commands",async()=>{
+  const res=newTrustedSession("rian.clientF"),id=JSON.parse(res.content[0].text).session_id,s=trustedSessions.get(id);
+  s.state="ACTIVE";s.validUntil=Math.floor(Date.now()/1000)+500;s.remaining=2;
+  const revoked=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:id},"rian.clientF")).content[0].text);
+  expect(revoked.state).toBe("REVOKED");
+  expect(revoked.remaining_calls).toBe(0);
+  await expect(trustedDispatch("rian_eemf_run_trusted_command",{session_id:id,argv:["python","proton_mail_query.py","status"],cwd:"Documents/RIAN-Proton-Tools",timeout:30},"rian.clientF")).rejects.toThrow("inactive");
+ });
+ test("another client cannot read, revoke or invoke the session",async()=>{
+  const res=newTrustedSession("rian.clientG"),id=JSON.parse(res.content[0].text).session_id;
+  await expect(trustedDispatch("rian_eemf_trusted_session_status",{session_id:id},"rian.other")).rejects.toThrow();
+  await expect(trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:id},"rian.other")).rejects.toThrow();
+  trustedSessions.get(id).state="REVOKED";
  });
 });
