@@ -53,13 +53,13 @@ const tools=[
 {name:"rian_eemf_action_status",description:"Inspect a previously requested action result using the returned action_id",inputSchema:{type:"object",properties:{action_id:{type:"string"}},required:["action_id"],additionalProperties:false}}
 ];
 const actionQueue=new Map();
-const trustedSessions=new Map();
+export const trustedSessions=new Map();
 const TRUSTED_PROFILE="proton-local-readonly-v1";
 const TRUSTED_CWD="Documents/RIAN-Proton-Tools";
 const TRUSTED_SOURCE=TRUSTED_CWD+"/proton_mail_query.py";
 const TRUSTED_DURATION_SECONDS=1800, TRUSTED_MAX_CALLS=60, TRUSTED_REQUEST_TTL=300;
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
-function ownedSession(id,clientId){
+export function ownedSession(id,clientId){
  if(!validSessionId(id)||!clientId)throw Error("Invalid session");
  const session=trustedSessions.get(id);
  if(!session||session.clientId!==clientId)throw Error("Unknown trusted session");
@@ -69,7 +69,7 @@ function auditTrusted(event,id,extra={}){
  const sessionDigest=createHash("sha256").update(id).digest("hex").slice(0,14);
  console.info("RIAN_TRUSTED_AUDIT",JSON.stringify({event,session_digest:sessionDigest,at:now(),...extra}));
 }
-function currentSessionState(session,at=now()){
+export function currentSessionState(session,at=now()){
  if(session.state==="PENDING_APPROVAL"&&session.requestUntil<=at)session.state="EXPIRED";
  if(session.state==="ACTIVE"&&(session.validUntil<=at||session.remaining<=0))session.state="EXPIRED";
  return session.state;
@@ -167,7 +167,7 @@ async function relay(name,args,ownerApproved=false){
  return parsed;
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
-function newTrustedSession(clientId){
+export function newTrustedSession(clientId){
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
@@ -182,7 +182,7 @@ function newTrustedSession(clientId){
  auditTrusted("requested",id,{profile:TRUSTED_PROFILE});
  return sessionReply({session_id:id,state:"PENDING_APPROVAL",device,profile:TRUSTED_PROFILE,approval_url:origin+"/session/approve/"+id,request_expires_in:TRUSTED_REQUEST_TTL,duration_after_approval_seconds:TRUSTED_DURATION_SECONDS,maximum_calls:TRUSTED_MAX_CALLS,warning:"Requires owner password in browser; no commands execute before approval."});
 }
-async function trustedDispatch(name,args,clientId){
+export async function trustedDispatch(name,args,clientId){
  if(name==="rian_eemf_request_trusted_session")return newTrustedSession(clientId);
  const s=ownedSession(args.session_id,clientId),state=currentSessionState(s);
  if(name==="rian_eemf_trusted_session_status")return sessionReply(sessionSummary(args.session_id,s));
