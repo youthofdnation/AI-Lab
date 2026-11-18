@@ -12,7 +12,7 @@ export function devTaskSafePath(path,extension){
  if(segments.some(x=>["node_modules",".git",".github","secrets","credentials","dist","build","appdata"].includes(x.toLowerCase())))return false;
  const filename=segments.at(-1);
  if(filename.startsWith("test_")&&extension==="edit")return false;
- if(extension==="test")return path.startsWith("tests/")&&(/(^|\/)test_[a-zA-Z0-9_-]+\.py$/.test(path)||/^[a-zA-Z0-9_/-]+\.test\.(?:js|ts)$/.test(path));
+ if(extension==="test")return ((path.startsWith("tests/")||path.includes("/tests/"))&&/(^|\/)test_[a-zA-Z0-9_-]+\.py$/.test(path))||/(^|\/)[A-Za-z0-9_-]+\.test\.(?:js|ts)$/.test(path);
  return /\.(?:py|ts|tsx|js|jsx|md|json|yaml|yml)$/.test(filename)&&!path.startsWith("tests/");
 }
 export function devTaskParseScope(raw){
