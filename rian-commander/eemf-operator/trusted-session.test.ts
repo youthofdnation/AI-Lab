@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -228,5 +228,57 @@ describe("chat-native isolated developer smoke project — one user-approved sco
   expect(source).toContain("await smokeVerifySources()");
   expect(source).toContain('passwordOK(f.get("password")');
   expect(source).toContain('relay("rian_eemf_write_file",args,true)');
+ });
+});
+
+describe("generic scratch edits with CAS and bounded syntax-only execution",()=>{
+ const profile="dev-workspace-edit-v1",cwd="Documents",root="Documents/RIAN-Commander-Smoke";
+ const compile=["python","-I","-S","-m","py_compile","RIAN-Commander-Smoke/calculator.py"];
+ test("approves only the exact safe syntax compiler",()=>{
+  expect(validateTrustedMailCommand({argv:compile,cwd,timeout:20},profile).argv).toEqual(compile);
+  expect(approvalRequestSeconds("rian_eemf_run_command",{argv:compile,cwd,timeout:20})).toBe(1800);
+ });
+ test("rejects arbitrary Python, shell, test execution and altered working folder",()=>{
+  const bad=[["python","-c","print(1)"],["python","-m","unittest","discover"],
+    ["powershell","-Command","whoami"],["python","-I","-S","-m","py_compile","../private.py"],
+    ["cmd","/c","dir"],["python","-I","-S","-m","pip","install","package"]];
+  for(const argv of bad)expect(()=>validateTrustedMailCommand({argv,cwd,timeout:20},profile)).toThrow();
+  expect(()=>validateTrustedMailCommand({argv:compile,cwd:root,timeout:20},profile)).toThrow();
+  expect(()=>validateTrustedMailCommand({argv:compile,cwd,timeout:50},profile)).toThrow();
+ });
+ test("accepts dynamic content in only two pinned scratch files",()=>{
+  const src="def total_with_tax(subtotal, rate):\n    return subtotal * (1 + rate)\n";
+  expect(projectWriteAllowed({path:root+"/calculator.py",content:src,overwrite:true})).toBe(true);
+  expect(projectWriteAllowed({path:root+"/notes.md",content:"## Patch notes\n",overwrite:false})).toBe(true);
+  expect(projectWriteAllowed({path:root+"/notes.md",content:"## Updated notes\n",overwrite:true})).toBe(true);
+  for(const path of [root+"/test_calculator.py",root+"/config.json","Documents/other.py",root+"/calculator.py/../notes.md"])
+    expect(projectWriteAllowed({path,content:src,overwrite:true})).toBe(false);
+  expect(projectWriteAllowed({path:root+"/calculator.py",content:src,overwrite:false})).toBe(false);
+  expect(projectWriteAllowed({path:root+"/calculator.py",content:"",overwrite:true})).toBe(false);
+  expect(projectWriteAllowed({path:root+"/calculator.py",content:"a".repeat(5001),overwrite:true})).toBe(false);
+  expect(projectWriteAllowed({path:root+"/calculator.py",content:src,overwrite:true,run:true})).toBe(false);
+ });
+ test("per-client owner-approved grant and explicit revoke remain mandatory",async()=>{
+  const out=newTrustedSession("rian.workspace.alpha",profile),value=JSON.parse(out.content[0].text);
+  expect(value.profile).toBe(profile);
+  expect(value.state).toBe("PENDING_APPROVAL");
+  expect(value.workspace).toBeUndefined();
+  expect(()=>ownedSession(value.session_id,"rian.workspace.beta")).toThrow();
+  const status=JSON.parse((await trustedDispatch("rian_eemf_trusted_session_status",{session_id:value.session_id},"rian.workspace.alpha")).content[0].text);
+  expect(status.workspace).toBe(root);
+  const revoked=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:value.session_id},"rian.workspace.alpha")).content[0].text);
+  expect(revoked.state).toBe("REVOKED");
+ });
+ test("CAS preflight, owner proof and file readback enforced in source",()=>{
+  expect(source).toContain("projectTrackRead(clientId,args.path,val.result.content)");
+  expect(source).toContain("projectKey(clientId,args.path)");
+  expect(source).toContain("snap.until<=now()");
+  expect(source).toContain("projectDigest(previous)!==snap.hash");
+  expect(source).toContain("CAS conflict: file modified since last read; refresh first");
+  expect(source).toContain("Write verification failed");
+  expect(source).toContain("grant.remaining--");
+  expect(source).toContain('if(!a||a.exp<now()||a.clientId!==clientId)');
+  expect(source).toContain('passwordOK(f.get("password")');
+  expect(source).toContain('relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true)');
  });
 });
