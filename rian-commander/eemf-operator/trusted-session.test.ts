@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,salCommandAllowed,salWriteAllowed}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,devTaskSafePath,devTaskParseScope,devTaskCommands,devTaskAllowedCommand,devTaskAllowedWrite}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -352,83 +352,107 @@ describe("V2 project folder, pinned tests and rollback policies",()=>{
  });
 });
 
-describe("Salpion PR16 Git task scoped trust — one approval for fetch/worktree/test",()=>{
- const profile="dev-salpion-pr16-v1",docs="Documents";
- const root="Documents/RIAN-Salpion-PR16",worktree=root+"/pr16";
- const sha="3db3637ab74a74918ffa09c8d034fc8485fe3cfd";
- const boot=["python","-I","-S","-c","from pathlib import Path;Path('RIAN-Salpion-PR16').mkdir(exist_ok=True);print('RIAN_SALPION_READY')"];
- const supported=[
-  {id:"bootstrap",cwd:docs,argv:boot},
-  {id:"clone",cwd:root,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none","https://github.com/youthofdnation/rian-vision-reliability.git","repo"]},
-  {id:"fetch",cwd:root,argv:["git","-C","repo","fetch","--no-tags","origin","refs/pull/16/head:refs/remotes/origin/pr-16"]},
-  {id:"worktree",cwd:root,argv:["git","-c","core.hooksPath=NUL","-C","repo","worktree","add","--detach","../pr16",sha]},
-  {id:"status",cwd:root,argv:["git","-C","pr16","status","--short","--untracked-files=normal"]},
-  {id:"head",cwd:root,argv:["git","-C","pr16","rev-parse","HEAD"]},
-  {id:"diff",cwd:root,argv:["git","-C","pr16","diff","--","tools/its_small_object_eval.py","rian_pr16_notes.md"]},
-  {id:"test",cwd:worktree,argv:["python","-I","-c","import os;os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';import pytest;raise SystemExit(pytest.main(['tests/test_its_small_object_eval.py','-q','-p','no:cacheprovider']))"]}
- ];
- test("admits pinned Git workflow and test without a repeated browser approval",()=>{
-  for(const step of supported){
-   expect(salCommandAllowed({cwd:step.cwd,argv:step.argv,timeout:25}).argv).toEqual(step.argv);
-   expect(approvalRequestSeconds("rian_eemf_run_command",{cwd:step.cwd,argv:step.argv,timeout:25})).toBe(1800);
-   expect(validateTrustedMailCommand({cwd:step.cwd,argv:step.argv,timeout:25},profile).argv).toEqual(step.argv);
+describe("generic owner-approved development worktree sessions (no project-specific hardcoding)",()=>{
+ const intent={
+  argv:["RIAN_DEV_SCOPE_V1","testowner","sample-repo","12","a".repeat(40),
+     "src/controller.test.ts","b".repeat(40),"src/controller.ts;docs/developer.md"],
+  cwd:"Documents",timeout:20
+ };
+ const config=devTaskParseScope(intent);
+ const valid=(x:unknown)=>{try{devTaskParseScope(x);return true}catch{return false}};
+ test("manifest binds owner, repository, PR, commit, test file and precise edit paths",()=>{
+  expect(config.owner).toBe("testowner");
+  expect(config.repo).toBe("sample-repo");
+  expect(config.pr).toBe("12");
+  expect(config.sha).toBe("a".repeat(40));
+  expect(config.testBlob).toBe("b".repeat(40));
+  expect(config.editable).toEqual(["src/controller.ts","docs/developer.md"]);
+  expect(config.base).toBe("Documents/RIAN-Commander-Dev/testowner-sample-repo-pr12");
+  expect(config.url).toBe("https://github.com/testowner/sample-repo.git");
+  expect(config.tree).toBe(config.base+"/tree");
+ });
+ test("rejects unreviewed scope mutations and path traversal",()=>{
+  const variants=[(x:any)=>x.argv[0]="python",
+    (x:any)=>x.cwd="Documents/private",(x:any)=>x.argv[1]="owner;echo hacked",
+    (x:any)=>x.argv[2]="../other",(x:any)=>x.argv[3]="0",
+    (x:any)=>x.argv[4]="incorrect-sha",(x:any)=>x.argv[5]="build/output.test.ts",
+    (x:any)=>x.argv[5]="tests/../test_bad.py",
+    (x:any)=>x.argv[6]="badblob",(x:any)=>x.argv[7]="src/file.ts;src/file.ts",
+    (x:any)=>x.argv[7]="tests/test_bad.py",
+    (x:any)=>x.argv[7]=".github/workflows/ci.yml",
+    (x:any)=>x.argv[7]="src/controller.test.ts",
+    (x:any)=>x.timeout=31,(x:any)=>x.extra=true];
+  for(const change of variants){const item=structuredClone(intent);change(item);expect(valid(item)).toBe(false);}
+ });
+ test("supports pinned Python or Bun tests, forbids hidden and escaped files",()=>{
+  expect(devTaskSafePath("rian-commander/eemf-operator/trusted-session.test.ts","test")).toBe(true);
+  expect(devTaskSafePath("tests/test_contract.py","test")).toBe(true);
+  expect(devTaskSafePath("nested/tests/test_contract.py","test")).toBe(true);
+  expect(devTaskSafePath("src/controller.test.ts","edit")).toBe(true);
+  for(const unsafe of ["tests/../evil.py","src/.env","src/.git/config",
+      "src/../../password.py","src/test_contract.py","src/node_modules/pkg.ts",
+      "src/foo/config.sh"])
+   expect(devTaskSafePath(unsafe,"edit")).toBe(false);
+ });
+ test("permits only the generated exact Git clone/fetch/worktree/status/diff/test commands",()=>{
+  const commands=devTaskCommands(config);
+  expect(commands.map(x=>x.name)).toEqual(["prepare","clone","fetch","worktree","status","head","worktrees","diff","tests"]);
+  for(const command of commands){
+   expect(devTaskAllowedCommand({argv:command.argv,cwd:command.cwd,timeout:25},config).argv).toEqual(command.argv);
+   expect(command.limit).toBeGreaterThanOrEqual(25);
   }
+  expect(commands.find(x=>x.name==="clone")!.argv).toContain("credential.interactive=never");
+  expect(commands.find(x=>x.name==="worktree")!.argv).toContain("core.hooksPath=NUL");
+  expect(commands.find(x=>x.name==="tests")!.argv).toContain("src/controller.test.ts");
  });
- test("blocks push, reset, clean, alternate fetch URL, arbitrary Python and shells",()=>{
-  const bad=[["git","push","origin","main"],["git","reset","--hard"],["git","clean","-fd"],
-    ["git","fetch","https://attacker.example/evil"],["git","-C","repo","worktree","remove","../pr16"],
-    ["git","clone","https://attacker.example/evil","repo"],["python","-c","print(1)"],
-    ["powershell","-Command","whoami"],["cmd","/c","dir"],["python","-m","pip","install","pytest"]];
-  for(const argv of bad)expect(()=>salCommandAllowed({cwd:root,argv,timeout:25})).toThrow();
-  expect(approvalRequestSeconds("rian_eemf_run_command",{cwd:root,argv:["git","reset","--hard"],timeout:20})).toBe(300);
+ test("denies push, reset, clean, shell, package install and unapproved worktree removal",()=>{
+  const invalid=[
+   ["git","push","origin","main"],["git","reset","--hard"],["git","clean","-fd"],
+   ["git","worktree","remove","../tree"],["git","clone","https://attacker.example/evil","repo"],
+   ["powershell","-Command","whoami"],["cmd","/c","dir"],
+   ["python","-c","import os;os.system('whoami')"],["npm","install"],["pip","install","x"]
+  ];
+  for(const argv of invalid)expect(()=>devTaskAllowedCommand({argv,cwd:config.base,timeout:25},config)).toThrow();
+  expect(()=>devTaskAllowedCommand({argv:devTaskCommands(config)[2].argv,cwd:"Documents/other",timeout:25},config)).toThrow();
+  expect(()=>devTaskAllowedCommand({argv:devTaskCommands(config).at(-1)!.argv,cwd:config.tree,timeout:91},config)).toThrow();
  });
- test("rejects other workspace, extra fields and excessive timeout",()=>{
-  expect(()=>salCommandAllowed({cwd:"Documents/private",argv:supported[2].argv,timeout:25})).toThrow();
-  expect(()=>salCommandAllowed({cwd:worktree,argv:supported[7].argv,timeout:91})).toThrow();
-  expect(()=>salCommandAllowed({cwd:docs,argv:boot,timeout:20,recursive:true})).toThrow();
+ test("project source writes are limited to user-reviewed exact paths and 11.5k bytes",()=>{
+  expect(devTaskAllowedWrite({path:config.tree+"/src/controller.ts",content:"export const x=1;",overwrite:true},config)).toBe(true);
+  expect(devTaskAllowedWrite({path:config.tree+"/docs/developer.md",content:"# Notes",overwrite:false},config)).toBe(true);
+  for(const x of [
+   {path:config.tree+"/src/controller.test.ts",content:"x",overwrite:true},
+   {path:config.tree+"/src/../hidden.ts",content:"x",overwrite:true},
+   {path:config.tree+"/src/controller.ts",content:"a".repeat(11501),overwrite:true},
+   {path:config.tree+"/src/controller.ts",content:" ",overwrite:true},
+   {path:config.tree+"/src/controller.ts",content:"x",overwrite:true,delete:true}
+  ])expect(devTaskAllowedWrite(x,config)).toBe(false);
  });
- test("only pinned source overwrite and notes create/edit are allowed",()=>{
-  const src=worktree+"/tools/its_small_object_eval.py",note=worktree+"/rian_pr16_notes.md";
-  expect(salWriteAllowed({path:src,content:"def f():\n    return 1\n",overwrite:true})).toBe(true);
-  expect(salWriteAllowed({path:note,content:"# PR16 observations\n",overwrite:false})).toBe(true);
-  expect(salWriteAllowed({path:note,content:"# PR16 updated\n",overwrite:true})).toBe(true);
-  const refused=[{path:src,content:"x",overwrite:false},
-    {path:worktree+"/tests/test_its_small_object_eval.py",content:"x",overwrite:true},
-    {path:worktree+"/../other.py",content:"x",overwrite:true},
-    {path:worktree+"/.git/config",content:"x",overwrite:true},
-    {path:src,content:"z".repeat(11501),overwrite:true},
-    {path:src,content:"",overwrite:true},
-    {path:src,content:"x",overwrite:true,force:true}];
-  for(const x of refused)expect(salWriteAllowed(x)).toBe(false);
+ test("owner-signed time grant is required, never relay the synthetic manifest as a PC command",()=>{
+  expect(source).toContain('if(profile===DEV_TASK_PROFILE&&mode!=="timed")');
+  expect(source).toContain('const manifest=profile===DEV_TASK_PROFILE?devTaskParseScope(item.args):null;');
+  expect(source).toContain('scopeHash:manifest?devTaskScopeDigest(manifest):null');
+  expect(source).toContain('if(profile===DEV_TASK_PROFILE){');
+  expect(source).toContain('현재 PC에서 명령은 실행하지 않았습니다.');
+  expect(source).toContain('passwordOK(f.get("password")');
+  expect(source).toContain('if(s.profile===DEV_TASK_PROFILE){if(!s.scope||s.scopeHash!==devTaskScopeDigest(s.scope))');
+  expect(source).toContain('s.clientId===clientId');
+  expect(approvalRequestSeconds("rian_eemf_run_command",intent)).toBe(1800);
+  expect(()=>newTrustedSession("rian.client", "dev-task-scope-v1")).toThrow();
  });
- test("scope is OAuth-client-owned and can be revoked",async()=>{
-  const proposed=JSON.parse(newTrustedSession("rian.salpion-test",profile).content[0].text);
-  expect(proposed.profile).toBe(profile);
-  expect(proposed.state).toBe("PENDING_APPROVAL");
-  expect(()=>ownedSession(proposed.session_id,"rian.other")).toThrow();
-  const detail=JSON.parse((await trustedDispatch("rian_eemf_trusted_session_status",{session_id:proposed.session_id},"rian.salpion-test")).content[0].text);
-  expect(detail.workspace).toBe(worktree);
-  const revoke=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:proposed.session_id},"rian.salpion-test")).content[0].text);
-  expect(revoke.state).toBe("REVOKED");
- });
- test("live gateway source gates trust on origin, pinned HEAD, tests, CAS and explicit owner password",()=>{
-  for(const rule of [
-   'const SAL_PROFILE="dev-salpion-pr16-v1"',
-   'const SAL_SHA="3db3637ab74a74918ffa09c8d034fc8485fe3cfd"',
-   'const SAL_TEST_BLOB="37ec260067e28620e6b0ee19d293991676624ae9"',
-   'async function salPreflight(command)',
-   'await salExec(["python","-I","-S","-c",SAL_GUARD]',
-   'text===expected',
-   'if(op.id==="tests")await salExec',
-   'SAL_FILE_GUARD','SAL_NOTE_GUARD',
-   'PR16 stale-source conflict',
-   's.clientId===clientId',
-   'passwordOK(f.get("password")',
-   'if(s.profile===SAL_PROFILE)await salPreflight(safe)',
-   'profile===SAL_PROFILE?',
-   'const approvalOptions=profile===SAL_PROFILE?',
-   'credential.interactive=never',
-   'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
-  ])expect(source).toContain(rule);
+ test("remote Git identity, test fixture pin and canonical path checks are present",()=>{
+  for(const snippet of [
+   "async function devTaskPreflight(safe,scope)",
+   "DEV_TASK_GUARD_SCRIPT",
+   "DEV_TASK_FILE_GUARD_SCRIPT",
+   '["git","-C","repo","remote","get-url","origin"]',
+   '["git","-C","repo","rev-parse","refs/remotes/origin/pr-"+scope.pr]',
+   '["git","-C","tree","rev-parse","HEAD"]',
+   '["git","-C","tree","hash-object",scope.test]',
+   "Conflict: project source changed since last read",
+   "Developer source write readback mismatch",
+   "await devTaskPreflight(safe,s.scope)",
+   'if(devTaskMaySnapshot(clientId,args.path)',
+  ])expect(source).toContain(snippet);
+  expect(source).not.toContain('dev-salpion-pr16-v1');
  });
 });
