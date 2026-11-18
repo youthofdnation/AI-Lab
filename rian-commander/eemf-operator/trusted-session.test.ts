@@ -336,7 +336,7 @@ describe("V2 project folder, pinned tests and rollback policies",()=>{
    'const V2_HISTORY=V2_ROOT+"/rian_history.json"',
    'const V2_RUNNER=',
    'async function v2RecoverLedger',
-   'if(snapshot.until<=now())',
+   'snapshot.until<=now()',
    'CAS conflict: file changed after last read',
    'log.state="COMPLETE"',
    'await v2SaveLedger(ledger)',
