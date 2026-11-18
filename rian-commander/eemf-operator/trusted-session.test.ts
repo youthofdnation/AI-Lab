@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,devTaskSafePath,devTaskParseScope,devTaskCommands,devTaskAllowedCommand,devTaskAllowedWrite}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,devTaskSafePath,devTaskParseScope,devTaskCommands,devTaskAllowedCommand,devTaskAllowedWrite,classifyEemfFailure}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -396,11 +396,18 @@ describe("generic owner-approved development worktree sessions (no project-speci
  });
  test("permits only the generated exact Git clone/fetch/worktree/status/diff/test commands",()=>{
   const commands=devTaskCommands(config);
-  expect(commands.map(x=>x.name)).toEqual(["prepare","clone","fetch","worktree","status","head","worktrees","diff","tests"]);
+  expect(commands.map(x=>x.name)).toEqual(["prepare","toolchain","clone","fetch","worktree","status","head","worktrees","diff","tests"]);
   for(const command of commands){
    expect(devTaskAllowedCommand({argv:command.argv,cwd:command.cwd,timeout:25},config).argv).toEqual(command.argv);
    expect(command.limit).toBeGreaterThanOrEqual(25);
   }
+  const probe=commands.find(x=>x.name==="toolchain")!;
+  expect(probe.cwd).toBe("Documents");
+  expect(probe.argv.slice(0,4)).toEqual(["python","-I","-S","-c"]);
+  expect(probe.argv[4]).toContain("RIAN_TOOLCHAIN_V1");
+  expect(probe.argv[4]).toContain("shutil.which");
+  expect(probe.argv[4]).not.toContain("subprocess");
+  expect(probe.argv[4]).not.toContain("os.system");
   expect(commands.find(x=>x.name==="clone")!.argv).toContain("credential.interactive=never");
   expect(commands.find(x=>x.name==="worktree")!.argv).toContain("core.hooksPath=NUL");
   expect(commands.find(x=>x.name==="tests")!.argv).toContain("src/controller.test.ts");
@@ -458,5 +465,42 @@ describe("generic owner-approved development worktree sessions (no project-speci
    'if(devTaskMaySnapshot(clientId,args.path)',
   ])expect(source).toContain(snippet);
   expect(source).not.toContain('dev-salpion-pr16-v1');
+ });
+});
+
+describe("EEMFO3L agent rejection diagnostics",()=>{
+ test("distinguishes common missing-executable messages without echoing raw paths",()=>{
+  for(const raw of [
+   {ok:false,error:"bun.exe : The term 'bun' is not recognized as the name of a cmdlet"},
+   {ok:false,error:{message:"CommandNotFoundException: bun"}},
+   {ok:false,reason:"Executable missing: bun"}
+  ])expect(classifyEemfFailure(raw)).toBe("EXECUTABLE_NOT_FOUND");
+ });
+ test("recognizes permission, directory and timeout failure categories",()=>{
+  expect(classifyEemfFailure({ok:false,error:"Not permitted by agent policy"})).toBe("AGENT_POLICY_DENIED");
+  expect(classifyEemfFailure({ok:false,error:"can_exec is not enabled"})).toBe("AGENT_EXECUTION_DISABLED");
+  expect(classifyEemfFailure({ok:false,error:"Working directory does not exist"})).toBe("WORKDIR_UNAVAILABLE");
+  expect(classifyEemfFailure({ok:false,error:"Job timed out"})).toBe("EXECUTION_TIMEOUT");
+  expect(classifyEemfFailure({ok:false,error:"Process exited with exit code 1"})).toBe("PROCESS_FAILED");
+ });
+ test("never prints attacker-controlled error details or treats non-zero code as agent rejection",()=>{
+  expect(classifyEemfFailure({ok:true,result:{exit_code:1}})).toBe("NONE");
+  expect(classifyEemfFailure(null)).toBe("INVALID_AGENT_RESULT");
+  expect(classifyEemfFailure({ok:false,error:"secret-token-12345"})).toBe("AGENT_REJECTED_UNCLASSIFIED");
+  expect(source).toContain('throw Error("RIAN_EEMF_"+category)');
+  expect(source).toContain('throw Error("RIAN_RELAY_"+classifyEemfFailure');
+  expect(source).not.toContain('throw Error("EEMFO3L agent rejected the operation")');
+  expect(source).not.toContain('console.warn("RIAN_AGENT_REJECTED",parsed)');
+ });
+ test("toolchain probe is pinned to owner-reviewed manifest and cannot become arbitrary shell",()=>{
+  expect(source).toContain("DEV_TASK_TOOLCHAIN_SCRIPT");
+  expect(source).toContain('if(cmd.name==="clone"||cmd.name==="toolchain")return;');
+  expect(source).toContain("DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT+DEV_TASK_TOOLCHAIN_SCRIPT");
+  expect(source).toContain("DEV_TASK_POLICY+DEV_TASK_SETUP_SCRIPT+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT+DEV_TASK_TOOLCHAIN_SCRIPT");
+  const scope=devTaskParseScope({cwd:"Documents",argv:["RIAN_DEV_SCOPE_V1","testowner","repo","3","a".repeat(40),"tests/test_check.py","b".repeat(40),"src/check.py"],timeout:15});
+  const probe=devTaskCommands(scope).find(x=>x.name==="toolchain")!;
+  expect(devTaskAllowedCommand({cwd:probe.cwd,argv:probe.argv,timeout:20},scope).argv).toEqual(probe.argv);
+  expect(()=>devTaskAllowedCommand({cwd:probe.cwd,argv:["python","-c","import os;os.system('whoami')"],timeout:20},scope)).toThrow();
+  expect(()=>devTaskAllowedCommand({cwd:"Documents/private",argv:probe.argv,timeout:20},scope)).toThrow();
  });
 });
