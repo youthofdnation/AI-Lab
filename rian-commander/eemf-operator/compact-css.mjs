@@ -3,7 +3,7 @@ import {deflateRawSync,inflateRawSync} from "node:zlib";
 import {createHash} from "node:crypto";
 
 const src=readFileSync("gateway.ts","utf8");
-const pattern=/const PORTAL_CSS=String\\.raw`([\\s\\S]*?)`;/g;
+const pattern=/const PORTAL_CSS=String\.raw`([\s\S]*?)`;/g;
 const hits=[...src.matchAll(pattern)];
 if(hits.length!==1)throw Error("Expected exactly one literal owner portal CSS block");
 const match=hits[0],css=match[1];
