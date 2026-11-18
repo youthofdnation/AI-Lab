@@ -81,3 +81,32 @@ The owner approves **once** in the independent HTTPS browser page by entering th
 - To verify E2E, refresh/reconnect the personal `rian_eemf_owner` ChatGPT MCP connection so the new four tools are discovered; request a session, approve once in the browser, execute two allowed commands without additional password prompts, then revoke and verify refusal.
 - For Outlook's `outlook_bridge.py sync --days 180 --max-messages 3000`, the source reads IMAP and writes a local index but may exceed the current synchronous relay limit. Build an independently approved durable background job workflow before admitting it to a trusted profile. Confirm employer policy and data-retention requirements.
 
+
+## EEMFO3L developer toolchain diagnostics (2026-11-19)
+
+An explicitly owner-approved `dev-task-scope-v1` session now has an exact
+read-only `toolchain` command as well as the existing bounded Git/test commands.
+The probe uses standard Python `shutil.which` and `Path.is_file` to check
+discoverability of `python`, `git`, `node`, `bun` and the conventional user
+Bun executable. It does NOT run Bun, modify files, install software, or access credentials.
+`not_in_path` only means that the agent process PATH does not expose the tool.
+`bun_user=present` means a file was found, not that it can be executed.
+
+The Owner Gateway now classifies rejected agent actions with bounded reason codes:
+`EXECUTABLE_NOT_FOUND`, `AGENT_EXECUTION_DISABLED`, `AGENT_POLICY_DENIED`,
+`WORKDIR_UNAVAILABLE`, `EXECUTION_TIMEOUT`, `PROCESS_FAILED`,
+`INVALID_AGENT_RESULT`, and `AGENT_REJECTED_UNCLASSIFIED`.
+Raw agent error strings are not echoed to the user or logged because they
+might contain confidential local paths or environment details.
+An actual nonzero test process exit code is distinct from agent rejection.
+
+Actual EEMFO3L evidence (2026-11-19): Git clone/fetch/worktree/status/diff
+ran under one owner approval. Running the pinned Bun test returned
+an agent rejection without stdout or exit status. Its cause remains UNVERIFIED
+(Bun may be unavailable, or local agent policy may deny its launch).
+
+Release: preserve owner-password approval, OAuth client binding, exact argv
+allowlists, task-scoped source writes and per-session limits. Gateway restart
+invalidates in-memory grants and requires another owner approval for a new probe.
+Do not bypass an intentional executable restriction through Python subprocess
+wrappers. Any change to the agent's executable policy needs separate owner consent.
