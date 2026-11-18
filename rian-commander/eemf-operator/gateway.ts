@@ -276,14 +276,14 @@ const SAL_SOURCE=SAL_WORKTREE+"/tools/its_small_object_eval.py",SAL_NOTES=SAL_WO
 const SAL_BOOT=["python","-I","-S","-c","from pathlib import Path;Path('RIAN-Salpion-PR16').mkdir(exist_ok=True);print('RIAN_SALPION_READY')"];
 const SAL_COMMANDS=[
  {id:"bootstrap",cwd:SAL_HOME,argv:SAL_BOOT},
- {id:"clone",cwd:SAL_BASE,argv:["git","clone","--no-checkout","--filter=blob:none",SAL_URL,"repo"]},
+ {id:"clone",cwd:SAL_BASE,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none",SAL_URL,"repo"]},
  {id:"fetch",cwd:SAL_BASE,argv:["git","-C","repo","fetch","--no-tags","origin","refs/pull/16/head:refs/remotes/origin/pr-16"]},
- {id:"worktree",cwd:SAL_BASE,argv:["git","-C","repo","worktree","add","--detach","../pr16",SAL_SHA]},
+ {id:"worktree",cwd:SAL_BASE,argv:["git","-c","core.hooksPath=NUL","-C","repo","worktree","add","--detach","../pr16",SAL_SHA]},
  {id:"status",cwd:SAL_BASE,argv:["git","-C","pr16","status","--short","--untracked-files=normal"]},
  {id:"head",cwd:SAL_BASE,argv:["git","-C","pr16","rev-parse","HEAD"]},
  {id:"worktree-list",cwd:SAL_BASE,argv:["git","-C","repo","worktree","list","--porcelain"]},
  {id:"diff",cwd:SAL_BASE,argv:["git","-C","pr16","diff","--","tools/its_small_object_eval.py","rian_pr16_notes.md"]},
- {id:"tests",cwd:SAL_WORKTREE,argv:["python","-I","-m","pytest","tests/test_its_small_object_eval.py","-q","-p","no:cacheprovider"]}
+ {id:"tests",cwd:SAL_WORKTREE,argv:["python","-I","-c","import os;os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';import pytest;raise SystemExit(pytest.main(['tests/test_its_small_object_eval.py','-q','-p','no:cacheprovider']))"]}
 ];
 const SAL_GUARD="from pathlib import Path;r=Path('RIAN-Salpion-PR16');assert r.is_dir() and not r.is_symlink() and r.resolve().parent==Path.cwd().resolve();assert all(not (r/n).is_symlink() and (not (r/n).exists() or ((r/n).is_dir() and (r/n).resolve().parent==r.resolve())) for n in ('repo','pr16'));print('RIAN_PATH_OK')";
 const SAL_FILE_GUARD="from pathlib import Path;r=Path.cwd().resolve();p=Path('tools/its_small_object_eval.py');assert r.name=='pr16' and r.parent.name=='RIAN-Salpion-PR16' and p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and p.parent.resolve().parent==r;print('RIAN_FILE_OK')";
@@ -845,10 +845,11 @@ function actionPage(id,item,msg=""){
  const profile=item.clientId?eligibleTrustProfile(item.operation,item.args):null;
  const proof=ticket({type:"eemf-action-approval",id,exp:now()+([SAL_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
  const label=profile===SAL_PROFILE?"EEMFO3L 살피온 PR16 전용 Git clone·fetch·worktree·상태/차이·지정 pytest 및 제한된 파일 수정":profile===V2_PROFILE?"전용 테스트 프로젝트 상위 .py/.md 파일 최대 8개 편집, 변경 이력 저장과 내용 롤백, 검증된 계산기 단위 테스트만 실행":profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
+ const approvalOptions=profile===SAL_PROFILE?'<option value="timed" selected>선택한 시간 동안 같은 범위 반복 허용</option><option value="once">이번 명령만 승인</option>':'<option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option>';
  const options=profile?
-  '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode"><option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option></select>'+
+  '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode">'+approvalOptions+'</select>'+
   '<p>허용 범위: '+escape(label)+'. '+escape(profile===SAL_PROFILE?"허용: Documents/RIAN-Salpion-PR16 격리 폴더, 비공개 rian-vision-reliability PR16 고정 커밋, clone/fetch/worktree/status/diff, 고정 pytest, tools/its_small_object_eval.py 및 rian_pr16_notes.md 수정. 원본 해시 불일치 시 수정 차단. Git push/reset/clean, 임의 쉘, 삭제, 설치, GPU, 운영 배포는 금지합니다. 1~60분 및 최대 60회 내 연속 실행됩니다.":profile===V2_PROFILE?"허용 범위는 RIAN-Commander-Smoke 상위 .py/.md 최대 8개 파일입니다. 기존 파일은 먼저 읽어야 하며 해시가 다르면 수정하지 않습니다. 이전 내용은 rian_history.json에 저장되어 되돌릴 수 있습니다. 계산기 단위 테스트는 고정된 AST 검사기와 테스트 원본 검증을 통과한 경우에만 실행합니다. 새 파일의 삭제를 통한 롤백 및 일반 터미널은 허용하지 않습니다.":profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
-  '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="30" required>'+
+  '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="'+(profile===SAL_PROFILE?"60":"30")+'" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
  return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>승인 요청 만료 시각: '+escape(new Date(item.exp*1000).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"}))+' (한국시간). 이 버전 확인 요청은 최대 30분, 일반 명령·파일 쓰기는 5분입니다.</p><p>사용자가 승인 방식과 시간을 선택합니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(proof)+'">'+options+'<label for="password">소유자 암호</label><input name="password" id="password" type="password" minlength="20" autocomplete="current-password" required><button type="submit">선택한 방식으로 승인 및 실행</button></form>',200,"same-origin");
