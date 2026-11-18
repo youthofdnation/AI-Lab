@@ -274,6 +274,7 @@ const DEV_TASK_ROOT="Documents/RIAN-Commander-Dev",DEV_TASK_HOME="Documents",DEV
 const DEV_TASK_MAX_BYTES=11500;
 const DEV_TASK_SETUP_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');assert not r.is_symlink();r.mkdir(exist_ok=True);assert r.resolve().parent==Path.cwd().resolve();p=r/sys.argv[1];assert not p.exists() and not p.is_symlink();p.mkdir();print('RIAN_DEV_READY')";
 const DEV_TASK_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');p=r/sys.argv[1];assert r.is_dir() and not r.is_symlink() and r.resolve().parent==Path.cwd().resolve() and p.is_dir() and not p.is_symlink() and p.resolve().parent==r.resolve();assert all(not (p/x).is_symlink() for x in ('repo','tree'));print('RIAN_DEV_GUARD_OK')";
+const DEV_TASK_TOOLCHAIN_SCRIPT="import shutil;from pathlib import Path; b=Path.home()/'.bun'/'bin'/'bun.exe'; names=('python','git','node','bun'); print('RIAN_TOOLCHAIN_V1 '+','.join(name+'='+('discoverable' if shutil.which(name) else 'not_in_path') for name in names)+',bun_user='+('present' if b.is_file() and not b.is_symlink() else 'absent'))";
 const DEV_TASK_FILE_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev')/sys.argv[1]/'tree';p=r/sys.argv[2];assert r.is_dir() and not r.is_symlink() and p.parent.resolve().is_relative_to(r.resolve());assert not p.is_symlink() and all(not x.is_symlink() for x in p.parents if x.exists());print('RIAN_DEV_FILE_OK')";
 export function devTaskSafePath(path,extension){
  if(typeof path!=="string"||path.length>180||path.startsWith("/")||path.includes("\\")||path.includes(":"))return false;
@@ -308,6 +309,7 @@ export function devTaskCommands(s){
   ["bun","test",testArg];
  return [
   {name:"prepare",cwd:DEV_TASK_HOME,argv:["python","-I","-S","-c",DEV_TASK_SETUP_SCRIPT,s.id],limit:30},
+  {name:"toolchain",cwd:DEV_TASK_HOME,argv:["python","-I","-S","-c",DEV_TASK_TOOLCHAIN_SCRIPT],limit:20},
   {name:"clone",cwd:shared,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none",s.url,"repo"],limit:90},
   {name:"fetch",cwd:shared,argv:["git","-c","credential.interactive=never","-C","repo","fetch","--no-tags","origin","refs/pull/"+s.pr+"/head:refs/remotes/origin/pr-"+s.pr],limit:90},
   {name:"worktree",cwd:shared,argv:["git","-c","core.hooksPath=NUL","-c","filter.lfs.required=false","-c","filter.lfs.smudge=","-C","repo","worktree","add","--detach","../tree",s.sha],limit:90},
@@ -332,7 +334,7 @@ export function devTaskAllowedWrite(args,scope){
  const file=args.path?.startsWith(scope.tree+"/")?args.path.slice(scope.tree.length+1):null;
  return typeof file==="string"&&scope.editable.includes(file);
 }
-function devTaskScopeDigest(s){return projectDigest(DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT)}
+function devTaskScopeDigest(s){return projectDigest(DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT+DEV_TASK_TOOLCHAIN_SCRIPT)}
 async function devTaskCheckRun(argv,cwd,expect){
  const r=await relay("rian_eemf_run_command",{argv,cwd,timeout:25},true);
  if(r?.result?.exit_code!==0)throw Error("Developer task workspace or Git identity check failed");
@@ -344,7 +346,7 @@ async function devTaskPreflight(safe,scope){
  if(!cmd)throw Error("Not approved task command");
  if(cmd.name==="prepare")return;
  await devTaskCheckRun(["python","-I","-S","-c",DEV_TASK_GUARD_SCRIPT,scope.id],DEV_TASK_HOME,"RIAN_DEV_GUARD_OK");
- if(cmd.name==="clone")return;
+ if(cmd.name==="clone"||cmd.name==="toolchain")return;
  await devTaskCheckRun(["git","-C","repo","remote","get-url","origin"],scope.base,scope.url);
  if(cmd.name==="fetch")return;
  if(cmd.name==="worktree"){
@@ -502,7 +504,7 @@ export function approvalRequestSeconds(operation,args){
  return profile===DEV_TASK_PROFILE?DEV_TASK_APPROVAL_SECONDS:[V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
- if(profile===DEV_TASK_PROFILE)return projectDigest(DEV_TASK_POLICY+DEV_TASK_SETUP_SCRIPT+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT);
+ if(profile===DEV_TASK_PROFILE)return projectDigest(DEV_TASK_POLICY+DEV_TASK_SETUP_SCRIPT+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT+DEV_TASK_TOOLCHAIN_SCRIPT);
  if(profile===V2_PROFILE)return v2Sha(V2_POLICY_PIN+V2_ROOT+V2_RUNNER+V2_HISTORY_INIT+JSON.stringify(V2_BOOT)+JSON.stringify(V2_RUN));
  if(profile===PROJECT_PROFILE)return projectDigest(PROJECT_PIN+PROJECT_DIR+PROJECT_FILE+PROJECT_NOTES+JSON.stringify(PROJECT_COMPILE));
  if(profile===SMOKE_PROFILE)return createHash("sha256").update(SMOKE_PIN+SMOKE_BUG+SMOKE_FIXED+SMOKE_TEST+JSON.stringify(SMOKE_BOOT)+JSON.stringify(SMOKE_RUN)).digest("hex");
@@ -567,6 +569,21 @@ function safeArgs(name,args){
  }
  throw Error("Unknown tool");
 }
+
+export function classifyEemfFailure(response){
+ if(!response||typeof response!=="object"||Array.isArray(response))return "INVALID_AGENT_RESULT";
+ if(response.ok===true)return "NONE";
+ const v=[response.error,response.message,response.reason,response.result?.error,response.result?.message];
+ const d=v.map(x=>typeof x==="string"?x:typeof x?.message==="string"?x.message:typeof x?.code==="string"?x.code:"").join(" ").slice(0,3000).toLowerCase();
+ if(/(commandnotfound|executable[_ -]not[_ -]found|not recognized|not_in_path|executable missing|file not found: (bun|node|python|git)|cannot find.*(bun|node|python|git))/.test(d))return "EXECUTABLE_NOT_FOUND";
+ if(/(disabled|can_exec.*false|not enabled)/.test(d))return "AGENT_EXECUTION_DISABLED";
+ if(/(not allowed|not permitted|blocked|denied|unauthorized|policy)/.test(d))return "AGENT_POLICY_DENIED";
+ if(/(working directory|cwd|path not found|cannot find path|directory does not exist)/.test(d))return "WORKDIR_UNAVAILABLE";
+ if(/(timed out|timeout|deadline exceeded)/.test(d))return "EXECUTION_TIMEOUT";
+ if(/(exit code|non.?zero|process.*failed)/.test(d))return "PROCESS_FAILED";
+ return "AGENT_REJECTED_UNCLASSIFIED";
+}
+
 async function relay(name,args,ownerApproved=false){
  const headers={"authorization":"Bearer "+backendKey,"content-type":"application/json"};
  if(ownerApproved){
@@ -577,10 +594,10 @@ async function relay(name,args,ownerApproved=false){
  }
  const r=await fetch(backend,{method:"POST",redirect:"error",headers,body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}),signal:AbortSignal.timeout(42000)});
  if(!r.ok)throw Error("Relay HTTP "+r.status);
- const v=await r.json();if(v.error||v.result?.isError)throw Error("Relay denied");
+ const v=await r.json();if(v.error)throw Error("RIAN_RELAY_PROTOCOL_REJECTED");if(v.result?.isError)throw Error("RIAN_RELAY_"+classifyEemfFailure({ok:false,error:v.result?.content?.[0]?.text}));
  let parsed;
  try{parsed=JSON.parse(v.result?.content?.[0]?.text||"{}")}catch{throw Error("Invalid relay result")}
- if(parsed.ok!==true)throw Error("EEMFO3L agent rejected the operation");
+ if(parsed.ok!==true){const category=classifyEemfFailure(parsed);if(ownerApproved)console.warn("RIAN_AGENT_REJECTED",JSON.stringify({category,device,operation:name}));throw Error("RIAN_EEMF_"+category)}
  return parsed;
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
