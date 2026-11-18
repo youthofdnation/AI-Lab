@@ -166,7 +166,7 @@ describe("approval request TTL hardening (bug: GET 200 then POST 409 7 seconds l
   expect(approvalRequestSeconds("rian_eemf_run_command",{argv:["python","outlook_bridge.py","doctor"],cwd:"Documents/rian-outlook-bridge",timeout:20})).toBe(300);
  });
  test("source displays expiration and preserves signed browser form and owner approval",()=>{
-  expect(source).toContain("const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600");
+  expect(source).toContain("const DEV_APPROVAL_SECONDS=1800,DEV_TASK_APPROVAL_SECONDS=86400,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600");
   expect(source).toContain("const ttl=approvalRequestSeconds(operation,args),issuedAt=now()");
   expect(source).toContain("exp:issuedAt+ttl");
   expect(source).toContain("expires_at:issuedAt+ttl");
@@ -436,8 +436,12 @@ describe("generic owner-approved development worktree sessions (no project-speci
   expect(source).toContain('passwordOK(f.get("password")');
   expect(source).toContain('if(s.profile===DEV_TASK_PROFILE){if(!s.scope||s.scopeHash!==devTaskScopeDigest(s.scope))');
   expect(source).toContain('s.clientId===clientId');
-  expect(approvalRequestSeconds("rian_eemf_run_command",intent)).toBe(1800);
+  expect(approvalRequestSeconds("rian_eemf_run_command",intent)).toBe(86400);
   expect(()=>newTrustedSession("rian.client", "dev-task-scope-v1")).toThrow();
+  expect(source).toContain("DEV_TASK_APPROVAL_SECONDS=86400");
+  expect(source).toContain("DEV_APPROVAL_FORM_SECONDS=600");
+  expect(source).toContain("TRUSTED_MAX_DURATION_SECONDS=3600");
+  expect(source).toContain("프로젝트 범위 시간 제한 승인");
  });
  test("remote Git identity, test fixture pin and canonical path checks are present",()=>{
   for(const snippet of [
