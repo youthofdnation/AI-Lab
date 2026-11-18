@@ -48,7 +48,7 @@ const tools=[
 {name:"rian_eemf_read_file",description:"Read UTF-8 text within EEMFO3L allowed home root",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
 {name:"rian_eemf_request_command",description:"Request an EEMFO3L command; browser lets owner choose per-command or scoped timed approval (eligible safe read-only commands only). Eligible commands reuse active session unless approval_mode=each.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"},approval_mode:{type:"string",enum:["choose","each"]}},required:["argv"],additionalProperties:false}},
 {name:"rian_eemf_request_write",description:"DRAFT a write to a permitted text file on EEMFO3L requiring browser approval. Does not write yet.",inputSchema:{type:"object",properties:{path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["path","content"],additionalProperties:false}},
-{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1","dev-workspace-edit-v1"]}},additionalProperties:false}},
+{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1","dev-workspace-edit-v1","dev-project-history-v2"]}},additionalProperties:false}},
 {name:"rian_eemf_trusted_session_status",description:"Check your specific session state, expiry and remaining calls.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
 {name:"rian_eemf_run_trusted_command",description:"Execute fixed allowlisted Proton/Outlook queries or developer python/git/node --version after owner-scoped approval. No general shell, sync, file read/write.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"},argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["session_id","argv","cwd"],additionalProperties:false}},
 {name:"rian_eemf_revoke_trusted_session",description:"Revoke your active read-only trusted session immediately.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
@@ -77,7 +77,7 @@ const projectSnapshots=new Map();
 function projectDigest(value){return createHash("sha256").update(value,"utf8").digest("hex")}
 function projectKey(client,path){return projectDigest(client+"|"+path)}
 function projectTrackRead(client,path,content){
- if(typeof client!=="string"||!client.startsWith("rian.")||![PROJECT_FILE,PROJECT_NOTES].includes(path)||typeof content!=="string"||Buffer.byteLength(content,"utf8")>PROJECT_MAX_BYTES)return;
+ if(typeof client!=="string"||!client.startsWith("rian.")||!([PROJECT_FILE,PROJECT_NOTES].includes(path)||v2MutablePath(path))||typeof content!=="string"||Buffer.byteLength(content,"utf8")>PROJECT_MAX_BYTES)return;
  if(projectSnapshots.size>=100)for(const [id,x] of projectSnapshots){if(x.until<=now())projectSnapshots.delete(id)}
  if(projectSnapshots.size>=100)projectSnapshots.delete(projectSnapshots.keys().next().value);
  projectSnapshots.set(projectKey(client,path),{hash:projectDigest(content),until:now()+PROJECT_SNAPSHOT_TTL});
@@ -122,11 +122,157 @@ async function projectScopedWrite(sessionId,args,clientId){
  }finally{grant.busy=false}
 }
 
+const V2_PROFILE="dev-project-history-v2",V2_CWD="Documents",V2_ROOT="Documents/RIAN-Commander-Smoke";
+const V2_HISTORY=V2_ROOT+"/rian_history.json",V2_RUNNER_FILE=V2_ROOT+"/_rian_runner.py";
+const V2_HISTORY_INIT='{"version":1,"entries":[]}';
+const V2_RUNNER="\"\"\"RIAN Commander isolated calculator-test runner.\n\nRestricted acceptance fixture, not a general-purpose sandbox. This script\ndoes not authorize running arbitrary Python code on the owner device.\n\"\"\"\nfrom pathlib import Path\nimport ast\nimport hashlib\nimport sys\nimport types\nimport unittest\n\nROOT = Path(__file__).resolve().parent\nSOURCE = ROOT / \"calculator.py\"\nTEST = ROOT / \"test_calculator.py\"\nTEST_SHA256 = \"6fb38286f1452c6d5745098123c9793e2c62c14248d49284edf5b45cc82b2161\"\nALLOWED = (\n    ast.Module, ast.FunctionDef, ast.arguments, ast.arg, ast.Name, ast.Load,\n    ast.Store, ast.Expr, ast.Constant, ast.If, ast.BoolOp, ast.Or, ast.Compare,\n    ast.Lt, ast.Raise, ast.Call, ast.Assign, ast.BinOp, ast.Mult, ast.Add,\n    ast.Return,\n)\nNAMES = {\"subtotal\", \"tax_rate\", \"tax_amount\", \"float\", \"ValueError\"}\n\ndef validate(tree):\n    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):\n        raise ValueError(\"exactly one calculator function required\")\n    fn = tree.body[0]\n    if (fn.name != \"total_with_tax\" or len(fn.args.args) != 2\n            or [a.arg for a in fn.args.args] != [\"subtotal\", \"tax_rate\"]\n            or fn.decorator_list or fn.args.vararg or fn.args.kwarg):\n        raise ValueError(\"unsupported calculator API\")\n    for node in ast.walk(tree):\n        if type(node) not in ALLOWED:\n            raise ValueError(\"disallowed syntax: \" + type(node).__name__)\n        if isinstance(node, ast.Name) and node.id not in NAMES:\n            raise ValueError(\"disallowed name: \" + node.id)\n        if isinstance(node, ast.Call) and (\n                not isinstance(node.func, ast.Name)\n                or node.func.id != \"ValueError\"\n                or len(node.args) != 1 or node.keywords\n                or not isinstance(node.args[0], ast.Constant)\n                or not isinstance(node.args[0].value, str)):\n            raise ValueError(\"disallowed function call\")\n        if isinstance(node, ast.Assign) and (\n                len(node.targets) != 1\n                or not isinstance(node.targets[0], ast.Name)\n                or node.targets[0].id != \"tax_amount\"):\n            raise ValueError(\"disallowed assignment\")\n        if isinstance(node, ast.If) and (\n                node.orelse or len(node.body) != 1\n                or not isinstance(node.body[0], ast.Raise)):\n            raise ValueError(\"unsupported branch\")\n        if isinstance(node, ast.Constant) and type(node.value) not in (str, int, float):\n            raise ValueError(\"unsupported constant\")\n    if not isinstance(fn.body[-1], ast.Return):\n        raise ValueError(\"return required\")\n\ndef main():\n    for path in (SOURCE, TEST):\n        if path.is_symlink() or not path.is_file() or path.stat().st_size > 5000:\n            raise ValueError(\"unsafe source or test path\")\n    source = SOURCE.read_text(encoding=\"utf-8\").replace(\"\\r\\n\", \"\\n\")\n    tests = TEST.read_text(encoding=\"utf-8\").replace(\"\\r\\n\", \"\\n\")\n    if hashlib.sha256(tests.encode(\"utf-8\")).hexdigest() != TEST_SHA256:\n        raise ValueError(\"pinned unittest fixture changed\")\n    tree = ast.parse(source, filename=\"calculator.py\")\n    validate(tree)\n\n    module = types.ModuleType(\"calculator\")\n    exec(compile(tree, \"calculator.py\", \"exec\"), module.__dict__)\n    sys.modules[\"calculator\"] = module\n    test_module = types.ModuleType(\"rian_pinned_unittest\")\n    exec(compile(tests, \"test_calculator.py\", \"exec\"), test_module.__dict__)\n    suite = unittest.defaultTestLoader.loadTestsFromModule(test_module)\n    if suite.countTestCases() != 4:\n        raise ValueError(\"unexpected test count\")\n    result = unittest.TextTestRunner(verbosity=2).run(suite)\n    return 0 if result.wasSuccessful() else 1\n\nif __name__ == \"__main__\":\n    try:\n        sys.exit(main())\n    except Exception as error:\n        print(\"RIAN_RUNNER_BLOCKED: \" + str(error), file=sys.stderr)\n        sys.exit(2)\n";
+const V2_BOOT=["python","-I","-S","-c","print('RIAN_PROJECT_V2_READY')"];
+const V2_RUN=["python","-I","-S","RIAN-Commander-Smoke/_rian_runner.py"];
+const V2_POLICY_PIN="v2:project-top-level-python-md|pinned-tests|AST-validated-runner|persisted-prior-text|2026-11-18";
+const V2_MAX_SOURCE_BYTES=5000,V2_MAX_HISTORY_BYTES=11000,V2_MAX_EDITABLE_FILES=8;
+let v2Busy=false;
+export function v2MutablePath(path){
+ if(typeof path!=="string"||!path.startsWith(V2_ROOT+"/")||path.length>220)return false;
+ const suffix=path.slice(V2_ROOT.length+1);
+ if(!/^[a-z][a-z0-9_-]{0,40}\.(?:py|md)$/.test(suffix))return false;
+ if(suffix.startsWith("test_")||suffix==="runner.py"||suffix==="history.py")return false;
+ return true;
+}
+export function v2WriteAllowed(a){
+ if(!a||typeof a!=="object"||Array.isArray(a)||Object.keys(a).some(k=>!["path","content","overwrite"].includes(k))||typeof a.content!=="string"||a.content.includes("\0"))return false;
+ if(a.path===V2_RUNNER_FILE)return a.overwrite===false&&a.content===V2_RUNNER;
+ if(a.path===V2_HISTORY)return a.overwrite===false&&a.content===V2_HISTORY_INIT;
+ return v2MutablePath(a.path)&&a.content.trim().length>0&&Buffer.byteLength(a.content,"utf8")<=V2_MAX_SOURCE_BYTES&&(a.overwrite===true||a.overwrite===false);
+}
+function v2Sha(content){return createHash("sha256").update(content,"utf8").digest("hex")}
+function v2ValidateLedger(data){
+ if(!data||typeof data!=="object"||data.version!==1||!Array.isArray(data.entries)||data.entries.length>7)throw Error("Invalid project history ledger");
+ for(const entry of data.entries){
+  if(!entry||typeof entry!=="object"||!v2MutablePath(entry.path)||!["PREPARED","COMPLETE","ABORTED"].includes(entry.state)||
+    !Number.isInteger(entry.at)||entry.at<0||
+    typeof entry.before!=="string"||Buffer.byteLength(entry.before,"utf8")>V2_MAX_SOURCE_BYTES||
+    typeof entry.before_sha!=="string"||!/^[a-f0-9]{64}$/.test(entry.before_sha)||
+    typeof entry.after_sha!=="string"||!/^[a-f0-9]{64}$/.test(entry.after_sha)||
+    (entry.before!==""&&v2Sha(entry.before)!==entry.before_sha))throw Error("Invalid history entry");
+ }
+ return data;
+}
+async function v2ReadLedger(){
+ const data=await relay("rian_eemf_read_file",{path:V2_HISTORY});
+ const content=data?.result?.content;
+ if(typeof content!=="string"||Buffer.byteLength(content,"utf8")>V2_MAX_HISTORY_BYTES)throw Error("Project history not initialized or too large");
+ try{return v2ValidateLedger(JSON.parse(content))}catch(e){throw Error("Project history unreadable or invalid: "+String(e.message))}
+}
+async function v2SaveLedger(ledger){
+ v2ValidateLedger(ledger);
+ let serialized=JSON.stringify(ledger);
+ while(Buffer.byteLength(serialized,"utf8")>V2_MAX_HISTORY_BYTES-500&&ledger.entries.length>1){
+  ledger.entries.shift();serialized=JSON.stringify(ledger);
+ }
+ if(Buffer.byteLength(serialized,"utf8")>V2_MAX_HISTORY_BYTES-500)throw Error("History too large; write stopped");
+ await relay("rian_eemf_write_file",{path:V2_HISTORY,content:serialized,overwrite:true},true);
+ const r=await relay("rian_eemf_read_file",{path:V2_HISTORY});
+ if(r?.result?.content!==serialized)throw Error("Durable history readback failed");
+}
+async function v2RecoverLedger(ledger){
+ const last=ledger.entries.at(-1);
+ if(!last||last.state!=="PREPARED")return;
+ const r=await relay("rian_eemf_read_file",{path:last.path});
+ const live=r?.result?.content;
+ if(typeof live!=="string")throw Error("Pending history cannot be recovered");
+ const hash=v2Sha(live);
+ if(hash===last.after_sha)last.state="COMPLETE";
+ else if(hash===last.before_sha)last.state="ABORTED";
+ else throw Error("History conflict: source diverged; manual review required");
+ await v2SaveLedger(ledger);
+}
+async function v2CheckPath(path){
+ if(!v2MutablePath(path))throw Error("Only owner-approved project files may be edited");
+ const dir=await relay("rian_eemf_list_directory",{path:V2_ROOT});
+ const entries=dir?.result?.entries;
+ if(!Array.isArray(entries)||entries.length>400)throw Error("Invalid project folder");
+ const filename=path.slice(V2_ROOT.length+1);
+ const existing=entries.find(x=>x.name===filename);
+ if(existing&&existing.type!=="file")throw Error("Target is not a regular file");
+ const editable=entries.filter(x=>x.type==="file"&&v2MutablePath(V2_ROOT+"/"+x.name));
+ if(editable.length>V2_MAX_EDITABLE_FILES)throw Error("Project file-count limit exceeded");
+ return {exists:!!existing,count:editable.length};
+}
+async function v2CheckPathOnPC(path){
+ const relative=path.slice("Documents/".length);
+ const script="from pathlib import Path;import sys;r=Path('RIAN-Commander-Smoke');p=Path(sys.argv[1]);assert not r.is_symlink() and r.is_dir() and p.parent.resolve()==r.resolve() and not p.is_symlink();print('PATH_OK')";
+ const args={argv:["python","-I","-S","-c",script,relative],cwd:V2_CWD,timeout:20};
+ const out=await relay("rian_eemf_run_command",args,true);
+ if(out?.result?.exit_code!==0||!String(out?.result?.stdout||"").includes("PATH_OK"))throw Error("PC canonical-path/symlink guard denied");
+}
+async function v2Write(sessionId,args,clientId){
+ const sess=ownedSession(sessionId,clientId);
+ if(sess.profile!==V2_PROFILE||currentSessionState(sess)!=="ACTIVE"||sess.remaining<=0||!v2WriteAllowed(args))throw Error("No project edit grant or write out of scope");
+ if(sess.busy||v2Busy)throw Error("Another project operation is running");
+ sess.busy=true;v2Busy=true;
+ try{
+  if(sess.sourceHash!==await trustedSourceDigest(V2_PROFILE)){sess.state="REVOKED";sess.remaining=0;throw Error("Project policy changed; session revoked")}
+  if(args.path===V2_RUNNER_FILE||args.path===V2_HISTORY){
+   const files=await relay("rian_eemf_list_directory",{path:V2_ROOT});
+   const name=args.path.slice(V2_ROOT.length+1);
+   if(files?.result?.entries?.some(x=>x.name===name))throw Error("Reserved project file already exists");
+   if(currentSessionState(sess)!=="ACTIVE")throw Error("Session expired");
+   sess.remaining--;await relay("rian_eemf_write_file",args,true);
+   const checked=await relay("rian_eemf_read_file",{path:args.path});
+   if(checked?.result?.content!==args.content)throw Error("Bootstrap file readback failure");
+   auditTrusted("v2_project_bootstrap",sessionId,{file:name,remaining:sess.remaining});
+   return sessionReply({profile:V2_PROFILE,device,path:args.path,state:currentSessionState(sess),write_verified:true,remaining_calls:sess.remaining,sha256:v2Sha(args.content)});
+  }
+  const pathState=await v2CheckPath(args.path);
+  if(args.overwrite!==pathState.exists)throw Error("Create/overwrite flag does not match remote file state");
+  if(!args.overwrite&&pathState.count>=V2_MAX_EDITABLE_FILES)throw Error("Project file count at limit");
+  await v2CheckPathOnPC(args.path);
+  let previous="",shaBefore=v2Sha(previous);
+  if(args.overwrite){
+   const snapshot=projectSnapshots.get(projectKey(clientId,args.path));
+   if(!snapshot||snapshot.until<=now())throw Error("Read source file in chat before editing: snapshot missing or expired");
+   const r=await relay("rian_eemf_read_file",{path:args.path});
+   previous=r?.result?.content;
+   if(typeof previous!=="string"||v2Sha(previous)!==snapshot.hash)throw Error("CAS conflict: file changed after last read");
+   shaBefore=v2Sha(previous);
+   if(previous===args.content)return sessionReply({profile:V2_PROFILE,path:args.path,state:currentSessionState(sess),no_change:true,sha256:shaBefore,remaining_calls:sess.remaining});
+  }
+  const ledger=await v2ReadLedger();
+  await v2RecoverLedger(ledger);
+  const newSha=v2Sha(args.content);
+  const rollback=ledger.entries.some(e=>e.state==="COMPLETE"&&e.path===args.path&&e.before_sha===newSha&&e.after_sha===shaBefore);
+  const log={path:args.path,at:now(),before:previous,before_sha:shaBefore,after_sha:newSha,state:"PREPARED",rollback,client_digest:projectDigest(clientId).slice(0,12)};
+  ledger.entries.push(log);
+  while(ledger.entries.length>6)ledger.entries.shift();
+  await v2SaveLedger(ledger);
+  if(currentSessionState(sess)!=="ACTIVE")throw Error("Session expired after durable history preparation");
+  if(args.overwrite){
+   const check=await relay("rian_eemf_read_file",{path:args.path});
+   if(v2Sha(check?.result?.content||"")!==shaBefore)throw Error("File changed during patch preparation");
+  }
+  sess.remaining--;
+  auditTrusted("v2_patch_submitted",sessionId,{file:args.path.slice(V2_ROOT.length+1),remaining:sess.remaining,rollback});
+  await relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true);
+  const final=await relay("rian_eemf_read_file",{path:args.path});
+  if(final?.result?.content!==args.content)throw Error("Source write readback differs from requested content");
+  log.state="COMPLETE";
+  await v2SaveLedger(ledger);
+  projectTrackRead(clientId,args.path,args.content);
+  auditTrusted("v2_patch_completed",sessionId,{remaining:sess.remaining,rollback});
+  return sessionReply({device,profile:V2_PROFILE,path:args.path,state:currentSessionState(sess),write_verified:true,rollback,remaining_calls:sess.remaining,precondition_sha256:shaBefore,sha256:newSha,history_file:V2_HISTORY,history_records:ledger.entries.length,diff:projectDiff(previous,args.content)});
+ }finally{sess.busy=false;v2Busy=false}
+}
+async function v2CheckRunner(){
+ const [r,t]=await Promise.all([relay("rian_eemf_read_file",{path:V2_RUNNER_FILE}),relay("rian_eemf_read_file",{path:SMOKE_TEST_PATH})]);
+ if(r?.result?.content!==V2_RUNNER||t?.result?.content!==SMOKE_TEST)throw Error("Pinned unit test runner or fixture changed; execution blocked");
+ await v2CheckPathOnPC(V2_ROOT+"/calculator.py");
+}
+
 const DEV_PROFILE="dev-version-checks-v1",DEV_CWD="Documents";
 const DEV_VERSION_CMDS=["python","git","node"];
 const DEV_POLICY_PIN="rian-commander|dev-version-checks-v1|cwd=Documents|python --version|git --version|node --version|no-write|2026-11-18";
 const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
-function trustedWorkspace(profile){return profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
+function trustedWorkspace(profile){return profile===V2_PROFILE?V2_ROOT:profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
 function trustedScript(profile){return profile===OUTLOOK_PROFILE?OUTLOOK_SOURCE:TRUSTED_SOURCE;}
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
 export function ownedSession(id,clientId){
@@ -145,6 +291,15 @@ export function currentSessionState(session,at=now()){
  return session.state;
 }
 export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
+ if(profile===V2_PROFILE){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||raw.cwd!==V2_CWD||!Array.isArray(raw.argv))throw Error("V2 project cwd/argv denied");
+  const exact=(arr,expected)=>arr.length===expected.length&&arr.every((x,i)=>x===expected[i]);
+  if(!exact(raw.argv,V2_BOOT)&&!exact(raw.argv,V2_RUN))throw Error("V2 permits only pinned bootstrap and safe unit tests");
+  const timeout=raw.timeout===undefined?25:raw.timeout;
+  if(!Number.isInteger(timeout)||timeout<1||timeout>35)throw Error("V2 test timeout denied");
+  return {argv:[...raw.argv],cwd:V2_CWD,timeout};
+ }
+
  if(profile===PROJECT_PROFILE){
   if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||raw.cwd!==PROJECT_CWD)throw Error("Project compile scope denied");
   if(!Array.isArray(raw.argv)||raw.argv.length!==PROJECT_COMPILE.length||!PROJECT_COMPILE.every((part,i)=>raw.argv[i]===part))throw Error("Only exact py_compile syntax checking is allowed; no Python code execution");
@@ -208,13 +363,14 @@ export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
 }
 export function eligibleTrustProfile(operation,args){
  if(operation!=="rian_eemf_run_command")return null;
- for(const p of [PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
+ for(const p of [V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
  return null;
 }
 export function approvalRequestSeconds(operation,args){
- return [PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
+ return [V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
+ if(profile===V2_PROFILE)return v2Sha(V2_POLICY_PIN+V2_ROOT+V2_RUNNER+V2_HISTORY_INIT+JSON.stringify(V2_BOOT)+JSON.stringify(V2_RUN));
  if(profile===PROJECT_PROFILE)return projectDigest(PROJECT_PIN+PROJECT_DIR+PROJECT_FILE+PROJECT_NOTES+JSON.stringify(PROJECT_COMPILE));
  if(profile===SMOKE_PROFILE)return createHash("sha256").update(SMOKE_PIN+SMOKE_BUG+SMOKE_FIXED+SMOKE_TEST+JSON.stringify(SMOKE_BOOT)+JSON.stringify(SMOKE_RUN)).digest("hex");
  if(profile===DEV_PROFILE)return createHash("sha256").update(DEV_POLICY_PIN,"utf8").digest("hex");
@@ -244,7 +400,7 @@ function safeArgs(name,args){
   return {path:safePath(args.path)};
  }
  if(name==="rian_eemf_request_trusted_session"){
-  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
+  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
   return {profile:args.profile||TRUSTED_PROFILE};
  }
  if(name==="rian_eemf_trusted_session_status"||name==="rian_eemf_revoke_trusted_session"){
@@ -296,7 +452,7 @@ async function relay(name,args,ownerApproved=false){
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
 export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
- if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
+ if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
@@ -364,6 +520,7 @@ export async function trustedDispatch(name,args,clientId){
   if(s.sourceHash!==digest){s.state="REVOKED";s.remaining=0;throw Error("Trusted script changed; session revoked")};
   if(currentSessionState(s)!=="ACTIVE")throw Error("Trusted session no longer active");
   if(s.profile===SMOKE_PROFILE&&JSON.stringify(safe.argv)===JSON.stringify(SMOKE_RUN))await smokeVerifySources();
+  if(s.profile===V2_PROFILE&&JSON.stringify(safe.argv)===JSON.stringify(V2_RUN))await v2CheckRunner();
   // Consume a quota unit before submitting so failures cannot evade limits.
   s.remaining--;
   auditTrusted("command_submitted",session_id,{remaining:s.remaining});
@@ -392,6 +549,8 @@ async function sendBackend(name,args,clientId){
     return smokeScopedWrite(sid,args,clientId);
    if(s.clientId===clientId&&s.profile===PROJECT_PROFILE&&currentSessionState(s)==="ACTIVE"&&projectWriteAllowed(args))
     return projectScopedWrite(sid,args,clientId);
+   if(s.clientId===clientId&&s.profile===V2_PROFILE&&currentSessionState(s)==="ACTIVE"&&v2WriteAllowed(args))
+    return v2Write(sid,args,clientId);
   }
  }
  if(name==="rian_eemf_request_command"){
@@ -594,11 +753,11 @@ function passwordOK(provided){
 function actionPage(id,item,msg=""){
  const description=item.operation==="rian_eemf_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
  const profile=item.clientId?eligibleTrustProfile(item.operation,item.args):null;
- const proof=ticket({type:"eemf-action-approval",id,exp:now()+([PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
- const label=profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
+ const proof=ticket({type:"eemf-action-approval",id,exp:now()+([V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
+ const label=profile===V2_PROFILE?"전용 테스트 프로젝트 상위 .py/.md 파일 최대 8개 편집, 변경 이력 저장과 내용 롤백, 검증된 계산기 단위 테스트만 실행":profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
  const options=profile?
   '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode"><option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option></select>'+
-  '<p>허용 범위: '+escape(label)+'. '+escape(profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
+  '<p>허용 범위: '+escape(label)+'. '+escape(profile===V2_PROFILE?"허용 범위는 RIAN-Commander-Smoke 상위 .py/.md 최대 8개 파일입니다. 기존 파일은 먼저 읽어야 하며 해시가 다르면 수정하지 않습니다. 이전 내용은 rian_history.json에 저장되어 되돌릴 수 있습니다. 계산기 단위 테스트는 고정된 AST 검사기와 테스트 원본 검증을 통과한 경우에만 실행합니다. 새 파일의 삭제를 통한 롤백 및 일반 터미널은 허용하지 않습니다.":profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
   '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="30" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
@@ -656,7 +815,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
    s.sourceHash=sourceHash;
    s.state="ACTIVE";s.validUntil=now()+durationMinutes*60;s.remaining=TRUSTED_MAX_CALLS;
    auditTrusted("activated",proof.id,{expires_at:s.validUntil,max_calls:TRUSTED_MAX_CALLS,duration_minutes:durationMinutes});
-   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===PROJECT_PROFILE?"격리 프로젝트 코드 수정 및 문법 검사":s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
+   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===V2_PROFILE?"전용 프로젝트 코드 패치·검증된 테스트·변경 이력 복원":s.profile===PROJECT_PROFILE?"격리 프로젝트 코드 수정 및 문법 검사":s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
   }catch{
    s.state="REVOKED";s.remaining=0;
    return html("<h1>세션 활성화 실패</h1><p>원격 스크립트 무결성이나 PC 연결을 확인해야 합니다.</p>",409)
@@ -705,7 +864,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
     if(!executed.execution||executed.execution.ok!==true)throw Error("Initial trusted command did not complete");
     item.status="COMPLETE";item.done=now();
     item.summary=JSON.stringify({...executed.execution,approval_session:{id:sessionId,profile,expires_at:s.validUntil,remaining_calls:s.remaining,duration_minutes:durationMinutes}}).slice(0,30000);
-    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===PROJECT_PROFILE?"전용 파일 calculator.py·notes.md 수정 및 문법 검사":profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
+    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===V2_PROFILE?"전용 프로젝트 파일 변경·테스트·이력 복원":profile===PROJECT_PROFILE?"전용 파일 calculator.py·notes.md 수정 및 문법 검사":profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
    }
    const r=await relay(item.operation,item.args,true);
    item.status="COMPLETE";item.done=now();item.summary=JSON.stringify(r).slice(0,30000);
