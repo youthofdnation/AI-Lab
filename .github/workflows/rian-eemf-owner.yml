@@ -22,6 +22,12 @@ jobs:
         run: |
           bun build gateway.ts --target=bun --outfile=/tmp/rian-eemf-gateway.js
           bun build relay.ts --target=bun --outfile=/tmp/rian-eemf-relay.js
+      - name: Verify compact Railway Function payload preserves portal CSS
+        working-directory: rian-commander/eemf-operator
+        run: |
+          node compact-css.mjs
+          bun build gateway.deploy.input.ts --target=bun --minify --outfile=/tmp/rian-owner-compact.js
+          node -e 'const fs=require("node:fs");const n=fs.statSync("/tmp/rian-owner-compact.js").size;console.log("RIAN_COMPACT_BYTES",n);if(n>=98295)process.exit(1)'
       - name: Assert distinct credentials and explicit approval gates
         working-directory: rian-commander/eemf-operator
         run: bun test security.test.ts trusted-session.test.ts
