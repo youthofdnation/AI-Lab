@@ -4,6 +4,7 @@ on:
     branches: [feature/rian-eemf-owner-command-mcp]
     paths:
       - "rian-commander/eemf-operator/gateway.ts"
+      - "rian-commander/eemf-operator/compact-css.mjs"
       - ".github/workflows/rian-eemf-owner-compact.yml"
   workflow_dispatch:
 
@@ -25,7 +26,8 @@ jobs:
       - name: Build a single-file minified Bun Gateway without altering the source
         working-directory: rian-commander/eemf-operator
         run: |
-          bun build gateway.ts --target=bun --minify --outfile=gateway.deploy.min.js
+          node compact-css.mjs
+          bun build gateway.deploy.input.ts --target=bun --minify --outfile=gateway.deploy.min.js
           node - <<'NODE'
           const fs = require('node:fs');
           const file = 'gateway.deploy.min.js';
