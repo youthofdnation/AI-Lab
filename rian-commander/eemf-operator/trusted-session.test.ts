@@ -398,7 +398,7 @@ describe("generic owner-approved development worktree sessions (no project-speci
   const commands=devTaskCommands(config);
   expect(commands.map(x=>x.name)).toEqual(["prepare","toolchain","clone","fetch","worktree","status","head","worktrees","diff","tests"]);
   for(const command of commands){
-   expect(devTaskAllowedCommand({argv:command.argv,cwd:command.cwd,timeout:25},config).argv).toEqual(command.argv);
+   expect(devTaskAllowedCommand({argv:command.argv,cwd:command.cwd,timeout:Math.min(command.limit,25)},config).argv).toEqual(command.argv);
    expect(command.limit).toBeGreaterThanOrEqual(25);
   }
   const probe=commands.find(x=>x.name==="toolchain")!;
