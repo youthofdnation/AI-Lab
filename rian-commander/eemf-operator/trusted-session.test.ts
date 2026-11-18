@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -279,6 +279,75 @@ describe("generic scratch edits with CAS and bounded syntax-only execution",()=>
   expect(source).toContain("grant.remaining--");
   expect(source).toContain('if(!a||a.exp<now()||a.clientId!==clientId)');
   expect(source).toContain('passwordOK(f.get("password")');
+  expect(source).toContain('relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true)');
+ });
+});
+
+describe("V2 project folder, pinned tests and rollback policies",()=>{
+ const profile="dev-project-history-v2",cwd="Documents",root="Documents/RIAN-Commander-Smoke";
+ const boot=["python","-I","-S","-c","print('RIAN_PROJECT_V2_READY')"];
+ const runner=["python","-I","-S","RIAN-Commander-Smoke/_rian_runner.py"];
+ const good=(argv:string[],dir=cwd,timeout=25)=>validateTrustedMailCommand({argv,cwd:dir,timeout},profile);
+ test("permits pinned profile bootstrap, pinned test runner and owner-selected duration",()=>{
+  for(const cmd of [boot,runner]){
+   expect(good(cmd).argv).toEqual(cmd);
+   expect(approvalRequestSeconds("rian_eemf_run_command",{argv:cmd,cwd,timeout:25})).toBe(1800);
+  }
+ });
+ test("denies arbitrary shell, raw unittest, Python eval, other cwd and timeout abuse",()=>{
+  const bad=[["powershell","-Command","whoami"],["cmd","/c","dir"],["python","-c","print(1)"],
+    ["python","-m","unittest","discover"],["python","-I","-S","-m","pytest"],["git","reset","--hard"]];
+  for(const cmd of bad)expect(()=>good(cmd)).toThrow();
+  expect(()=>good(runner,"Documents/private")).toThrow();
+  expect(()=>good(runner,cwd,36)).toThrow();
+ });
+ test("allowlisted flat .py/.md project files, rejecting tests, helpers and traversal",()=>{
+  for(const name of ["calculator.py","notes.md","helper.py","guide.md"]){
+   expect(v2MutablePath(root+"/"+name)).toBe(true);
+   expect(v2WriteAllowed({path:root+"/"+name,content:"some content\n",overwrite:true})).toBe(true);
+  }
+  for(const path of [root+"/test_calculator.py",root+"/_rian_runner.py",root+"/nested/evil.py",
+      root+"/../secret.py","Documents/elsewhere.py",root+"/.env",root+"/other.json",root+"/a.PY"]){
+   expect(v2MutablePath(path)).toBe(false);
+  }
+ });
+ test("test runner and history initialization are exact-content and create-only",()=>{
+  const runnerFile=root+"/_rian_runner.py",ledgerFile=root+"/rian_history.json";
+  const fixture='{"version":1,"entries":[]}';
+  expect(v2WriteAllowed({path:ledgerFile,content:fixture,overwrite:false})).toBe(true);
+  expect(v2WriteAllowed({path:ledgerFile,content:fixture,overwrite:true})).toBe(false);
+  expect(v2WriteAllowed({path:runnerFile,content:"import os",overwrite:false})).toBe(false);
+  expect(v2WriteAllowed({path:root+"/calculator.py",content:"a".repeat(5001),overwrite:true})).toBe(false);
+  expect(v2WriteAllowed({path:root+"/notes.md",content:" ",overwrite:false})).toBe(false);
+  expect(v2WriteAllowed({path:root+"/notes.md",content:"hello",overwrite:false,delete:true})).toBe(false);
+ });
+ test("session is tied to OAuth client and can be immediately revoked",async()=>{
+  const request=newTrustedSession("rian.v2-test",profile),payload=JSON.parse(request.content[0].text);
+  expect(payload.profile).toBe(profile);
+  expect(payload.state).toBe("PENDING_APPROVAL");
+  expect(()=>ownedSession(payload.session_id,"rian.other")).toThrow();
+  const status=JSON.parse((await trustedDispatch("rian_eemf_trusted_session_status",{session_id:payload.session_id},"rian.v2-test")).content[0].text);
+  expect(status.workspace).toBe(root);
+  const revoked=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:payload.session_id},"rian.v2-test")).content[0].text);
+  expect(revoked.state).toBe("REVOKED");
+ });
+ test("source stores history on the PC before overwrite and guards against stale sources",()=>{
+  for(const rule of [
+   'const V2_HISTORY=V2_ROOT+"/rian_history.json"',
+   'const V2_RUNNER=',
+   'async function v2RecoverLedger',
+   'if(snapshot.until<=now())',
+   'CAS conflict: file changed after last read',
+   'log.state="COMPLETE"',
+   'await v2SaveLedger(ledger)',
+   'Source write readback differs from requested content',
+   'Project policy changed; session revoked',
+   'async function v2CheckRunner',
+   'Pinned unit test runner or fixture changed',
+   'v2MutablePath(path)',
+   's.clientId===clientId',
+   'passwordOK(f.get("password")',
+  ])expect(source).toContain(rule);
   expect(source).toContain('relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true)');
  });
 });
