@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -173,5 +173,60 @@ describe("approval request TTL hardening (bug: GET 200 then POST 409 7 seconds l
   expect(source).toContain("승인 요청 만료 시각");
   expect(source).toContain('const proof=ticket({type:"eemf-action-approval"');
   expect(source).toContain('passwordOK(f.get("password")');
+ });
+});
+
+describe("chat-native isolated developer smoke project — one user-approved scope",()=>{
+ const profile="dev-sandbox-smoke-v1",cwd="Documents",root="Documents/RIAN-Commander-Smoke";
+ const boot=["python","-I","-S","-c","from pathlib import Path; Path('RIAN-Commander-Smoke').mkdir(exist_ok=True); print('RIAN_SMOKE_READY')"];
+ const run=["python","-I","-S","-m","unittest","discover","-s","RIAN-Commander-Smoke","-p","test_calculator.py","-v"];
+ const bug="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal - subtotal * tax_rate\n";
+ const fixed="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal + (subtotal * tax_rate)\n";
+ const tests="import unittest\nfrom calculator import total_with_tax\n\nclass TaxTests(unittest.TestCase):\n    def test_tax_10(self):\n        self.assertEqual(total_with_tax(100, .1), 110)\n    def test_tax_25(self):\n        self.assertEqual(total_with_tax(80, .25), 100)\n    def test_zero(self):\n        self.assertEqual(total_with_tax(100, 0), 100)\n    def test_negative(self):\n        with self.assertRaises(ValueError):\n            total_with_tax(-1, .1)\n";
+ test("allow only exact bootstrap and unittest commands",()=>{
+  for(const argv of [boot,run]){
+   expect(validateTrustedMailCommand({argv,cwd,timeout:25},profile).argv).toEqual(argv);
+   expect(approvalRequestSeconds("rian_eemf_run_command",{argv,cwd,timeout:25})).toBe(1800);
+  }
+ });
+ test("deny direct shell, arbitrary python, changed script, altered cwd and other tools",()=>{
+  const invalid=[["powershell","-Command","whoami"],["python","-c","print(1)"],
+   ["python","-I","-S","-c","import os; os.system('whoami')"],["cmd","/c","dir"],["git","reset","--hard"]];
+  for(const argv of invalid)expect(()=>validateTrustedMailCommand({argv,cwd,timeout:25},profile)).toThrow();
+  for(const argv of [boot,run]){
+   expect(()=>validateTrustedMailCommand({argv,cwd:"Documents/Other",timeout:25},profile)).toThrow();
+   expect(()=>validateTrustedMailCommand({argv,cwd,timeout:45},profile)).toThrow();
+  }
+ });
+ test("smoke file writes are exact-content and exact-path only",()=>{
+  expect(smokeWriteAllowed({path:root+"/calculator.py",content:bug,overwrite:false})).toBe(true);
+  expect(smokeWriteAllowed({path:root+"/calculator.py",content:fixed,overwrite:true})).toBe(true);
+  expect(smokeWriteAllowed({path:root+"/test_calculator.py",content:tests,overwrite:false})).toBe(true);
+  expect(smokeWriteAllowed({path:root+"/calculator.py",content:fixed,overwrite:false})).toBe(false);
+  expect(smokeWriteAllowed({path:root+"/test_calculator.py",content:tests,overwrite:true})).toBe(false);
+  expect(smokeWriteAllowed({path:"Documents/real-work.py",content:bug,overwrite:false})).toBe(false);
+  expect(smokeWriteAllowed({path:root+"/calculator.py",content:"import os\nos.system('whoami')\n",overwrite:true})).toBe(false);
+ });
+ test("sandbox profile has per-OAuth-client owned session and can be revoked",async()=>{
+  const reply=newTrustedSession("rian.dev-smoke-test",profile);
+  const claim=JSON.parse(reply.content[0].text);
+  expect(claim.profile).toBe(profile);
+  expect(claim.state).toBe("PENDING_APPROVAL");
+  expect(()=>ownedSession(claim.session_id,"rian.not-owner")).toThrow();
+  expect(ownedSession(claim.session_id,"rian.dev-smoke-test").profile).toBe(profile);
+  const revoked=JSON.parse((await trustedDispatch("rian_eemf_revoke_trusted_session",{session_id:claim.session_id},"rian.dev-smoke-test")).content[0].text);
+  expect(revoked.state).toBe("REVOKED");
+ });
+ test("exact-file write path and test runner are source-verified and require existing owner approval",()=>{
+  expect(source).toContain("async function smokeScopedWrite");
+  expect(source).toContain("s.clientId===clientId");
+  expect(source).toContain('smokeWriteAllowed(args)');
+  expect(source).toContain('if(s.sourceHash!==await trustedSourceDigest(SMOKE_PROFILE))');
+  expect(source).toContain("Sandbox policy changed; approval revoked");
+  expect(source).toContain("Overwrite refused: calculator.py differs from known buggy baseline");
+  expect(source).toContain("File write verification mismatch");
+  expect(source).toContain("await smokeVerifySources()");
+  expect(source).toContain('passwordOK(f.get("password")');
+  expect(source).toContain('relay("rian_eemf_write_file",args,true)');
  });
 });
