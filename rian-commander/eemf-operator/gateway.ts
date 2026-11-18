@@ -48,7 +48,7 @@ const tools=[
 {name:"rian_eemf_read_file",description:"Read UTF-8 text within EEMFO3L allowed home root",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
 {name:"rian_eemf_request_command",description:"Request an EEMFO3L command; browser lets owner choose per-command or scoped timed approval (eligible safe read-only commands only). Eligible commands reuse active session unless approval_mode=each.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"},approval_mode:{type:"string",enum:["choose","each"]}},required:["argv"],additionalProperties:false}},
 {name:"rian_eemf_request_write",description:"DRAFT a write to a permitted text file on EEMFO3L requiring browser approval. Does not write yet.",inputSchema:{type:"object",properties:{path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["path","content"],additionalProperties:false}},
-{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1"]}},additionalProperties:false}},
+{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1"]}},additionalProperties:false}},
 {name:"rian_eemf_trusted_session_status",description:"Check your specific session state, expiry and remaining calls.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
 {name:"rian_eemf_run_trusted_command",description:"Execute fixed allowlisted Proton/Outlook queries or developer python/git/node --version after owner-scoped approval. No general shell, sync, file read/write.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"},argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["session_id","argv","cwd"],additionalProperties:false}},
 {name:"rian_eemf_revoke_trusted_session",description:"Revoke your active read-only trusted session immediately.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
@@ -63,11 +63,16 @@ const TRUSTED_DURATION_SECONDS=1800, TRUSTED_MAX_DURATION_SECONDS=3600, TRUSTED_
 export function validDurationMinutes(v){return typeof v==="string"&&/^(?:[1-9]|[1-5]\d|60)$/.test(v)?Number(v):null;}
 const OUTLOOK_PROFILE="outlook-local-metadata-v1";
 const OUTLOOK_CWD="Documents/rian-outlook-bridge",OUTLOOK_SOURCE=OUTLOOK_CWD+"/outlook_bridge.py";
+const SMOKE_PROFILE="dev-sandbox-smoke-v1",SMOKE_CWD="Documents",SMOKE_DIR="Documents/RIAN-Commander-Smoke";
+const SMOKE_CALC=SMOKE_DIR+"/calculator.py",SMOKE_TEST_PATH=SMOKE_DIR+"/test_calculator.py";
+const SMOKE_BUG="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal - subtotal * tax_rate\n",SMOKE_FIXED="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal + (subtotal * tax_rate)\n",SMOKE_TEST="import unittest\nfrom calculator import total_with_tax\n\nclass TaxTests(unittest.TestCase):\n    def test_tax_10(self):\n        self.assertEqual(total_with_tax(100, .1), 110)\n    def test_tax_25(self):\n        self.assertEqual(total_with_tax(80, .25), 100)\n    def test_zero(self):\n        self.assertEqual(total_with_tax(100, 0), 100)\n    def test_negative(self):\n        with self.assertRaises(ValueError):\n            total_with_tax(-1, .1)\n";
+const SMOKE_BOOT=["python","-I","-S","-c","from pathlib import Path; Path('RIAN-Commander-Smoke').mkdir(exist_ok=True); print('RIAN_SMOKE_READY')"],SMOKE_RUN=["python","-I","-S","-m","unittest","discover","-s","RIAN-Commander-Smoke","-p","test_calculator.py","-v"];
+const SMOKE_PIN="v1:fixed-safe-examples:2026-11-18";
 const DEV_PROFILE="dev-version-checks-v1",DEV_CWD="Documents";
 const DEV_VERSION_CMDS=["python","git","node"];
 const DEV_POLICY_PIN="rian-commander|dev-version-checks-v1|cwd=Documents|python --version|git --version|node --version|no-write|2026-11-18";
 const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
-function trustedWorkspace(profile){return profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
+function trustedWorkspace(profile){return profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
 function trustedScript(profile){return profile===OUTLOOK_PROFILE?OUTLOOK_SOURCE:TRUSTED_SOURCE;}
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
 export function ownedSession(id,clientId){
@@ -86,6 +91,16 @@ export function currentSessionState(session,at=now()){
  return session.state;
 }
 export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
+ if(profile===SMOKE_PROFILE){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k)))throw Error("Unapproved sandbox command fields");
+  if(raw.cwd!==SMOKE_CWD||!Array.isArray(raw.argv))throw Error("Sandbox cwd denied");
+  const exact=(one,two)=>one.length===two.length&&one.every((x,i)=>x===two[i]);
+  if(!exact(raw.argv,SMOKE_BOOT)&&!exact(raw.argv,SMOKE_RUN))throw Error("Sandbox command not in exact allowlist");
+  const timeout=raw.timeout===undefined?25:raw.timeout;
+  if(!Number.isInteger(timeout)||timeout<1||timeout>35)throw Error("Sandbox timeout denied");
+  return {argv:[...raw.argv],cwd:SMOKE_CWD,timeout};
+ }
+
  if(profile===DEV_PROFILE){
   if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k)))throw Error("Unapproved diagnostics fields");
   if(raw.cwd!==DEV_CWD)throw Error("Developer diagnostics locked to Documents");
@@ -131,13 +146,14 @@ export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
 }
 export function eligibleTrustProfile(operation,args){
  if(operation!=="rian_eemf_run_command")return null;
- for(const p of [DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
+ for(const p of [SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
  return null;
 }
 export function approvalRequestSeconds(operation,args){
- return eligibleTrustProfile(operation,args)===DEV_PROFILE?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
+ return [SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
+ if(profile===SMOKE_PROFILE)return createHash("sha256").update(SMOKE_PIN+SMOKE_BUG+SMOKE_FIXED+SMOKE_TEST+JSON.stringify(SMOKE_BOOT)+JSON.stringify(SMOKE_RUN)).digest("hex");
  if(profile===DEV_PROFILE)return createHash("sha256").update(DEV_POLICY_PIN,"utf8").digest("hex");
  const fileResult=await relay("rian_eemf_read_file",{path:trustedScript(profile)});
  const content=fileResult?.result?.content;
@@ -217,7 +233,7 @@ async function relay(name,args,ownerApproved=false){
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
 export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
- if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
+ if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
@@ -231,6 +247,38 @@ export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
  trustedSessions.set(id,{clientId,profile,state:"PENDING_APPROVAL",requestUntil:now()+TRUSTED_REQUEST_TTL,validUntil:null,remaining:0,sourceHash:null,busy:false,attempts:0});
  auditTrusted("requested",id,{profile});
  return sessionReply({session_id:id,state:"PENDING_APPROVAL",device,profile,approval_url:origin+"/session/approve/"+id,request_expires_in:TRUSTED_REQUEST_TTL,duration_after_approval_seconds:TRUSTED_DURATION_SECONDS,maximum_calls:TRUSTED_MAX_CALLS,selectable_duration_minutes:{minimum:1,maximum:60,default:30},warning:"Owner selects duration and approves with password in browser; no commands execute before approval."});
+}
+export function smokeWriteAllowed(a){
+ if(!a||typeof a!=="object"||Object.keys(a).some(k=>!["path","content","overwrite"].includes(k)))return false;
+ return (a.overwrite===false&&a.path===SMOKE_CALC&&a.content===SMOKE_BUG)
+  ||(a.overwrite===false&&a.path===SMOKE_TEST_PATH&&a.content===SMOKE_TEST)
+  ||(a.overwrite===true&&a.path===SMOKE_CALC&&a.content===SMOKE_FIXED);
+}
+async function smokeVerifySources(){
+ const [calc,checks]=await Promise.all([relay("rian_eemf_read_file",{path:SMOKE_CALC}),relay("rian_eemf_read_file",{path:SMOKE_TEST_PATH})]);
+ const norm=s=>typeof s==="string"?s.replace(/\r\n/g,"\n"):null;
+ if(![SMOKE_BUG,SMOKE_FIXED].includes(norm(calc?.result?.content))||norm(checks?.result?.content)!==SMOKE_TEST)
+  throw Error("Unknown sandbox source: refusing to execute Python tests");
+}
+async function smokeScopedWrite(id,args,clientId){
+ const s=ownedSession(id,clientId);
+ if(s.profile!==SMOKE_PROFILE||currentSessionState(s)!=="ACTIVE"||s.remaining<=0||!smokeWriteAllowed(args))throw Error("Write outside approved sandbox");
+ if(s.busy)throw Error("Sandbox session busy");
+ s.busy=true;
+ try{
+  if(s.sourceHash!==await trustedSourceDigest(SMOKE_PROFILE)){s.state="REVOKED";s.remaining=0;throw Error("Sandbox policy changed; approval revoked")}
+  if(args.overwrite){
+   const old=await relay("rian_eemf_read_file",{path:SMOKE_CALC});
+   if(typeof old?.result?.content!=="string"||old.result.content.replace(/\r\n/g,"\n")!==SMOKE_BUG)throw Error("Overwrite refused: calculator.py differs from known buggy baseline");
+  }
+  if(currentSessionState(s)!=="ACTIVE")throw Error("Session expired");
+  s.remaining--;auditTrusted("sandbox_write_submitted",id,{file:args.path===SMOKE_CALC?"calculator.py":"test_calculator.py",remaining:s.remaining,overwrite:args.overwrite});
+  await relay("rian_eemf_write_file",args,true);
+  const verified=await relay("rian_eemf_read_file",{path:args.path});
+  if(typeof verified?.result?.content!=="string"||verified.result.content.replace(/\r\n/g,"\n")!==args.content)throw Error("File write verification mismatch");
+  auditTrusted("sandbox_write_verified",id,{remaining:s.remaining});
+  return sessionReply({device,profile:SMOKE_PROFILE,state:currentSessionState(s),path:args.path,write_verified:true,remaining_calls:s.remaining,sha256:createHash("sha256").update(args.content).digest("hex")});
+ }finally{s.busy=false}
 }
 export async function trustedDispatch(name,args,clientId){
  if(name==="rian_eemf_request_trusted_session")return newTrustedSession(clientId,args.profile);
@@ -252,6 +300,7 @@ export async function trustedDispatch(name,args,clientId){
   const digest=await trustedSourceDigest(s.profile||TRUSTED_PROFILE);
   if(s.sourceHash!==digest){s.state="REVOKED";s.remaining=0;throw Error("Trusted script changed; session revoked")};
   if(currentSessionState(s)!=="ACTIVE")throw Error("Trusted session no longer active");
+  if(s.profile===SMOKE_PROFILE&&JSON.stringify(safe.argv)===JSON.stringify(SMOKE_RUN))await smokeVerifySources();
   // Consume a quota unit before submitting so failures cannot evade limits.
   s.remaining--;
   auditTrusted("command_submitted",session_id,{remaining:s.remaining});
@@ -272,6 +321,12 @@ async function sendBackend(name,args,clientId){
   const a=actionQueue.get(args.action_id);
   if(!a||a.exp<now())throw Error("Unknown or expired action");
   return {content:[{type:"text",text:JSON.stringify({action_id:args.action_id,status:a.status,device,completed:a.done||null,summary:a.summary||null})}]};
+ }
+ if(name==="rian_eemf_request_write"){
+  for(const [sid,s] of trustedSessions){
+   if(s.clientId===clientId&&s.profile===SMOKE_PROFILE&&currentSessionState(s)==="ACTIVE"&&smokeWriteAllowed(args))
+    return smokeScopedWrite(sid,args,clientId);
+  }
  }
  if(name==="rian_eemf_request_command"){
   const {approval_mode,...command}=args;
@@ -473,11 +528,11 @@ function passwordOK(provided){
 function actionPage(id,item,msg=""){
  const description=item.operation==="rian_eemf_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
  const profile=item.clientId?eligibleTrustProfile(item.operation,item.args):null;
- const proof=ticket({type:"eemf-action-approval",id,exp:now()+(profile===DEV_PROFILE?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
- const label=profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
+ const proof=ticket({type:"eemf-action-approval",id,exp:now()+([SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
+ const label=profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
  const options=profile?
   '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode"><option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option></select>'+
-  '<p>허용 범위: '+escape(label)+'. 해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.</p>'+
+  '<p>허용 범위: '+escape(label)+'. '+escape(profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
   '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="30" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
@@ -584,7 +639,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
     if(!executed.execution||executed.execution.ok!==true)throw Error("Initial trusted command did not complete");
     item.status="COMPLETE";item.done=now();
     item.summary=JSON.stringify({...executed.execution,approval_session:{id:sessionId,profile,expires_at:s.validUntil,remaining_calls:s.remaining,duration_minutes:durationMinutes}}).slice(0,30000);
-    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>허용된 조회 명령을 '+durationMinutes+'분간 추가 승인 없이 실행합니다. 최대 60회 중 남은 횟수: '+s.remaining+'.</p>');
+    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
    }
    const r=await relay(item.operation,item.args,true);
    item.status="COMPLETE";item.done=now();item.summary=JSON.stringify(r).slice(0,30000);
