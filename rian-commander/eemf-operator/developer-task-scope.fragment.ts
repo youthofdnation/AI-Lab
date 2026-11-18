@@ -4,6 +4,7 @@ const DEV_TASK_ROOT="Documents/RIAN-Commander-Dev",DEV_TASK_HOME="Documents",DEV
 const DEV_TASK_MAX_BYTES=11500;
 const DEV_TASK_SETUP_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');assert not r.is_symlink();r.mkdir(exist_ok=True);assert r.resolve().parent==Path.cwd().resolve();p=r/sys.argv[1];assert not p.exists() and not p.is_symlink();p.mkdir();print('RIAN_DEV_READY')";
 const DEV_TASK_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');p=r/sys.argv[1];assert r.is_dir() and not r.is_symlink() and r.resolve().parent==Path.cwd().resolve() and p.is_dir() and not p.is_symlink() and p.resolve().parent==r.resolve();assert all(not (p/x).is_symlink() for x in ('repo','tree'));print('RIAN_DEV_GUARD_OK')";
+const DEV_TASK_TOOLCHAIN_SCRIPT="import shutil;from pathlib import Path; b=Path.home()/'.bun'/'bin'/'bun.exe'; names=('python','git','node','bun'); print('RIAN_TOOLCHAIN_V1 '+','.join(name+'='+('discoverable' if shutil.which(name) else 'not_in_path') for name in names)+',bun_user='+('present' if b.is_file() and not b.is_symlink() else 'absent'))";
 const DEV_TASK_FILE_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev')/sys.argv[1]/'tree';p=r/sys.argv[2];assert r.is_dir() and not r.is_symlink() and p.parent.resolve().is_relative_to(r.resolve());assert not p.is_symlink() and all(not x.is_symlink() for x in p.parents if x.exists());print('RIAN_DEV_FILE_OK')";
 export function devTaskSafePath(path,extension){
  if(typeof path!=="string"||path.length>180||path.startsWith("/")||path.includes("\\")||path.includes(":"))return false;
@@ -38,6 +39,7 @@ export function devTaskCommands(s){
   ["bun","test",testArg];
  return [
   {name:"prepare",cwd:DEV_TASK_HOME,argv:["python","-I","-S","-c",DEV_TASK_SETUP_SCRIPT,s.id],limit:30},
+  {name:"toolchain",cwd:DEV_TASK_HOME,argv:["python","-I","-S","-c",DEV_TASK_TOOLCHAIN_SCRIPT],limit:20},
   {name:"clone",cwd:shared,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none",s.url,"repo"],limit:90},
   {name:"fetch",cwd:shared,argv:["git","-c","credential.interactive=never","-C","repo","fetch","--no-tags","origin","refs/pull/"+s.pr+"/head:refs/remotes/origin/pr-"+s.pr],limit:90},
   {name:"worktree",cwd:shared,argv:["git","-c","core.hooksPath=NUL","-c","filter.lfs.required=false","-c","filter.lfs.smudge=","-C","repo","worktree","add","--detach","../tree",s.sha],limit:90},
@@ -62,7 +64,7 @@ export function devTaskAllowedWrite(args,scope){
  const file=args.path?.startsWith(scope.tree+"/")?args.path.slice(scope.tree.length+1):null;
  return typeof file==="string"&&scope.editable.includes(file);
 }
-function devTaskScopeDigest(s){return projectDigest(DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT)}
+function devTaskScopeDigest(s){return projectDigest(DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT+DEV_TASK_TOOLCHAIN_SCRIPT)}
 async function devTaskCheckRun(argv,cwd,expect){
  const r=await relay("rian_eemf_run_command",{argv,cwd,timeout:25},true);
  if(r?.result?.exit_code!==0)throw Error("Developer task workspace or Git identity check failed");
@@ -74,7 +76,7 @@ async function devTaskPreflight(safe,scope){
  if(!cmd)throw Error("Not approved task command");
  if(cmd.name==="prepare")return;
  await devTaskCheckRun(["python","-I","-S","-c",DEV_TASK_GUARD_SCRIPT,scope.id],DEV_TASK_HOME,"RIAN_DEV_GUARD_OK");
- if(cmd.name==="clone")return;
+ if(cmd.name==="clone"||cmd.name==="toolchain")return;
  await devTaskCheckRun(["git","-C","repo","remote","get-url","origin"],scope.base,scope.url);
  if(cmd.name==="fetch")return;
  if(cmd.name==="worktree"){
