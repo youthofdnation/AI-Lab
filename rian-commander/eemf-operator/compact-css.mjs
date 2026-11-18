@@ -1,0 +1,20 @@
+import {readFileSync,writeFileSync} from "node:fs";
+import {deflateRawSync,inflateRawSync} from "node:zlib";
+import {createHash} from "node:crypto";
+
+const src=readFileSync("gateway.ts","utf8");
+const pattern=/const PORTAL_CSS=String\\.raw`([\\s\\S]*?)`;/g;
+const hits=[...src.matchAll(pattern)];
+if(hits.length!==1)throw Error("Expected exactly one literal owner portal CSS block");
+const match=hits[0],css=match[1];
+if(css.includes("${"))throw Error("Interpolated CSS templates cannot be compacted safely");
+const packed=deflateRawSync(Buffer.from(css,"utf8"),{level:9});
+const restored=inflateRawSync(packed).toString("utf8");
+if(restored!==css)throw Error("Owner portal CSS roundtrip changed bytes");
+const replacement="const PORTAL_CSS=inflateRawSync(Buffer.from("+JSON.stringify(packed.toString("base64"))+",'base64')).toString('utf8');";
+const input="import {inflateRawSync} from 'node:zlib';\n"+src.replace(match[0],replacement);
+if(!input.includes("RIAN_DEV_SCOPE_V1"))throw Error("Generic developer scope vanished");
+if(input.includes("dev-salpion-pr16-v1"))throw Error("Project-specific Salpion profile unexpected");
+writeFileSync("gateway.deploy.input.ts",input,"utf8");
+const digest=createHash("sha256").update(css).digest("hex");
+console.log(JSON.stringify({event:"RIAN_PORTAL_CSS_LOSSLESS",css_sha256:digest,source_bytes:Buffer.byteLength(css),packed_bytes:packed.length,unpacked_bytes:Buffer.byteLength(restored)}));
