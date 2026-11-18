@@ -48,7 +48,7 @@ const tools=[
 {name:"rian_eemf_read_file",description:"Read UTF-8 text within EEMFO3L allowed home root",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
 {name:"rian_eemf_request_command",description:"Request an EEMFO3L command; browser lets owner choose per-command or scoped timed approval (eligible safe read-only commands only). Eligible commands reuse active session unless approval_mode=each.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"},approval_mode:{type:"string",enum:["choose","each"]}},required:["argv"],additionalProperties:false}},
 {name:"rian_eemf_request_write",description:"DRAFT a write to a permitted text file on EEMFO3L requiring browser approval. Does not write yet.",inputSchema:{type:"object",properties:{path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["path","content"],additionalProperties:false}},
-{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1"]}},additionalProperties:false}},
+{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1","dev-workspace-edit-v1"]}},additionalProperties:false}},
 {name:"rian_eemf_trusted_session_status",description:"Check your specific session state, expiry and remaining calls.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
 {name:"rian_eemf_run_trusted_command",description:"Execute fixed allowlisted Proton/Outlook queries or developer python/git/node --version after owner-scoped approval. No general shell, sync, file read/write.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"},argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["session_id","argv","cwd"],additionalProperties:false}},
 {name:"rian_eemf_revoke_trusted_session",description:"Revoke your active read-only trusted session immediately.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
@@ -68,11 +68,65 @@ const SMOKE_CALC=SMOKE_DIR+"/calculator.py",SMOKE_TEST_PATH=SMOKE_DIR+"/test_cal
 const SMOKE_BUG="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal - subtotal * tax_rate\n",SMOKE_FIXED="def total_with_tax(subtotal, tax_rate):\n    if subtotal < 0 or tax_rate < 0:\n        raise ValueError('negative inputs')\n    return subtotal + (subtotal * tax_rate)\n",SMOKE_TEST="import unittest\nfrom calculator import total_with_tax\n\nclass TaxTests(unittest.TestCase):\n    def test_tax_10(self):\n        self.assertEqual(total_with_tax(100, .1), 110)\n    def test_tax_25(self):\n        self.assertEqual(total_with_tax(80, .25), 100)\n    def test_zero(self):\n        self.assertEqual(total_with_tax(100, 0), 100)\n    def test_negative(self):\n        with self.assertRaises(ValueError):\n            total_with_tax(-1, .1)\n";
 const SMOKE_BOOT=["python","-I","-S","-c","from pathlib import Path; Path('RIAN-Commander-Smoke').mkdir(exist_ok=True); print('RIAN_SMOKE_READY')"],SMOKE_RUN=["python","-I","-S","-m","unittest","discover","-s","RIAN-Commander-Smoke","-p","test_calculator.py","-v"];
 const SMOKE_PIN="v1:fixed-safe-examples:2026-11-18";
+
+const PROJECT_PROFILE="dev-workspace-edit-v1",PROJECT_CWD="Documents",PROJECT_DIR="Documents/RIAN-Commander-Smoke";
+const PROJECT_FILE=PROJECT_DIR+"/calculator.py",PROJECT_NOTES=PROJECT_DIR+"/notes.md";
+const PROJECT_COMPILE=["python","-I","-S","-m","py_compile","RIAN-Commander-Smoke/calculator.py"];
+const PROJECT_PIN="v1:editor:only-two-files:read-hash:syntax-not-execution:2026-11-18",PROJECT_MAX_BYTES=5000,PROJECT_SNAPSHOT_TTL=900;
+const projectSnapshots=new Map();
+function projectDigest(value){return createHash("sha256").update(value,"utf8").digest("hex")}
+function projectKey(client,path){return projectDigest(client+"|"+path)}
+function projectTrackRead(client,path,content){
+ if(typeof client!=="string"||!client.startsWith("rian.")||![PROJECT_FILE,PROJECT_NOTES].includes(path)||typeof content!=="string"||Buffer.byteLength(content,"utf8")>PROJECT_MAX_BYTES)return;
+ if(projectSnapshots.size>=100)for(const [id,x] of projectSnapshots){if(x.until<=now())projectSnapshots.delete(id)}
+ if(projectSnapshots.size>=100)projectSnapshots.delete(projectSnapshots.keys().next().value);
+ projectSnapshots.set(projectKey(client,path),{hash:projectDigest(content),until:now()+PROJECT_SNAPSHOT_TTL});
+}
+export function projectWriteAllowed(a){
+ if(!a||typeof a!=="object"||Array.isArray(a)||Object.keys(a).some(k=>!["path","content","overwrite"].includes(k)))return false;
+ if(typeof a.content!=="string"||!a.content.trim()||a.content.includes("\0")||Buffer.byteLength(a.content,"utf8")>PROJECT_MAX_BYTES)return false;
+ return a.path===PROJECT_FILE?a.overwrite===true:a.path===PROJECT_NOTES&&(a.overwrite===true||a.overwrite===false);
+}
+function projectDiff(a,b){
+ const x=a.replace(/\r\n/g,"\n").split("\n"),y=b.replace(/\r\n/g,"\n").split("\n");
+ let changed=0;for(let i=0;i<Math.max(x.length,y.length);i++)if(x[i]!==y[i])changed++;
+ return {before_lines:x.length,after_lines:y.length,changed_lines_by_position:changed};
+}
+async function projectScopedWrite(sessionId,args,clientId){
+ const grant=ownedSession(sessionId,clientId);
+ if(grant.profile!==PROJECT_PROFILE||currentSessionState(grant)!=="ACTIVE"||grant.remaining<=0||!projectWriteAllowed(args))throw Error("Write denied outside approved scratch workspace");
+ if(grant.busy)throw Error("Another scoped operation is running");
+ grant.busy=true;
+ try{
+  if(grant.sourceHash!==await trustedSourceDigest(PROJECT_PROFILE)){grant.state="REVOKED";grant.remaining=0;throw Error("Editor policy changed; grant revoked")}
+  let previous=null;
+  if(args.overwrite){
+   const snap=projectSnapshots.get(projectKey(clientId,args.path));
+   if(!snap||snap.until<=now())throw Error("Read this source in chat before editing; snapshot missing or expired");
+   const remote=await relay("rian_eemf_read_file",{path:args.path});
+   previous=remote?.result?.content;
+   if(typeof previous!=="string"||projectDigest(previous)!==snap.hash)throw Error("CAS conflict: file modified since last read; refresh first");
+   if(previous===args.content)return sessionReply({device,profile:PROJECT_PROFILE,path:args.path,write_verified:true,no_change:true,remaining_calls:grant.remaining,sha256:snap.hash});
+  }else if(args.path!==PROJECT_NOTES)throw Error("Only notes.md may be created without overwrite");
+  if(currentSessionState(grant)!=="ACTIVE")throw Error("Grant expired before write");
+  grant.remaining--;
+  const label=args.path===PROJECT_FILE?"calculator.py":"notes.md";
+  auditTrusted("workspace_patch_submitted",sessionId,{file:label,overwrite:args.overwrite,remaining:grant.remaining});
+  await relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true);
+  const check=await relay("rian_eemf_read_file",{path:args.path});
+  if(check?.result?.content!==args.content)throw Error("Write verification failed");
+  projectTrackRead(clientId,args.path,args.content);
+  const diff=projectDiff(previous||"",args.content);
+  auditTrusted("workspace_patch_verified",sessionId,{file:label,changed_lines:diff.changed_lines_by_position,remaining:grant.remaining});
+  return sessionReply({device,profile:PROJECT_PROFILE,state:currentSessionState(grant),path:args.path,write_verified:true,remaining_calls:grant.remaining,precondition_sha256:previous?projectDigest(previous):null,sha256:projectDigest(args.content),diff});
+ }finally{grant.busy=false}
+}
+
 const DEV_PROFILE="dev-version-checks-v1",DEV_CWD="Documents";
 const DEV_VERSION_CMDS=["python","git","node"];
 const DEV_POLICY_PIN="rian-commander|dev-version-checks-v1|cwd=Documents|python --version|git --version|node --version|no-write|2026-11-18";
 const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
-function trustedWorkspace(profile){return profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
+function trustedWorkspace(profile){return profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
 function trustedScript(profile){return profile===OUTLOOK_PROFILE?OUTLOOK_SOURCE:TRUSTED_SOURCE;}
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
 export function ownedSession(id,clientId){
@@ -91,6 +145,14 @@ export function currentSessionState(session,at=now()){
  return session.state;
 }
 export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
+ if(profile===PROJECT_PROFILE){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||raw.cwd!==PROJECT_CWD)throw Error("Project compile scope denied");
+  if(!Array.isArray(raw.argv)||raw.argv.length!==PROJECT_COMPILE.length||!PROJECT_COMPILE.every((part,i)=>raw.argv[i]===part))throw Error("Only exact py_compile syntax checking is allowed; no Python code execution");
+  const timeout=raw.timeout===undefined?20:raw.timeout;
+  if(!Number.isInteger(timeout)||timeout<1||timeout>35)throw Error("Compile timeout denied");
+  return {argv:[...PROJECT_COMPILE],cwd:PROJECT_CWD,timeout};
+ }
+
  if(profile===SMOKE_PROFILE){
   if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k)))throw Error("Unapproved sandbox command fields");
   if(raw.cwd!==SMOKE_CWD||!Array.isArray(raw.argv))throw Error("Sandbox cwd denied");
@@ -146,13 +208,14 @@ export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
 }
 export function eligibleTrustProfile(operation,args){
  if(operation!=="rian_eemf_run_command")return null;
- for(const p of [SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
+ for(const p of [PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
  return null;
 }
 export function approvalRequestSeconds(operation,args){
- return [SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
+ return [PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
+ if(profile===PROJECT_PROFILE)return projectDigest(PROJECT_PIN+PROJECT_DIR+PROJECT_FILE+PROJECT_NOTES+JSON.stringify(PROJECT_COMPILE));
  if(profile===SMOKE_PROFILE)return createHash("sha256").update(SMOKE_PIN+SMOKE_BUG+SMOKE_FIXED+SMOKE_TEST+JSON.stringify(SMOKE_BOOT)+JSON.stringify(SMOKE_RUN)).digest("hex");
  if(profile===DEV_PROFILE)return createHash("sha256").update(DEV_POLICY_PIN,"utf8").digest("hex");
  const fileResult=await relay("rian_eemf_read_file",{path:trustedScript(profile)});
@@ -181,7 +244,7 @@ function safeArgs(name,args){
   return {path:safePath(args.path)};
  }
  if(name==="rian_eemf_request_trusted_session"){
-  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
+  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
   return {profile:args.profile||TRUSTED_PROFILE};
  }
  if(name==="rian_eemf_trusted_session_status"||name==="rian_eemf_revoke_trusted_session"){
@@ -233,7 +296,7 @@ async function relay(name,args,ownerApproved=false){
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
 export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
- if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
+ if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
@@ -314,18 +377,21 @@ async function sendBackend(name,args,clientId){
  if(name==="rian_eemf_status"||name==="rian_eemf_list_directory"||name==="rian_eemf_read_file"){
   const target=name;
   const val=await relay(target,args);
+  if(name==="rian_eemf_read_file"&&typeof val?.result?.content==="string")projectTrackRead(clientId,args.path,val.result.content);
   if(JSON.stringify(val).length>100000)throw Error("Result too large");
   return {content:[{type:"text",text:JSON.stringify(val)}]};
  }
  if(name==="rian_eemf_action_status"){
   const a=actionQueue.get(args.action_id);
-  if(!a||a.exp<now())throw Error("Unknown or expired action");
+  if(!a||a.exp<now()||a.clientId!==clientId)throw Error("Unknown, expired or unauthorized action");
   return {content:[{type:"text",text:JSON.stringify({action_id:args.action_id,status:a.status,device,completed:a.done||null,summary:a.summary||null})}]};
  }
  if(name==="rian_eemf_request_write"){
   for(const [sid,s] of trustedSessions){
    if(s.clientId===clientId&&s.profile===SMOKE_PROFILE&&currentSessionState(s)==="ACTIVE"&&smokeWriteAllowed(args))
     return smokeScopedWrite(sid,args,clientId);
+   if(s.clientId===clientId&&s.profile===PROJECT_PROFILE&&currentSessionState(s)==="ACTIVE"&&projectWriteAllowed(args))
+    return projectScopedWrite(sid,args,clientId);
   }
  }
  if(name==="rian_eemf_request_command"){
@@ -528,11 +594,11 @@ function passwordOK(provided){
 function actionPage(id,item,msg=""){
  const description=item.operation==="rian_eemf_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
  const profile=item.clientId?eligibleTrustProfile(item.operation,item.args):null;
- const proof=ticket({type:"eemf-action-approval",id,exp:now()+([SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
- const label=profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
+ const proof=ticket({type:"eemf-action-approval",id,exp:now()+([PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
+ const label=profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
  const options=profile?
   '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode"><option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option></select>'+
-  '<p>허용 범위: '+escape(label)+'. '+escape(profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
+  '<p>허용 범위: '+escape(label)+'. '+escape(profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
   '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="30" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
@@ -590,7 +656,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
    s.sourceHash=sourceHash;
    s.state="ACTIVE";s.validUntil=now()+durationMinutes*60;s.remaining=TRUSTED_MAX_CALLS;
    auditTrusted("activated",proof.id,{expires_at:s.validUntil,max_calls:TRUSTED_MAX_CALLS,duration_minutes:durationMinutes});
-   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
+   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===PROJECT_PROFILE?"격리 프로젝트 코드 수정 및 문법 검사":s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
   }catch{
    s.state="REVOKED";s.remaining=0;
    return html("<h1>세션 활성화 실패</h1><p>원격 스크립트 무결성이나 PC 연결을 확인해야 합니다.</p>",409)
@@ -639,7 +705,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
     if(!executed.execution||executed.execution.ok!==true)throw Error("Initial trusted command did not complete");
     item.status="COMPLETE";item.done=now();
     item.summary=JSON.stringify({...executed.execution,approval_session:{id:sessionId,profile,expires_at:s.validUntil,remaining_calls:s.remaining,duration_minutes:durationMinutes}}).slice(0,30000);
-    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
+    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===PROJECT_PROFILE?"전용 파일 calculator.py·notes.md 수정 및 문법 검사":profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
    }
    const r=await relay(item.operation,item.args,true);
    item.status="COMPLETE";item.done=now();item.summary=JSON.stringify(r).slice(0,30000);
