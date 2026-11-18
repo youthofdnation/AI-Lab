@@ -359,13 +359,13 @@ describe("Salpion PR16 Git task scoped trust — one approval for fetch/worktree
  const boot=["python","-I","-S","-c","from pathlib import Path;Path('RIAN-Salpion-PR16').mkdir(exist_ok=True);print('RIAN_SALPION_READY')"];
  const supported=[
   {id:"bootstrap",cwd:docs,argv:boot},
-  {id:"clone",cwd:root,argv:["git","clone","--no-checkout","--filter=blob:none","https://github.com/youthofdnation/rian-vision-reliability.git","repo"]},
+  {id:"clone",cwd:root,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none","https://github.com/youthofdnation/rian-vision-reliability.git","repo"]},
   {id:"fetch",cwd:root,argv:["git","-C","repo","fetch","--no-tags","origin","refs/pull/16/head:refs/remotes/origin/pr-16"]},
-  {id:"worktree",cwd:root,argv:["git","-C","repo","worktree","add","--detach","../pr16",sha]},
+  {id:"worktree",cwd:root,argv:["git","-c","core.hooksPath=NUL","-C","repo","worktree","add","--detach","../pr16",sha]},
   {id:"status",cwd:root,argv:["git","-C","pr16","status","--short","--untracked-files=normal"]},
   {id:"head",cwd:root,argv:["git","-C","pr16","rev-parse","HEAD"]},
   {id:"diff",cwd:root,argv:["git","-C","pr16","diff","--","tools/its_small_object_eval.py","rian_pr16_notes.md"]},
-  {id:"test",cwd:worktree,argv:["python","-I","-m","pytest","tests/test_its_small_object_eval.py","-q","-p","no:cacheprovider"]}
+  {id:"test",cwd:worktree,argv:["python","-I","-c","import os;os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';import pytest;raise SystemExit(pytest.main(['tests/test_its_small_object_eval.py','-q','-p','no:cacheprovider']))"]}
  ];
  test("admits pinned Git workflow and test without a repeated browser approval",()=>{
   for(const step of supported){
@@ -425,6 +425,10 @@ describe("Salpion PR16 Git task scoped trust — one approval for fetch/worktree
    's.clientId===clientId',
    'passwordOK(f.get("password")',
    'if(s.profile===SAL_PROFILE)await salPreflight(safe)',
+   'profile===SAL_PROFILE?',
+   'const approvalOptions=profile===SAL_PROFILE?',
+   'credential.interactive=never',
+   'PYTEST_DISABLE_PLUGIN_AUTOLOAD',
   ])expect(source).toContain(rule);
  });
 });
