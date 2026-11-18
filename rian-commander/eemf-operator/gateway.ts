@@ -400,7 +400,7 @@ async function devTaskWrite(sid,args,clientId){
 const DEV_PROFILE="dev-version-checks-v1",DEV_CWD="Documents";
 const DEV_VERSION_CMDS=["python","git","node"];
 const DEV_POLICY_PIN="rian-commander|dev-version-checks-v1|cwd=Documents|python --version|git --version|node --version|no-write|2026-11-18";
-const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
+const DEV_APPROVAL_SECONDS=1800,DEV_TASK_APPROVAL_SECONDS=86400,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
 function trustedWorkspace(profile){return profile===DEV_TASK_PROFILE?DEV_TASK_ROOT:profile===V2_PROFILE?V2_ROOT:profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
 function trustedScript(profile){return profile===OUTLOOK_PROFILE?OUTLOOK_SOURCE:TRUSTED_SOURCE;}
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
@@ -498,7 +498,8 @@ export function eligibleTrustProfile(operation,args){
  return null;
 }
 export function approvalRequestSeconds(operation,args){
- return [DEV_TASK_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
+ const profile=eligibleTrustProfile(operation,args);
+ return profile===DEV_TASK_PROFILE?DEV_TASK_APPROVAL_SECONDS:[V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
  if(profile===DEV_TASK_PROFILE)return projectDigest(DEV_TASK_POLICY+DEV_TASK_SETUP_SCRIPT+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT);
@@ -713,7 +714,7 @@ async function sendBackend(name,args,clientId){
  const operation=name==="rian_eemf_request_command"?"rian_eemf_run_command":"rian_eemf_write_file";
  const ttl=approvalRequestSeconds(operation,args),issuedAt=now();
  actionQueue.set(actionId,{operation,args,clientId,status:"PENDING_APPROVAL",issuedAt,exp:issuedAt+ttl});
- return {content:[{type:"text",text:JSON.stringify({action_id:actionId,device,status:"PENDING_APPROVAL",preview:operation==="rian_eemf_run_command"?{argv:args.argv,cwd:args.cwd||null,timeout:args.timeout}:{path:args.path,overwrite:args.overwrite,contentLength:args.content.length},approval_url:origin+"/approve/"+actionId,expires_in_seconds:ttl,expires_at:issuedAt+ttl,note:ttl===DEV_APPROVAL_SECONDS?"No action executed. Safe version check approval valid 30 minutes. Browser owner approves once or selects a scoped session.":"No action executed. General command or write approval expires in 5 minutes and requires separate owner confirmation."})}]};
+ return {content:[{type:"text",text:JSON.stringify({action_id:actionId,device,status:"PENDING_APPROVAL",preview:operation==="rian_eemf_run_command"?{argv:args.argv,cwd:args.cwd||null,timeout:args.timeout}:{path:args.path,overwrite:args.overwrite,contentLength:args.content.length},approval_url:origin+"/approve/"+actionId,expires_in_seconds:ttl,expires_at:issuedAt+ttl,note:ttl===DEV_TASK_APPROVAL_SECONDS?"No command executed. Project-scope approval request valid up to 24 hours (lost on gateway restart). Approved session starts after owner password and lasts at most 60 minutes or 60 calls.":ttl===DEV_APPROVAL_SECONDS?"No action executed. Scoped request valid 30 minutes; owner may approve a timed session.":"No action executed. General command or write approval expires in 5 minutes and requires separate owner confirmation."})}]};
 }
 
 const ownerPortalSessions=new Map();
@@ -905,7 +906,7 @@ function actionPage(id,item,msg=""){
   '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="'+(profile===DEV_TASK_PROFILE?"60":"30")+'" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
- return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>승인 요청 만료 시각: '+escape(new Date(item.exp*1000).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"}))+' (한국시간). 이 버전 확인 요청은 최대 30분, 일반 명령·파일 쓰기는 5분입니다.</p><p>사용자가 승인 방식과 시간을 선택합니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(proof)+'">'+options+'<label for="password">소유자 암호</label><input name="password" id="password" type="password" minlength="20" autocomplete="current-password" required><button type="submit">선택한 방식으로 승인 및 실행</button></form>',200,"same-origin");
+ return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>승인 요청 만료 시각: '+escape(new Date(item.exp*1000).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"}))+' (한국시간). '+escape(profile===DEV_TASK_PROFILE?'개발 작업 범위 승인 요청은 최대 24시간 유효하지만 서버가 재시작하면 만료될 수 있습니다. 이 페이지를 연 뒤 10분 이내 승인 양식을 제출하세요. 승인된 실행 세션은 최대 60분·60회입니다.':'버전 확인 및 격리 테스트 승인 요청은 최대 30분, 일반 명령·파일 쓰기는 5분간 유효합니다.')+'</p><p>사용자가 승인 방식과 시간을 선택합니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(proof)+'">'+options+'<label for="password">소유자 암호</label><input name="password" id="password" type="password" minlength="20" autocomplete="current-password" required><button type="submit">선택한 방식으로 승인 및 실행</button></form>',200,"same-origin");
 }
 function trustedSessionPage(id,s){
  const nonce=ticket({type:"eemf-trusted-session-approval",id,exp:now()+240,nonce:rand(16)});
