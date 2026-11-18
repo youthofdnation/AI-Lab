@@ -46,9 +46,9 @@ const tools=[
 {name:"rian_eemf_status",description:"Read EEMFO3L current status only",inputSchema:{type:"object",properties:{},additionalProperties:false}},
 {name:"rian_eemf_list_directory",description:"List EEMFO3L allowed relative home folder",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
 {name:"rian_eemf_read_file",description:"Read UTF-8 text within EEMFO3L allowed home root",inputSchema:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}},
-{name:"rian_eemf_request_command",description:"Request an EEMFO3L command; browser lets owner choose per-command or scoped timed approval (eligible safe read-only commands only). Eligible commands reuse active session unless approval_mode=each.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"},approval_mode:{type:"string",enum:["choose","each"]}},required:["argv"],additionalProperties:false}},
+{name:"rian_eemf_request_command",description:"Request an EEMFO3L command or submit RIAN_DEV_SCOPE_V1 to create a one-time owner-approved, repository-specific Git/test/edit session. Exact allowed commands auto-reuse active session; no arbitrary shell or push/delete.",inputSchema:{type:"object",properties:{argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"},approval_mode:{type:"string",enum:["choose","each"]}},required:["argv"],additionalProperties:false}},
 {name:"rian_eemf_request_write",description:"DRAFT a write to a permitted text file on EEMFO3L requiring browser approval. Does not write yet.",inputSchema:{type:"object",properties:{path:{type:"string"},content:{type:"string"},overwrite:{type:"boolean"}},required:["path","content"],additionalProperties:false}},
-{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1","dev-workspace-edit-v1","dev-project-history-v2","dev-salpion-pr16-v1"]}},additionalProperties:false}},
+{name:"rian_eemf_request_trusted_session",description:"Request a user-selected 1-60 minute restricted trust session, owner password approval once: Proton title search, Outlook metadata search, or limited developer version checks. No writes or arbitrary shell.",inputSchema:{type:"object",properties:{profile:{type:"string",enum:["proton-local-readonly-v1","outlook-local-metadata-v1","dev-version-checks-v1","dev-sandbox-smoke-v1","dev-workspace-edit-v1","dev-project-history-v2"]}},additionalProperties:false}},
 {name:"rian_eemf_trusted_session_status",description:"Check your specific session state, expiry and remaining calls.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
 {name:"rian_eemf_run_trusted_command",description:"Execute fixed allowlisted Proton/Outlook queries or developer python/git/node --version after owner-scoped approval. No general shell, sync, file read/write.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"},argv:{type:"array",items:{type:"string"}},cwd:{type:"string"},timeout:{type:"integer"}},required:["session_id","argv","cwd"],additionalProperties:false}},
 {name:"rian_eemf_revoke_trusted_session",description:"Revoke your active read-only trusted session immediately.",inputSchema:{type:"object",properties:{session_id:{type:"string",pattern:"^[A-Za-z0-9_-]{32,64}$"}},required:["session_id"],additionalProperties:false}},
@@ -77,7 +77,7 @@ const projectSnapshots=new Map();
 function projectDigest(value){return createHash("sha256").update(value,"utf8").digest("hex")}
 function projectKey(client,path){return projectDigest(client+"|"+path)}
 function projectTrackRead(client,path,content){
- if(typeof client!=="string"||!client.startsWith("rian.")||!([PROJECT_FILE,PROJECT_NOTES].includes(path)||v2MutablePath(path)||[SAL_SOURCE,SAL_NOTES].includes(path))||typeof content!=="string"||Buffer.byteLength(content,"utf8")>([SAL_SOURCE,SAL_NOTES].includes(path)?11500:PROJECT_MAX_BYTES))return;
+ if(typeof client!=="string"||!client.startsWith("rian.")||!([PROJECT_FILE,PROJECT_NOTES].includes(path)||v2MutablePath(path))||typeof content!=="string"||Buffer.byteLength(content,"utf8")>PROJECT_MAX_BYTES)return;
  if(projectSnapshots.size>=100)for(const [id,x] of projectSnapshots){if(x.until<=now())projectSnapshots.delete(id)}
  if(projectSnapshots.size>=100)projectSnapshots.delete(projectSnapshots.keys().next().value);
  projectSnapshots.set(projectKey(client,path),{hash:projectDigest(content),until:now()+PROJECT_SNAPSHOT_TTL});
@@ -269,87 +269,131 @@ async function v2CheckRunner(){
 }
 
 
-const SAL_PROFILE="dev-salpion-pr16-v1",SAL_HOME="Documents",SAL_BASE="Documents/RIAN-Salpion-PR16",SAL_WORKTREE="Documents/RIAN-Salpion-PR16/pr16";
-const SAL_SHA="3db3637ab74a74918ffa09c8d034fc8485fe3cfd",SAL_URL="https://github.com/youthofdnation/rian-vision-reliability.git";
-const SAL_TEST_BLOB="37ec260067e28620e6b0ee19d293991676624ae9";
-const SAL_SOURCE=SAL_WORKTREE+"/tools/its_small_object_eval.py",SAL_NOTES=SAL_WORKTREE+"/rian_pr16_notes.md";
-const SAL_BOOT=["python","-I","-S","-c","from pathlib import Path;Path('RIAN-Salpion-PR16').mkdir(exist_ok=True);print('RIAN_SALPION_READY')"];
-const SAL_COMMANDS=[
- {id:"bootstrap",cwd:SAL_HOME,argv:SAL_BOOT},
- {id:"clone",cwd:SAL_BASE,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none",SAL_URL,"repo"]},
- {id:"fetch",cwd:SAL_BASE,argv:["git","-C","repo","fetch","--no-tags","origin","refs/pull/16/head:refs/remotes/origin/pr-16"]},
- {id:"worktree",cwd:SAL_BASE,argv:["git","-c","core.hooksPath=NUL","-C","repo","worktree","add","--detach","../pr16",SAL_SHA]},
- {id:"status",cwd:SAL_BASE,argv:["git","-C","pr16","status","--short","--untracked-files=normal"]},
- {id:"head",cwd:SAL_BASE,argv:["git","-C","pr16","rev-parse","HEAD"]},
- {id:"worktree-list",cwd:SAL_BASE,argv:["git","-C","repo","worktree","list","--porcelain"]},
- {id:"diff",cwd:SAL_BASE,argv:["git","-C","pr16","diff","--","tools/its_small_object_eval.py","rian_pr16_notes.md"]},
- {id:"tests",cwd:SAL_WORKTREE,argv:["python","-I","-c","import os;os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';import pytest;raise SystemExit(pytest.main(['tests/test_its_small_object_eval.py','-q','-p','no:cacheprovider']))"]}
-];
-const SAL_GUARD="from pathlib import Path;r=Path('RIAN-Salpion-PR16');assert r.is_dir() and not r.is_symlink() and r.resolve().parent==Path.cwd().resolve();assert all(not (r/n).is_symlink() and (not (r/n).exists() or ((r/n).is_dir() and (r/n).resolve().parent==r.resolve())) for n in ('repo','pr16'));print('RIAN_PATH_OK')";
-const SAL_FILE_GUARD="from pathlib import Path;r=Path.cwd().resolve();p=Path('tools/its_small_object_eval.py');assert r.name=='pr16' and r.parent.name=='RIAN-Salpion-PR16' and p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and p.parent.resolve().parent==r;print('RIAN_FILE_OK')";
-const SAL_NOTE_GUARD="from pathlib import Path;r=Path.cwd().resolve();p=Path('rian_pr16_notes.md');assert r.name=='pr16' and r.parent.name=='RIAN-Salpion-PR16' and not p.is_symlink() and (not p.exists() or p.is_file());print('RIAN_NOTE_OK')";
-const SAL_PIN="salpion-pr16|isolated-repo|pinned-head-and-test|exact-git-test|two-path-writes|no-push-reset-delete-deploy|2026-11-18";
-export function salCommandAllowed(raw){
- if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||!Array.isArray(raw.argv))throw Error("PR16 invalid fields");
- const match=SAL_COMMANDS.find(c=>c.cwd===raw.cwd&&c.argv.length===raw.argv.length&&c.argv.every((part,i)=>part===raw.argv[i]));
- if(!match)throw Error("PR16 only pinned git/pytest operations; no shell/push/reset/clean/deploy");
- const max=["clone","fetch","worktree","tests"].includes(match.id)?90:30;
- const timeout=raw.timeout===undefined?max:raw.timeout;
- if(!Number.isInteger(timeout)||timeout<1||timeout>max)throw Error("PR16 runtime limit");
+const DEV_TASK_PROFILE="dev-task-scope-v1",DEV_TASK_MARKER="RIAN_DEV_SCOPE_V1";
+const DEV_TASK_ROOT="Documents/RIAN-Commander-Dev",DEV_TASK_HOME="Documents",DEV_TASK_POLICY="v1|owner-approved-manifest|one-repo-one-pr|no-push-clean-reset-delete-deploy|2026-11-18";
+const DEV_TASK_MAX_BYTES=11500;
+const DEV_TASK_SETUP_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');assert not r.is_symlink();r.mkdir(exist_ok=True);assert r.resolve().parent==Path.cwd().resolve();p=r/sys.argv[1];assert not p.exists() and not p.is_symlink();p.mkdir();print('RIAN_DEV_READY')";
+const DEV_TASK_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev');p=r/sys.argv[1];assert r.is_dir() and not r.is_symlink() and r.resolve().parent==Path.cwd().resolve() and p.is_dir() and not p.is_symlink() and p.resolve().parent==r.resolve();assert all(not (p/x).is_symlink() for x in ('repo','tree'));print('RIAN_DEV_GUARD_OK')";
+const DEV_TASK_FILE_GUARD_SCRIPT="from pathlib import Path;import sys;r=Path('RIAN-Commander-Dev')/sys.argv[1]/'tree';p=r/sys.argv[2];assert r.is_dir() and not r.is_symlink() and p.parent.resolve().is_relative_to(r.resolve());assert not p.is_symlink() and all(not x.is_symlink() for x in p.parents if x.exists());print('RIAN_DEV_FILE_OK')";
+export function devTaskSafePath(path,extension){
+ if(typeof path!=="string"||path.length>180||path.startsWith("/")||path.includes("\\")||path.includes(":"))return false;
+ const segments=path.split("/");
+ if(segments.length>7||segments.length<2||segments.some(x=>!x||x==="."||x===".."||x.startsWith(".")||!/^[A-Za-z0-9_.-]+$/.test(x)))return false;
+ if(segments.some(x=>["node_modules",".git",".github","secrets","credentials","dist","build","appdata"].includes(x.toLowerCase())))return false;
+ const filename=segments.at(-1);
+ if(filename.startsWith("test_")&&extension==="edit")return false;
+ if(extension==="test")return ((path.startsWith("tests/")||path.includes("/tests/"))&&/(^|\/)test_[a-zA-Z0-9_-]+\.py$/.test(path))||/(^|\/)[A-Za-z0-9_-]+\.test\.(?:js|ts)$/.test(path);
+ return /\.(?:py|ts|tsx|js|jsx|md|json|yaml|yml)$/.test(filename)&&!path.startsWith("tests/");
+}
+export function devTaskParseScope(raw){
+ if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||raw.cwd!==DEV_TASK_HOME||!Array.isArray(raw.argv)||raw.argv.length!==8)throw Error("Development scope request shape denied");
+ const [marker,owner,repo,pr,sha,test,testBlob,edits]=raw.argv;
+ if(marker!==DEV_TASK_MARKER||typeof owner!=="string"||typeof repo!=="string"||!(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(owner))||!(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,65}$/.test(repo))||
+    typeof pr!=="string"||!(/^[1-9][0-9]{0,5}$/.test(pr))||typeof sha!=="string"||!(/^[0-9a-f]{40}$/.test(sha))||
+    typeof testBlob!=="string"||!(/^[0-9a-f]{40}$/.test(testBlob))||!devTaskSafePath(test,"test")||typeof edits!=="string")throw Error("Invalid repository, PR identity, test or hash");
+ const editable=edits.split(";");
+ if(editable.length<1||editable.length>4||new Set(editable).size!==editable.length||editable.includes(test)||!editable.every(x=>devTaskSafePath(x,"edit")))throw Error("Invalid exact-file edit scope");
+ const id=(owner+"-"+repo+"-pr"+pr).toLowerCase();
+ if(id.length>100||!/^[a-z0-9][a-z0-9_.-]+$/.test(id))throw Error("Workspace label denied");
+ const timeout=raw.timeout===undefined?15:raw.timeout;
+ if(!Number.isInteger(timeout)||timeout<1||timeout>30)throw Error("Scope request timeout denied");
+ const url="https://github.com/"+owner+"/"+repo+".git";
+ const base=DEV_TASK_ROOT+"/"+id,tree=base+"/tree";
+ return {owner,repo,pr,sha,test,testBlob,editable,id,url,base,tree};
+}
+export function devTaskCommands(s){
+ const shared=s.base,testArg=s.test;
+ const testCmd=testArg.endsWith(".py")?
+  ["python","-I","-c","import os;os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';import pytest;raise SystemExit(pytest.main(['"+testArg+"','-q','-p','no:cacheprovider']))"]:
+  ["bun","test",testArg];
+ return [
+  {name:"prepare",cwd:DEV_TASK_HOME,argv:["python","-I","-S","-c",DEV_TASK_SETUP_SCRIPT,s.id],limit:30},
+  {name:"clone",cwd:shared,argv:["git","-c","credential.interactive=never","-c","core.hooksPath=NUL","clone","--no-checkout","--filter=blob:none",s.url,"repo"],limit:90},
+  {name:"fetch",cwd:shared,argv:["git","-c","credential.interactive=never","-C","repo","fetch","--no-tags","origin","refs/pull/"+s.pr+"/head:refs/remotes/origin/pr-"+s.pr],limit:90},
+  {name:"worktree",cwd:shared,argv:["git","-c","core.hooksPath=NUL","-c","filter.lfs.required=false","-c","filter.lfs.smudge=","-C","repo","worktree","add","--detach","../tree",s.sha],limit:90},
+  {name:"status",cwd:shared,argv:["git","-C","tree","status","--short","--untracked-files=normal"],limit:30},
+  {name:"head",cwd:shared,argv:["git","-C","tree","rev-parse","HEAD"],limit:30},
+  {name:"worktrees",cwd:shared,argv:["git","-C","repo","worktree","list","--porcelain"],limit:30},
+  {name:"diff",cwd:shared,argv:["git","-C","tree","diff","--",...s.editable],limit:30},
+  {name:"tests",cwd:s.tree,argv:testCmd,limit:90},
+ ];
+}
+export function devTaskAllowedCommand(raw,scope){
+ if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||!Array.isArray(raw.argv))throw Error("Unexpected developer task arguments");
+ const match=devTaskCommands(scope).find(x=>x.cwd===raw.cwd&&x.argv.length===raw.argv.length&&x.argv.every((v,i)=>v===raw.argv[i]));
+ if(!match)throw Error("Command is outside approved project: no push, reset, clean, delete or general shell");
+ const timeout=raw.timeout===undefined?match.limit:raw.timeout;
+ if(!Number.isInteger(timeout)||timeout<1||timeout>match.limit)throw Error("Task command timeout exceeds approved maximum");
  return {argv:[...match.argv],cwd:match.cwd,timeout};
 }
-export function salWriteAllowed(a){
- if(!a||typeof a!=="object"||Array.isArray(a)||Object.keys(a).some(k=>!["path","content","overwrite"].includes(k)))return false;
- if(![SAL_SOURCE,SAL_NOTES].includes(a.path)||typeof a.content!=="string"||!a.content.trim()||a.content.includes("\0")||Buffer.byteLength(a.content,"utf8")>11500)return false;
- return a.path===SAL_SOURCE?a.overwrite===true:(a.overwrite===true||a.overwrite===false);
+export function devTaskAllowedWrite(args,scope){
+ if(!args||typeof args!=="object"||Array.isArray(args)||Object.keys(args).some(k=>!["path","content","overwrite"].includes(k))||typeof args.content!=="string"||!args.content.trim()||args.content.includes("\0")||
+ Buffer.byteLength(args.content,"utf8")>DEV_TASK_MAX_BYTES||typeof args.overwrite!=="boolean")return false;
+ const file=args.path?.startsWith(scope.tree+"/")?args.path.slice(scope.tree.length+1):null;
+ return typeof file==="string"&&scope.editable.includes(file);
 }
-async function salExec(argv,cwd,expected){
- const r=await relay("rian_eemf_run_command",{argv,cwd,timeout:20},true);
- const text=String(r?.result?.stdout||"").trim();
- if(r?.result?.exit_code!==0||!(expected.startsWith("RIAN_")?text.includes(expected):text===expected))throw Error("PR16 identity or canonical path verification failed");
+function devTaskScopeDigest(s){return projectDigest(DEV_TASK_POLICY+JSON.stringify(s)+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT)}
+async function devTaskCheckRun(argv,cwd,expect){
+ const r=await relay("rian_eemf_run_command",{argv,cwd,timeout:25},true);
+ if(r?.result?.exit_code!==0)throw Error("Developer task workspace or Git identity check failed");
+ const stdout=String(r?.result?.stdout||"").trim();
+ if(expect.startsWith("RIAN_")?!stdout.includes(expect):stdout!==expect)throw Error("Developer task remote identity mismatch");
 }
-async function salPreflight(command){
- const op=SAL_COMMANDS.find(c=>c.cwd===command.cwd&&JSON.stringify(c.argv)===JSON.stringify(command.argv));
- if(!op)throw Error("Unrecognized project command");
- if(op.id==="bootstrap")return;
- await salExec(["python","-I","-S","-c",SAL_GUARD],SAL_HOME,"RIAN_PATH_OK");
- if(op.id==="clone")return;
- await salExec(["git","-C","repo","remote","get-url","origin"],SAL_BASE,SAL_URL);
- if(op.id==="worktree")await salExec(["git","-C","repo","rev-parse","refs/remotes/origin/pr-16"],SAL_BASE,SAL_SHA);
- if(["status","head","diff","tests"].includes(op.id))await salExec(["git","-C","pr16","rev-parse","HEAD"],SAL_BASE,SAL_SHA);
- if(op.id==="tests")await salExec(["git","-C","pr16","hash-object","tests/test_its_small_object_eval.py"],SAL_BASE,SAL_TEST_BLOB);
+async function devTaskPreflight(safe,scope){
+ const cmd=devTaskCommands(scope).find(x=>safe.cwd===x.cwd&&JSON.stringify(safe.argv)===JSON.stringify(x.argv));
+ if(!cmd)throw Error("Not approved task command");
+ if(cmd.name==="prepare")return;
+ await devTaskCheckRun(["python","-I","-S","-c",DEV_TASK_GUARD_SCRIPT,scope.id],DEV_TASK_HOME,"RIAN_DEV_GUARD_OK");
+ if(cmd.name==="clone")return;
+ await devTaskCheckRun(["git","-C","repo","remote","get-url","origin"],scope.base,scope.url);
+ if(cmd.name==="fetch")return;
+ if(cmd.name==="worktree"){
+  await devTaskCheckRun(["git","-C","repo","rev-parse","refs/remotes/origin/pr-"+scope.pr],scope.base,scope.sha);
+  return;
+ }
+ if(["status","head","diff","tests"].includes(cmd.name))
+  await devTaskCheckRun(["git","-C","tree","rev-parse","HEAD"],scope.base,scope.sha);
+ if(cmd.name==="tests")
+  await devTaskCheckRun(["git","-C","tree","hash-object",scope.test],scope.base,scope.testBlob);
 }
-async function salScopedWrite(sid,args,clientId){
+function devTaskMaySnapshot(clientId,path){
+ for(const s of trustedSessions.values())
+  if(s.profile===DEV_TASK_PROFILE&&s.clientId===clientId&&s.scope&&currentSessionState(s)==="ACTIVE"&&s.scope.editable.some(x=>path===s.scope.tree+"/"+x))return true;
+ return false;
+}
+async function devTaskWrite(sid,args,clientId){
  const s=ownedSession(sid,clientId);
- if(s.profile!==SAL_PROFILE||currentSessionState(s)!=="ACTIVE"||s.remaining<=0||!salWriteAllowed(args))throw Error("PR16 scoped write denied");
- if(s.busy)throw Error("PR16 session busy");
+ if(s.profile!==DEV_TASK_PROFILE||currentSessionState(s)!=="ACTIVE"||s.remaining<=0||!s.scope||!devTaskAllowedWrite(args,s.scope))throw Error("Project edit not approved");
+ if(s.busy)throw Error("Another task command is running");
  s.busy=true;
  try{
-  if(s.sourceHash!==await trustedSourceDigest(SAL_PROFILE)){s.state="REVOKED";s.remaining=0;throw Error("PR16 policy changed; grant revoked")}
-  await salPreflight({cwd:SAL_BASE,argv:SAL_COMMANDS.find(x=>x.id==="status").argv});
-  if(args.path===SAL_SOURCE)await salExec(["python","-I","-S","-c",SAL_FILE_GUARD],SAL_WORKTREE,"RIAN_FILE_OK");
-  if(args.path===SAL_NOTES)await salExec(["python","-I","-S","-c",SAL_NOTE_GUARD],SAL_WORKTREE,"RIAN_NOTE_OK");
-  const folder=args.path===SAL_SOURCE?SAL_WORKTREE+"/tools":SAL_WORKTREE;
+  if(s.sourceHash!==await trustedSourceDigest(DEV_TASK_PROFILE)||s.scopeHash!==devTaskScopeDigest(s.scope)){s.state="REVOKED";s.remaining=0;throw Error("Project grant policy changed")}
+  const scope=s.scope,rel=args.path.slice(scope.tree.length+1);
+  const statusCmd=devTaskCommands(scope).find(x=>x.name==="status");
+  await devTaskPreflight({argv:statusCmd.argv,cwd:statusCmd.cwd},scope);
+  await devTaskCheckRun(["python","-I","-S","-c",DEV_TASK_FILE_GUARD_SCRIPT,scope.id,rel],DEV_TASK_HOME,"RIAN_DEV_FILE_OK");
+  const folder=args.path.slice(0,args.path.lastIndexOf("/")),basename=args.path.slice(args.path.lastIndexOf("/")+1);
   const listing=await relay("rian_eemf_list_directory",{path:folder});
-  const filename=args.path.slice(args.path.lastIndexOf("/")+1),existing=listing?.result?.entries?.find(x=>x.name===filename);
-  if(existing&&existing.type!=="file")throw Error("PR16 destination is not a regular file");
-  if(Boolean(existing)!==args.overwrite)throw Error("PR16 write mode mismatch");
-  let prior=null;
+  const found=listing?.result?.entries?.find(x=>x.name===basename);
+  if(found&&found.type!=="file")throw Error("Target is not a plain file");
+  if(Boolean(found)!==args.overwrite)throw Error("Create/overwrite mismatch");
+  let before=null;
   if(args.overwrite){
-   const snap=projectSnapshots.get(projectKey(clientId,args.path));
-   if(!snap||snap.until<=now())throw Error("PR16 file must be read through chat before overwrite");
-   const read=await relay("rian_eemf_read_file",{path:args.path});
-   prior=read?.result?.content;
-   if(typeof prior!=="string"||projectDigest(prior)!==snap.hash)throw Error("PR16 stale-source conflict; refresh before write");
+   const snapshot=projectSnapshots.get(projectKey(clientId,args.path));
+   if(!snapshot||snapshot.until<=now())throw Error("Read target source in chat before editing");
+   const actual=await relay("rian_eemf_read_file",{path:args.path});
+   before=actual?.result?.content;
+   if(typeof before!=="string"||projectDigest(before)!==snapshot.hash)throw Error("Conflict: project source changed since last read");
+   if(before===args.content)return sessionReply({device,profile:DEV_TASK_PROFILE,path:args.path,no_change:true,sha256:snapshot.hash,remaining_calls:s.remaining});
   }
-  if(currentSessionState(s)!=="ACTIVE")throw Error("PR16 session expired");
-  s.remaining--;auditTrusted("salpion_write_submitted",sid,{file:filename,remaining:s.remaining});
+  if(currentSessionState(s)!=="ACTIVE")throw Error("Approval expired before write");
+  s.remaining--;auditTrusted("dev_task_write_started",sid,{path:rel,remaining:s.remaining});
   await relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true);
-  const confirmed=await relay("rian_eemf_read_file",{path:args.path});
-  if(confirmed?.result?.content!==args.content)throw Error("PR16 write verification failed");
+  const result=await relay("rian_eemf_read_file",{path:args.path});
+  if(result?.result?.content!==args.content)throw Error("Developer source write readback mismatch");
   projectTrackRead(clientId,args.path,args.content);
-  auditTrusted("salpion_write_verified",sid,{file:filename,remaining:s.remaining});
-  return sessionReply({device,profile:SAL_PROFILE,path:args.path,write_verified:true,remaining_calls:s.remaining,old_sha256:prior?projectDigest(prior):null,sha256:projectDigest(args.content),diff:projectDiff(prior||"",args.content)});
+  auditTrusted("dev_task_write_verified",sid,{path:rel,remaining:s.remaining});
+  return sessionReply({device,profile:DEV_TASK_PROFILE,path:args.path,write_verified:true,old_sha256:before?projectDigest(before):null,sha256:projectDigest(args.content),remaining_calls:s.remaining,diff:projectDiff(before||"",args.content)});
  }finally{s.busy=false}
 }
 
@@ -357,7 +401,7 @@ const DEV_PROFILE="dev-version-checks-v1",DEV_CWD="Documents";
 const DEV_VERSION_CMDS=["python","git","node"];
 const DEV_POLICY_PIN="rian-commander|dev-version-checks-v1|cwd=Documents|python --version|git --version|node --version|no-write|2026-11-18";
 const DEV_APPROVAL_SECONDS=1800,DEFAULT_APPROVAL_SECONDS=300,DEV_APPROVAL_FORM_SECONDS=600;
-function trustedWorkspace(profile){return profile===SAL_PROFILE?SAL_WORKTREE:profile===V2_PROFILE?V2_ROOT:profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
+function trustedWorkspace(profile){return profile===DEV_TASK_PROFILE?DEV_TASK_ROOT:profile===V2_PROFILE?V2_ROOT:profile===PROJECT_PROFILE?PROJECT_DIR:profile===SMOKE_PROFILE?SMOKE_DIR:profile===DEV_PROFILE?DEV_CWD:profile===OUTLOOK_PROFILE?OUTLOOK_CWD:TRUSTED_CWD;}
 function trustedScript(profile){return profile===OUTLOOK_PROFILE?OUTLOOK_SOURCE:TRUSTED_SOURCE;}
 const validSessionId=v=>typeof v==="string"&&/^[A-Za-z0-9_-]{32,64}$/.test(v);
 export function ownedSession(id,clientId){
@@ -376,7 +420,8 @@ export function currentSessionState(session,at=now()){
  return session.state;
 }
 export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
- if(profile===SAL_PROFILE)return salCommandAllowed(raw);
+ if(profile===DEV_TASK_PROFILE){devTaskParseScope(raw);return {argv:[...raw.argv],cwd:raw.cwd,timeout:raw.timeout===undefined?15:raw.timeout};}
+
  if(profile===V2_PROFILE){
   if(!raw||typeof raw!=="object"||Array.isArray(raw)||Object.keys(raw).some(k=>!["argv","cwd","timeout"].includes(k))||raw.cwd!==V2_CWD||!Array.isArray(raw.argv))throw Error("V2 project cwd/argv denied");
   const exact=(arr,expected)=>arr.length===expected.length&&arr.every((x,i)=>x===expected[i]);
@@ -449,14 +494,14 @@ export function validateTrustedMailCommand(raw,profile=TRUSTED_PROFILE){
 }
 export function eligibleTrustProfile(operation,args){
  if(operation!=="rian_eemf_run_command")return null;
- for(const p of [SAL_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
+ for(const p of [DEV_TASK_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE,OUTLOOK_PROFILE,TRUSTED_PROFILE]){try{validateTrustedMailCommand(args,p);return p}catch{}}
  return null;
 }
 export function approvalRequestSeconds(operation,args){
- return [SAL_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
+ return [DEV_TASK_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(eligibleTrustProfile(operation,args))?DEV_APPROVAL_SECONDS:DEFAULT_APPROVAL_SECONDS;
 }
 async function trustedSourceDigest(profile=TRUSTED_PROFILE){
- if(profile===SAL_PROFILE)return projectDigest(SAL_PIN+SAL_URL+SAL_SHA+SAL_TEST_BLOB+JSON.stringify(SAL_COMMANDS)+SAL_GUARD+SAL_FILE_GUARD+SAL_NOTE_GUARD);
+ if(profile===DEV_TASK_PROFILE)return projectDigest(DEV_TASK_POLICY+DEV_TASK_SETUP_SCRIPT+DEV_TASK_GUARD_SCRIPT+DEV_TASK_FILE_GUARD_SCRIPT);
  if(profile===V2_PROFILE)return v2Sha(V2_POLICY_PIN+V2_ROOT+V2_RUNNER+V2_HISTORY_INIT+JSON.stringify(V2_BOOT)+JSON.stringify(V2_RUN));
  if(profile===PROJECT_PROFILE)return projectDigest(PROJECT_PIN+PROJECT_DIR+PROJECT_FILE+PROJECT_NOTES+JSON.stringify(PROJECT_COMPILE));
  if(profile===SMOKE_PROFILE)return createHash("sha256").update(SMOKE_PIN+SMOKE_BUG+SMOKE_FIXED+SMOKE_TEST+JSON.stringify(SMOKE_BOOT)+JSON.stringify(SMOKE_RUN)).digest("hex");
@@ -467,7 +512,7 @@ async function trustedSourceDigest(profile=TRUSTED_PROFILE){
  return createHash("sha256").update(content,"utf8").digest("hex");
 }
 function sessionSummary(id,session){
- return {session_id:id,device,profile:session.profile||TRUSTED_PROFILE,state:currentSessionState(session),expires_at:session.validUntil||null,remaining_calls:session.remaining,maximum_calls:TRUSTED_MAX_CALLS,workspace:trustedWorkspace(session.profile||TRUSTED_PROFILE)};
+ return {session_id:id,device,profile:session.profile||TRUSTED_PROFILE,state:currentSessionState(session),expires_at:session.validUntil||null,remaining_calls:session.remaining,maximum_calls:TRUSTED_MAX_CALLS,workspace:session.profile===DEV_TASK_PROFILE&&session.scope?session.scope.tree:trustedWorkspace(session.profile||TRUSTED_PROFILE),task:session.profile===DEV_TASK_PROFILE&&session.scope?{repository:session.scope.owner+"/"+session.scope.repo,pr:session.scope.pr,commit:session.scope.sha,test:session.scope.test,editable:session.scope.editable}:undefined};
 }
 
 function safePath(value){
@@ -487,7 +532,7 @@ function safeArgs(name,args){
   return {path:safePath(args.path)};
  }
  if(name==="rian_eemf_request_trusted_session"){
-  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE,SAL_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
+  if(Object.keys(args).some(k=>k!=="profile")||(args.profile!==undefined&&![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE].includes(args.profile)))throw Error("Unexpected trusted session parameters");
   return {profile:args.profile||TRUSTED_PROFILE};
  }
  if(name==="rian_eemf_trusted_session_status"||name==="rian_eemf_revoke_trusted_session"){
@@ -539,7 +584,7 @@ async function relay(name,args,ownerApproved=false){
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
 export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
- if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE,SAL_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
+ if(![TRUSTED_PROFILE,OUTLOOK_PROFILE,DEV_PROFILE,SMOKE_PROFILE,PROJECT_PROFILE,V2_PROFILE].includes(profile))throw Error("Unsupported trusted profile");
  if(typeof clientId!=="string"||!clientId.startsWith("rian."))throw Error("Authenticated client required");
  for(const [id,s] of trustedSessions){
   const state=currentSessionState(s);
@@ -600,7 +645,7 @@ export async function trustedDispatch(name,args,clientId){
  if(s.busy)throw Error("Trusted session busy; concurrent commands are not allowed");
  // Validate twice: tool arguments were previously checked; guard again at authorization.
  const {session_id, ...raw}=args;
- const safe=validateTrustedMailCommand(raw,s.profile||TRUSTED_PROFILE);
+ const safe=s.profile===DEV_TASK_PROFILE?devTaskAllowedCommand(raw,s.scope):validateTrustedMailCommand(raw,s.profile||TRUSTED_PROFILE);
  s.busy=true;
  try{
   const digest=await trustedSourceDigest(s.profile||TRUSTED_PROFILE);
@@ -608,7 +653,7 @@ export async function trustedDispatch(name,args,clientId){
   if(currentSessionState(s)!=="ACTIVE")throw Error("Trusted session no longer active");
   if(s.profile===SMOKE_PROFILE&&JSON.stringify(safe.argv)===JSON.stringify(SMOKE_RUN))await smokeVerifySources();
   if(s.profile===V2_PROFILE&&JSON.stringify(safe.argv)===JSON.stringify(V2_RUN))await v2CheckRunner();
-  if(s.profile===SAL_PROFILE)await salPreflight(safe);
+  if(s.profile===DEV_TASK_PROFILE){if(!s.scope||s.scopeHash!==devTaskScopeDigest(s.scope))throw Error("Approved project manifest changed");await devTaskPreflight(safe,s.scope);}
   // Consume a quota unit before submitting so failures cannot evade limits.
   s.remaining--;
   auditTrusted("command_submitted",session_id,{remaining:s.remaining});
@@ -622,7 +667,10 @@ async function sendBackend(name,args,clientId){
  if(name==="rian_eemf_status"||name==="rian_eemf_list_directory"||name==="rian_eemf_read_file"){
   const target=name;
   const val=await relay(target,args);
-  if(name==="rian_eemf_read_file"&&typeof val?.result?.content==="string")projectTrackRead(clientId,args.path,val.result.content);
+  if(name==="rian_eemf_read_file"&&typeof val?.result?.content==="string"){
+   projectTrackRead(clientId,args.path,val.result.content);
+   if(devTaskMaySnapshot(clientId,args.path)&&Buffer.byteLength(val.result.content,"utf8")<=DEV_TASK_MAX_BYTES)projectSnapshots.set(projectKey(clientId,args.path),{hash:projectDigest(val.result.content),until:now()+PROJECT_SNAPSHOT_TTL});
+  }
   if(JSON.stringify(val).length>100000)throw Error("Result too large");
   return {content:[{type:"text",text:JSON.stringify(val)}]};
  }
@@ -639,13 +687,18 @@ async function sendBackend(name,args,clientId){
     return projectScopedWrite(sid,args,clientId);
    if(s.clientId===clientId&&s.profile===V2_PROFILE&&currentSessionState(s)==="ACTIVE"&&v2WriteAllowed(args))
     return v2Write(sid,args,clientId);
-   if(s.clientId===clientId&&s.profile===SAL_PROFILE&&currentSessionState(s)==="ACTIVE"&&salWriteAllowed(args))
-    return salScopedWrite(sid,args,clientId);
+   if(s.clientId===clientId&&s.profile===DEV_TASK_PROFILE&&currentSessionState(s)==="ACTIVE"&&s.scope&&devTaskAllowedWrite(args,s.scope))
+    return devTaskWrite(sid,args,clientId);
   }
  }
  if(name==="rian_eemf_request_command"){
   const {approval_mode,...command}=args;
   if(approval_mode!=="each"){
+   for(const [sid,s] of trustedSessions){
+    if(s.clientId!==clientId||s.profile!==DEV_TASK_PROFILE||currentSessionState(s)!=="ACTIVE"||!s.scope)continue;
+    try{devTaskAllowedCommand(command,s.scope)}catch{continue}
+    return trustedDispatch("rian_eemf_run_trusted_command",{session_id:sid,...command},clientId);
+   }
    const profile=eligibleTrustProfile("rian_eemf_run_command",command);
    if(profile)for(const [sid,s] of trustedSessions){
     if(s.clientId===clientId&&(s.profile||TRUSTED_PROFILE)===profile&&currentSessionState(s)==="ACTIVE")
@@ -843,13 +896,13 @@ function passwordOK(provided){
 function actionPage(id,item,msg=""){
  const description=item.operation==="rian_eemf_run_command"?JSON.stringify({argv:item.args.argv,cwd:item.args.cwd||null,timeout:item.args.timeout},null,2):JSON.stringify({path:item.args.path,overwrite:item.args.overwrite,content:item.args.content},null,2);
  const profile=item.clientId?eligibleTrustProfile(item.operation,item.args):null;
- const proof=ticket({type:"eemf-action-approval",id,exp:now()+([SAL_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
- const label=profile===SAL_PROFILE?"EEMFO3L 살피온 PR16 전용 Git clone·fetch·worktree·상태/차이·지정 pytest 및 제한된 파일 수정":profile===V2_PROFILE?"전용 테스트 프로젝트 상위 .py/.md 파일 최대 8개 편집, 변경 이력 저장과 내용 롤백, 검증된 계산기 단위 테스트만 실행":profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
- const approvalOptions=profile===SAL_PROFILE?'<option value="timed" selected>선택한 시간 동안 같은 범위 반복 허용</option><option value="once">이번 명령만 승인</option>':'<option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option>';
+ const proof=ticket({type:"eemf-action-approval",id,exp:now()+([DEV_TASK_PROFILE,V2_PROFILE,PROJECT_PROFILE,SMOKE_PROFILE,DEV_PROFILE].includes(profile)?DEV_APPROVAL_FORM_SECONDS:240),nonce:rand(16)});
+ const label=profile===DEV_TASK_PROFILE?"선택한 GitHub 저장소·PR 고정 SHA 기반 격리 개발 프로젝트: Git clone/fetch/worktree, 지정 단위 테스트, 명시한 파일만 수정":profile===V2_PROFILE?"전용 테스트 프로젝트 상위 .py/.md 파일 최대 8개 편집, 변경 이력 저장과 내용 롤백, 검증된 계산기 단위 테스트만 실행":profile===PROJECT_PROFILE?"격리 테스트 프로젝트 calculator.py·notes.md 파일 수정(원본 해시 검증)과 Python 문법 검사만":profile===SMOKE_PROFILE?"격리 테스트 폴더의 지정된 Python 파일 2개 생성·단일 오류 수정·고정 테스트 실행":profile===DEV_PROFILE?"개발 환경 버전 확인 (Python · Git · Node.js, Documents 폴더만)":profile===OUTLOOK_PROFILE?"Outlook 로컬 메일 메타데이터 검색":profile===TRUSTED_PROFILE?"Proton 로컬 색인 상태·제목 검색":"";
+ const ownerOptions=profile===DEV_TASK_PROFILE?'<option value="timed" selected>프로젝트 범위 시간 제한 승인</option>':'<option value="once" selected>이번 명령만 승인</option><option value="timed">선택한 시간 동안 같은 범위 반복 허용</option>';
  const options=profile?
-  '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode">'+approvalOptions+'</select>'+
-  '<p>허용 범위: '+escape(label)+'. '+escape(profile===SAL_PROFILE?"허용: Documents/RIAN-Salpion-PR16 격리 폴더, 비공개 rian-vision-reliability PR16 고정 커밋, clone/fetch/worktree/status/diff, 고정 pytest, tools/its_small_object_eval.py 및 rian_pr16_notes.md 수정. 원본 해시 불일치 시 수정 차단. Git push/reset/clean, 임의 쉘, 삭제, 설치, GPU, 운영 배포는 금지합니다. 1~60분 및 최대 60회 내 연속 실행됩니다.":profile===V2_PROFILE?"허용 범위는 RIAN-Commander-Smoke 상위 .py/.md 최대 8개 파일입니다. 기존 파일은 먼저 읽어야 하며 해시가 다르면 수정하지 않습니다. 이전 내용은 rian_history.json에 저장되어 되돌릴 수 있습니다. 계산기 단위 테스트는 고정된 AST 검사기와 테스트 원본 검증을 통과한 경우에만 실행합니다. 새 파일의 삭제를 통한 롤백 및 일반 터미널은 허용하지 않습니다.":profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
-  '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="'+(profile===SAL_PROFILE?"60":"30")+'" required>'+
+  '<label for="approval_mode">승인 방식</label><select id="approval_mode" name="approval_mode">'+ownerOptions+'</select>'+
+  '<p>허용 범위: '+escape(label)+'. '+escape(profile===DEV_TASK_PROFILE?"승인할 저장소, PR, 커밋, 검사 파일 및 수정 허용 파일은 아래 요청에 고정됩니다. Git fetch·worktree·상태·diff 및 지정 pytest/Bun 테스트만 자동 실행합니다. 테스트는 해당 저장소 코드를 현재 Windows 사용자 권한으로 실행하므로 신뢰 가능한 저장소만 승인하세요. Git push/reset/clean, 삭제, 패키지 설치, 운영 배포는 포함되지 않습니다.":profile===V2_PROFILE?"허용 범위는 RIAN-Commander-Smoke 상위 .py/.md 최대 8개 파일입니다. 기존 파일은 먼저 읽어야 하며 해시가 다르면 수정하지 않습니다. 이전 내용은 rian_history.json에 저장되어 되돌릴 수 있습니다. 계산기 단위 테스트는 고정된 AST 검사기와 테스트 원본 검증을 통과한 경우에만 실행합니다. 새 파일의 삭제를 통한 롤백 및 일반 터미널은 허용하지 않습니다.":profile===PROJECT_PROFILE?"승인하면 전용 폴더의 calculator.py와 notes.md를 채팅에서 수정할 수 있습니다. 반드시 먼저 파일을 읽고 해시가 일치해야 합니다. 코드를 실행하는 테스트는 허용되지 않으며 Python 문법 검사만 가능합니다. 다른 파일 및 삭제는 불가합니다.":profile===SMOKE_PROFILE?"승인하면 고정된 테스트 코드의 파일 생성·수정과 테스트 실행이 추가 암호 없이 가능합니다. 다른 폴더·명령·삭제는 허용되지 않습니다.":"해당 범위 외 명령, 파일 변경·삭제, 메일 본문 조회·동기화는 포함되지 않습니다.")+'</p>'+
+  '<label for="duration_minutes">시간 제한 세션 유효시간 (분, 1~60)</label><input id="duration_minutes" name="duration_minutes" type="number" min="1" max="60" step="1" value="'+(profile===DEV_TASK_PROFILE?"60":"30")+'" required>'+
   '<p>시간 제한 방식에서만 적용됩니다. 최대 60회 실행하면 시간과 관계없이 만료됩니다.</p>':
   '<input type="hidden" name="approval_mode" value="once"><p>이 명령은 반복 허용 대상이 아니므로 이번 1회만 승인할 수 있습니다.</p>';
  return html('<h1>EEMFO3L 작업 승인</h1><p>대상 PC: DESKTOP-EEMFO3L</p><p>승인 요청 만료 시각: '+escape(new Date(item.exp*1000).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"}))+' (한국시간). 이 버전 확인 요청은 최대 30분, 일반 명령·파일 쓰기는 5분입니다.</p><p>사용자가 승인 방식과 시간을 선택합니다.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1423;padding:12px">'+escape(description)+'</pre>'+(msg?'<p role="alert">'+escape(msg)+'</p>':"")+'<form method="POST" action="/action/approve"><input type="hidden" name="request" value="'+escape(proof)+'">'+options+'<label for="password">소유자 암호</label><input name="password" id="password" type="password" minlength="20" autocomplete="current-password" required><button type="submit">선택한 방식으로 승인 및 실행</button></form>',200,"same-origin");
@@ -906,7 +959,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
    s.sourceHash=sourceHash;
    s.state="ACTIVE";s.validUntil=now()+durationMinutes*60;s.remaining=TRUSTED_MAX_CALLS;
    auditTrusted("activated",proof.id,{expires_at:s.validUntil,max_calls:TRUSTED_MAX_CALLS,duration_minutes:durationMinutes});
-   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===SAL_PROFILE?"살피온 PR16 전용 Git 개발 세션":s.profile===V2_PROFILE?"전용 프로젝트 코드 패치·검증된 테스트·변경 이력 복원":s.profile===PROJECT_PROFILE?"격리 프로젝트 코드 수정 및 문법 검사":s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
+   return html("<h1>제한형 세션 승인 완료</h1><p>DESKTOP-EEMFO3L "+escape(s.profile===V2_PROFILE?"전용 프로젝트 코드 패치·검증된 테스트·변경 이력 복원":s.profile===PROJECT_PROFILE?"격리 프로젝트 코드 수정 및 문법 검사":s.profile===DEV_PROFILE?"개발 환경 버전 확인":s.profile===OUTLOOK_PROFILE?"Outlook 메타데이터 검색":"Proton 색인 상태·제목 검색")+"을 "+durationMinutes+"분간 최대 60회 허용했습니다. 허용되지 않은 모든 명령은 기존대로 별도 승인이 필요합니다.</p>");
   }catch{
    s.state="REVOKED";s.remaining=0;
    return html("<h1>세션 활성화 실패</h1><p>원격 스크립트 무결성이나 PC 연결을 확인해야 합니다.</p>",409)
@@ -928,6 +981,7 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
   const mode=f.get("approval_mode")||"once";
   if(mode!=="once"&&mode!=="timed")return html("<h1>유효하지 않은 승인 방식</h1>",400);
   const profile=eligibleTrustProfile(item.operation,item.args);
+  if(profile===DEV_TASK_PROFILE&&mode!=="timed")return html("<h1>개발 프로젝트는 범위 지정 승인만 가능합니다.</h1>",400);
   const durationMinutes=mode==="timed"?validDurationMinutes(f.get("duration_minutes")||""):null;
   if(mode==="timed"&&(durationMinutes===null||!profile||!item.clientId))return html("<h1>허용되지 않은 시간 제한 승인</h1>",400);
   if(mode==="timed")for(const s of trustedSessions.values()){
@@ -944,18 +998,23 @@ if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||
     if(trustedSessions.size>=40){for(const [sid,s] of trustedSessions){if(["EXPIRED","REVOKED"].includes(currentSessionState(s)))trustedSessions.delete(sid)}}
     if(trustedSessions.size>=40)throw Error("Trusted session capacity reached");
     sessionId=rand(32);
-    const s={clientId:item.clientId,profile,state:"VERIFYING",requestUntil:now()+300,validUntil:null,remaining:0,sourceHash:null,busy:false,attempts:0};
+    const manifest=profile===DEV_TASK_PROFILE?devTaskParseScope(item.args):null;
+    const s={clientId:item.clientId,profile,state:"VERIFYING",requestUntil:now()+300,validUntil:null,remaining:0,sourceHash:null,busy:false,attempts:0,scope:manifest,scopeHash:manifest?devTaskScopeDigest(manifest):null};
     trustedSessions.set(sessionId,s);
     s.sourceHash=await trustedSourceDigest(profile);
     if(s.state!=="VERIFYING")throw Error("Session was revoked");
     s.state="ACTIVE";s.validUntil=now()+durationMinutes*60;s.remaining=TRUSTED_MAX_CALLS;
     auditTrusted("activated",sessionId,{profile,duration_minutes:durationMinutes,expires_at:s.validUntil,max_calls:TRUSTED_MAX_CALLS});
+    if(profile===DEV_TASK_PROFILE){
+     item.status="COMPLETE";item.done=now();item.summary=JSON.stringify({ok:true,scope:s.scope,approval_session:{id:sessionId,profile,expires_at:s.validUntil,remaining_calls:s.remaining,duration_minutes:durationMinutes}}).slice(0,30000);
+     return html("<h1>RIAN Commander 개발 작업 세션 승인 완료</h1><p>지정 저장소 "+escape(s.scope.owner+"/"+s.scope.repo)+" / PR "+escape(s.scope.pr)+"의 Git·테스트·파일 수정이 "+durationMinutes+"분 동안 최대 60회 허용됩니다. 현재 PC에서 명령은 실행하지 않았습니다. ChatGPT로 돌아가 연속 작업을 요청하세요.</p>");
+    }
     const response=await trustedDispatch("rian_eemf_run_trusted_command",{session_id:sessionId,...item.args},item.clientId);
     const executed=JSON.parse(response.content?.[0]?.text||"{}");
     if(!executed.execution||executed.execution.ok!==true)throw Error("Initial trusted command did not complete");
     item.status="COMPLETE";item.done=now();
     item.summary=JSON.stringify({...executed.execution,approval_session:{id:sessionId,profile,expires_at:s.validUntil,remaining_calls:s.remaining,duration_minutes:durationMinutes}}).slice(0,30000);
-    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===SAL_PROFILE?"살피온 PR16 Git 복제·fetch·worktree·고정 테스트·2개 파일 수정":profile===V2_PROFILE?"전용 프로젝트 파일 변경·테스트·이력 복원":profile===PROJECT_PROFILE?"전용 파일 calculator.py·notes.md 수정 및 문법 검사":profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
+    return html('<h1>작업 완료 · 제한형 세션 시작</h1><p>'+escape(profile===V2_PROFILE?"전용 프로젝트 파일 변경·테스트·이력 복원":profile===PROJECT_PROFILE?"전용 파일 calculator.py·notes.md 수정 및 문법 검사":profile===SMOKE_PROFILE?"전용 테스트 파일 생성·수정 및 고정 테스트 실행":"허용된 조회 명령")+'을 '+durationMinutes+'분간 최대 60회 허용합니다. 남은 횟수: '+s.remaining+'. 다른 파일이나 일반 명령은 포함되지 않습니다.</p>');
    }
    const r=await relay(item.operation,item.args,true);
    item.status="COMPLETE";item.done=now();item.summary=JSON.stringify(r).slice(0,30000);
