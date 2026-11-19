@@ -84,3 +84,19 @@ test("central queue rejects writes and commands unless EEMF has verified owner a
  expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
  expect(relay).toContain('const raw=await runTool(eemfNames[name],{device:EEMF_DEVICE,...args},isSensitive);');
 });
+
+
+test("fleet connectivity preflight is read-only and never authorizes commands or policy mutation",()=>{
+ expect(relay).toContain('import {buildConnectivityPreflight} from "./connection-preflight.ts"');
+ expect(relay).toContain('name:"rian_fleet_connectivity_preflight"');
+ expect(relay).toContain('if(name==="rian_fleet_connectivity_preflight")return buildConnectivityPreflight(args,listing().filter(x=>FLEET_TARGETS.includes(x.device)),FLEET_TARGETS)');
+ expect(relay).toContain('if(isAgent(r)!==FLEET_READER)return error("Unauthorized",401)');
+ expect(relay).toContain('if(!isGateway(req))return error("Unauthorized",401)');
+ expect(relay).toContain('if(!FLEET_TARGETS.includes(args.device))throw Error("Target outside read-only fleet")');
+ expect(relay).toContain('if(isSensitive&&!checkEEMFApproval(req,name,args))');
+ const pure=read("./connection-preflight.ts");
+ expect(pure).toContain("READ_ONLY_NO_CONNECTION_PROBE");
+ expect(pure).toContain("automatic_policy_apply: false");
+ expect(pure).toContain("OPERATOR_REPORTED_NOT_VERIFIED");
+ expect(pure).not.toContain("tailscale set");
+});
