@@ -30,7 +30,7 @@ jobs:
           node -e 'const fs=require("node:fs");const n=fs.statSync("/tmp/rian-owner-compact.js").size;console.log("RIAN_COMPACT_BYTES",n);if(n>=98295)process.exit(1)'
       - name: Assert distinct credentials and explicit approval gates
         working-directory: rian-commander/eemf-operator
-        run: bun test security.test.ts trusted-session.test.ts
+        run: bun test security.test.ts trusted-session.test.ts connection-preflight.test.ts
   powershell-policy:
     runs-on: windows-latest
     steps:
