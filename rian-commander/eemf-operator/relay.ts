@@ -1,5 +1,6 @@
 
 import {timingSafeEqual,randomUUID,createHmac,createHash} from "node:crypto";
+import {buildConnectivityPreflight} from "./connection-preflight.ts";
 const ADMIN=Bun.env.RIAN_ADMIN_TOKEN||"";
 const KEYS=JSON.parse(Bun.env.RIAN_DEVICE_KEYS_JSON||"{}");
 const CONFIGURED=ADMIN.length>=40&&Object.keys(KEYS).length>0&&!Object.values(KEYS).some(x=>typeof x!=="string"||x.length<40);
@@ -58,6 +59,15 @@ function fleetTools(){
  const device={type:"string",enum:FLEET_TARGETS,description:"Exact registered computer name"};
  return [
   {name:"rian_fleet_devices",description:"List four registered machines and online state; read only",inputSchema:{type:"object",properties:{}}},
+  {name:"rian_fleet_connectivity_preflight",
+    description:"Read-only cross-device readiness from live heartbeats and UNVERIFIED operator observations. DOES NOT test destination ports, read Tailscale policies, grant access, edit firewalls or execute commands.",
+    inputSchema:{type:"object",properties:{
+      source:device,target:device,port:{type:"integer",minimum:1,maximum:65535},
+      protocol:{type:"string",enum:["tcp","udp"]},source_ip:{type:"string"},target_ip:{type:"string"},
+      tls_required:{type:"boolean"},auth_required:{type:"boolean"},
+      evidence:{type:"object",properties:Object.fromEntries(["identity","listener","policy","tcp","tls","auth"].map(k=>[k,{type:"string",enum:["pass","fail","unknown"]}])),additionalProperties:false}
+    },required:["source","target","port"],additionalProperties:false}},
+
   {name:"rian_fleet_status",description:"Read status of one registered computer",inputSchema:{type:"object",properties:{device},required:["device"]}},
   {name:"rian_fleet_list_directory",description:"List a relative path beneath the computer's authorized home root; sensitive paths denied",inputSchema:{type:"object",properties:{device,path:{type:"string"}},required:["device","path"]}},
   {name:"rian_fleet_read_file",description:"Read a UTF-8 text file within authorized home root; sensitive paths denied",inputSchema:{type:"object",properties:{device,path:{type:"string"}},required:["device","path"]}}
@@ -77,6 +87,7 @@ function safeFleetPath(path){
 async function fleetCall(name,args){
  if(!args||typeof args!=="object"||Array.isArray(args))throw Error("Invalid arguments");
  if(name==="rian_fleet_devices")return {devices:listing().filter(x=>FLEET_TARGETS.includes(x.device))};
+ if(name==="rian_fleet_connectivity_preflight")return buildConnectivityPreflight(args,listing().filter(x=>FLEET_TARGETS.includes(x.device)),FLEET_TARGETS);
  if(!FLEET_TARGETS.includes(args.device))throw Error("Target outside read-only fleet");
  let tool;
  if(name==="rian_fleet_status")tool="rian_status";
