@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 process.env.RIAN_TEST_MODE="1";
-const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,devTaskSafePath,devTaskParseScope,devTaskCommands,devTaskAllowedCommand,devTaskAllowedWrite,classifyEemfFailure}=await import("./gateway.ts");
+const {validateTrustedMailCommand,newTrustedSession,ownedSession,currentSessionState,trustedSessions,trustedDispatch,approvalRequestSeconds,smokeWriteAllowed,projectWriteAllowed,v2MutablePath,v2WriteAllowed,devTaskSafePath,devTaskParseScope,devTaskCommands,devTaskAllowedCommand,devTaskAllowedWrite,classifyEemfFailure,eemfFailureGuidance}=await import("./gateway.ts");
 const source=readFileSync(new URL("./gateway.ts",import.meta.url),"utf8");
 const cwd="Documents/RIAN-Proton-Tools";
 const valid=(argv:string[],timeout=30)=>validateTrustedMailCommand({argv,cwd,timeout});
@@ -465,6 +465,36 @@ describe("generic owner-approved development worktree sessions (no project-speci
    'if(devTaskMaySnapshot(clientId,args.path)',
   ])expect(source).toContain(snippet);
   expect(source).not.toContain('dev-salpion-pr16-v1');
+ });
+});
+
+
+describe("Outlook failure root-cause classification and safe recovery",()=>{
+ test("28-second legacy relay pending is NOT an agent rejection",()=>{
+  expect(classifyEemfFailure({ok:false,error:"Job pending 12345678-1234-1234-1234-123456789abc"})).toBe("RELAY_JOB_PENDING_UNCONFIRMED");
+  expect(classifyEemfFailure({ok:false,error:"Job expired"})).toBe("RELAY_JOB_EXPIRED_UNCONFIRMED");
+  expect(classifyEemfFailure({ok:false,error:"Queue full"})).toBe("RELAY_QUEUE_CAPACITY");
+  expect(classifyEemfFailure({ok:false,error:"Device offline: DESKTOP-EEMFO3L"})).toBe("DEVICE_OFFLINE");
+ });
+ test("real agent policy and executable errors remain distinct",()=>{
+  expect(classifyEemfFailure({ok:false,error:{code:"AGENT_POLICY_DENIED",message:"redacted"}})).toBe("AGENT_POLICY_DENIED");
+  expect(classifyEemfFailure({ok:false,reason_code:"EXECUTABLE_NOT_FOUND"})).toBe("EXECUTABLE_NOT_FOUND");
+  expect(classifyEemfFailure({ok:false,error:"socket hang up"})).toBe("TRANSPORT_FAILURE");
+  expect(classifyEemfFailure({ok:false,error:"very-private-mail-subject"})).toBe("AGENT_REJECTED_UNCLASSIFIED");
+ });
+ test("pending/expired uncertainty has actionable guidance, never instructs blind retry",()=>{
+  expect(eemfFailureGuidance("RELAY_JOB_PENDING_UNCONFIRMED")).toContain("재전송하지");
+  expect(eemfFailureGuidance("RELAY_JOB_EXPIRED_UNCONFIRMED")).toContain("중복 실행 전");
+  expect(eemfFailureGuidance("AGENT_POLICY_DENIED")).toContain("허용");
+  expect(eemfFailureGuidance("AGENT_REJECTED_UNCLASSIFIED")).not.toContain("원격 실행을 허용합니다");
+  expect(source).toContain('const match=/^RIAN_(?:RELAY|EEMF)_([A-Z_]+)$/.exec(failure)');
+ });
+ test("Outlook trusted metadata policy still refuses sync and body access",()=>{
+  const cwd="Documents/rian-outlook-bridge",opts=(argv:string[])=>({argv,cwd,timeout:30});
+  expect(validateTrustedMailCommand(opts(["python","outlook_bridge.py","doctor"]),"outlook-local-metadata-v1").argv[2]).toBe("doctor");
+  expect(validateTrustedMailCommand(opts(["python","outlook_bridge.py","search","이재철","--limit","10"]),"outlook-local-metadata-v1").argv[2]).toBe("search");
+  expect(()=>validateTrustedMailCommand(opts(["python","outlook_bridge.py","sync","--days","14","--max-messages","1000"]),"outlook-local-metadata-v1")).toThrow();
+  expect(()=>validateTrustedMailCommand(opts(["python","outlook_bridge.py","read","b6df3aa45a1dd1b8b6f3"]),"outlook-local-metadata-v1")).toThrow();
  });
 });
 
