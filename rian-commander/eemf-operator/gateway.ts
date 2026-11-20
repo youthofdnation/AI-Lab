@@ -573,16 +573,11 @@ function safeArgs(name,args){
 export function classifyEemfFailure(response){
  if(!response||typeof response!=="object"||Array.isArray(response))return "INVALID_AGENT_RESULT";
  if(response.ok===true)return "NONE";
- // Honor bounded structured codes; never echo raw agent errors (paths/subjects/secrets).
- const known=new Set(["EXECUTABLE_NOT_FOUND","AGENT_EXECUTION_DISABLED","AGENT_POLICY_DENIED","WORKDIR_UNAVAILABLE","EXECUTION_TIMEOUT","PROCESS_FAILED","DEVICE_OFFLINE","RELAY_QUEUE_CAPACITY","RELAY_JOB_PENDING_UNCONFIRMED","RELAY_JOB_EXPIRED_UNCONFIRMED","TRANSPORT_FAILURE"]);
- for(const code of [response.code,response.reason_code,response.error?.code,response.result?.code,response.result?.error_code]){
-  if(typeof code==="string"&&known.has(code))return code;
- }
+ const explicit=response.reason_code||response.error?.code;
+ if(typeof explicit==="string"&&/^(AGENT_POLICY_DENIED|EXECUTABLE_NOT_FOUND)$/.test(explicit))return explicit;
  const v=[response.error,response.message,response.reason,response.result?.error,response.result?.message];
  const d=v.map(x=>typeof x==="string"?x:typeof x?.message==="string"?x.message:typeof x?.code==="string"?x.code:"").join(" ").slice(0,3000).toLowerCase();
- // The legacy Relay reports "Job pending <UUID>" after ~28s. This means
- // completion is UNCONFIRMED, not that the PC denied the command.
- if(/job[ _-]pending(?:\s+[a-f0-9-]{32,36})?\b/.test(d))return "RELAY_JOB_PENDING_UNCONFIRMED";
+ if(/job[ _-]pending\b/.test(d))return "RELAY_JOB_PENDING_UNCONFIRMED";
  if(/job[ _-]expired\b/.test(d))return "RELAY_JOB_EXPIRED_UNCONFIRMED";
  if(/queue[ _-]full\b/.test(d))return "RELAY_QUEUE_CAPACITY";
  if(/device[ _-]offline\b/.test(d))return "DEVICE_OFFLINE";
@@ -595,24 +590,11 @@ export function classifyEemfFailure(response){
  if(/(exit code|non.?zero|process.*failed)/.test(d))return "PROCESS_FAILED";
  return "AGENT_REJECTED_UNCLASSIFIED";
 }
-
 export function eemfFailureGuidance(code){
- const guidance={
-  RELAY_JOB_PENDING_UNCONFIRMED:"원격 명령이 아직 실행 중일 수 있습니다. 같은 명령을 재전송하지 말고 작업 ID와 완료 상태를 먼저 확인하세요.",
-  RELAY_JOB_EXPIRED_UNCONFIRMED:"Relay 작업이 만료되었지만 PC 실행 여부는 불확실합니다. 중복 실행 전 실제 결과를 확인해야 합니다.",
-  RELAY_QUEUE_CAPACITY:"대기열이 가득 찼습니다. 중복 요청 대신 기존 작업의 진행 상태를 확인하세요.",
-  DEVICE_OFFLINE:"PC 에이전트가 오프라인입니다. 장치 연결 상태를 확인하세요.",
-  EXECUTABLE_NOT_FOUND:"에이전트 실행 환경에 프로그램이 없습니다. 설치 여부와 PATH를 읽기 전용으로 확인하세요.",
-  AGENT_EXECUTION_DISABLED:"소유자가 PC 명령 실행 기능을 활성화하지 않았습니다. 별도 소유자 승인이 필요합니다.",
-  AGENT_POLICY_DENIED:"PC의 명령 허용 정책이 차단했습니다. 요청 명령과 허용 목록을 비교한 뒤 필요한 범위만 별도 승인하세요.",
-  WORKDIR_UNAVAILABLE:"작업 폴더가 존재하지 않거나 접근할 수 없습니다. 지정 경로를 점검하세요.",
-  EXECUTION_TIMEOUT:"프로세스 실행 시간이 초과됐습니다. 장시간 작업용 비동기 큐가 필요하며 임의 재실행하면 안 됩니다.",
-  TRANSPORT_FAILURE:"네트워크 계층이 끊겼습니다. PC에서 기존 작업이 실행됐는지 확인한 뒤 재시도 여부를 결정하세요.",
-  PROCESS_FAILED:"원격 프로세스는 시작됐지만 비정상 종료했습니다. 종료 코드와 민감정보 제거된 진단 결과를 확인하세요.",
-  INVALID_AGENT_RESULT:"PC 에이전트의 응답 형식이 올바르지 않습니다. 프로토콜 호환성 점검이 필요합니다.",
-  AGENT_REJECTED_UNCLASSIFIED:"원인을 특정하지 못했습니다. 로컬 에이전트의 구조화된 실패 코드가 필요하며, 사용자에게 PowerShell 반복 실행을 요구하지 마세요."
- };
- return guidance[code]||"원격 실행 여부를 먼저 확인하세요. 확인 전에는 같은 명령을 다시 실행하지 마세요.";
+ if(["RELAY_JOB_PENDING_UNCONFIRMED","RELAY_JOB_EXPIRED_UNCONFIRMED","TRANSPORT_FAILURE"].includes(code))return "실행 여부 미확인: 중복 실행 금지. 작업 ID 확인 필요.";
+ if(code==="AGENT_POLICY_DENIED"||code==="AGENT_EXECUTION_DISABLED")return "PC 실행 허용 정책과 별도 승인 범위를 확인하세요.";
+ if(code==="EXECUTABLE_NOT_FOUND")return "실행 파일 및 PATH 확인 필요.";
+ return "원인 확인 필요. 사용자에게 수동 명령 반복을 요구하지 마세요.";
 }
 
 async function relay(name,args,ownerApproved=false){
