@@ -1,0 +1,35 @@
+name: RIAN Commander tenant artifact isolation (staging)
+on:
+  push:
+    branches: [feature/rian-eemf-owner-command-mcp]
+    paths:
+      - 'rian-commander/eemf-operator/tenant-artifact-*.mjs'
+      - '.github/workflows/rian-tenant-artifacts.yml'
+  pull_request:
+    paths:
+      - 'rian-commander/eemf-operator/tenant-artifact-*.mjs'
+      - '.github/workflows/rian-tenant-artifacts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tenant-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Confirm isolated staging code parses
+        run: |
+          node --check rian-commander/eemf-operator/tenant-artifact-core.mjs
+          node --check rian-commander/eemf-operator/tenant-artifact-http.mjs
+      - name: Exercise multi-tenant negative tests and resumable chunks
+        run: node --test rian-commander/eemf-operator/tenant-artifact-*.test.mjs
+      - name: Prevent accidental attachment to live legacy relay
+        run: |
+          if grep -q "tenant-artifact-http.mjs" rian-commander/eemf-operator/relay.ts; then
+            echo 'Staging artifact API must not mount on legacy relay before durable storage and migration review'
+            exit 1
+          fi
