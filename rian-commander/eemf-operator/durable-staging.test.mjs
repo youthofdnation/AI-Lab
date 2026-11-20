@@ -73,8 +73,8 @@ test('two different tenants cannot read/download/modify other tenant durable tra
  const m=f.begin(broker,bytes),id=m.transferId;
  assert.throws(()=>broker.status(f.actors.ob,id),/NOT_FOUND_OR_EXPIRED/);
  assert.throws(()=>broker.cancel(f.actors.ob,id),/NOT_FOUND_OR_EXPIRED/);
- assert.throws(()=>f.upload(broker,f.actors.sb,id,0,bytes),/ACCESS_DENIED/);
- assert.throws(()=>broker.download({actor:f.actors.tb,transferId:id,index:0}),/ACCESS_DENIED/);
+ assert.throws(()=>f.upload(broker,f.actors.sb,id,0,bytes),/NOT_FOUND_OR_EXPIRED/);
+ assert.throws(()=>broker.download({actor:f.actors.tb,transferId:id,index:0}),/NOT_FOUND_OR_EXPIRED/);
  assert.throws(()=>broker.begin({actor:f.actors.ob,sourceDeviceId:'A1',targetDeviceId:'B2',name:'x',sizeBytes:1,sha256:sha('x'),approvalProof:'fake',idempotencyKey:'Q'.repeat(24)}),/ACCESS_DENIED/);
 });
 
