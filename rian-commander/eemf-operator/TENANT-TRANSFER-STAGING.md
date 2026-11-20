@@ -76,6 +76,26 @@ at rest or implement endpoint-to-endpoint encryption.
    device/job/chunk/approval. Validate audit retention and incident rollback.
 7. Deploy only after security review and explicit separate production approval.
 
-**Verified only in local Node unit/HTTP tests:** 17 passing cases at initial
+**Verified only in local Node unit/HTTP tests:** 26 passing cases at
 development time. GitHub Actions and real-machine E2E are separate checks;
 do not claim they passed until their own evidence is available.
+
+## Tenant-scoped command queue (also source-only)
+
+- `tenant-job-policy.mjs` adds a second staging-only boundary for device jobs:
+  owner-initiated read-only queueing, exact action/argument SHA-256 approval
+  for write/execute, per-tenant+device polling and result retrieval.
+- Agents cannot impersonate owners or poll/complete a different tenant's job;
+  unknown keys, sensitive paths and shell argument control characters are
+  rejected before any agent receives work.
+- The 120-second in-flight lease is **fail closed**: its expiry becomes
+  `UNKNOWN_DO_NOT_RETRY`, not a duplicate command execution.
+- A cancellation requested after a command was dispatched is reported as
+  `CANCEL_REQUESTED`; this is **not evidence that the local process stopped**.
+- The queue and approval nonce set are process-local test mechanisms.
+  Production needs atomic durable leases, client acknowledgment, revocation,
+  audit metadata, rate limits and crash/restart drills.
+
+The production Relay still uses its earlier global device/admin data model.
+Do not claim tenant isolation is deployed until migrated and tested with two
+separate accounts. No 1Q permissions were changed and no D23 job was started.
