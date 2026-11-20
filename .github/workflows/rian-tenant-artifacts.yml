@@ -43,7 +43,7 @@ jobs:
           node --check rian-commander/eemf-operator/durable-tenant-jobs.mjs
           node --check rian-commander/eemf-operator/staging-entry.mjs
       - name: Exercise multi-tenant negative tests and resumable chunks
-        run: node --test rian-commander/eemf-operator/tenant-artifact-*.test.mjs rian-commander/eemf-operator/tenant-job-policy.test.mjs rian-commander/eemf-operator/durable-staging.test.mjs
+        run: node --test rian-commander/eemf-operator/tenant-artifact-*.test.mjs rian-commander/eemf-operator/tenant-job-policy.test.mjs rian-commander/eemf-operator/durable-staging.test.mjs rian-commander/eemf-operator/staging-crosslang-e2e.test.mjs
       - name: Prevent accidental attachment to live legacy relay
         run: |
           if grep -Eq "tenant-artifact-http.mjs|tenant-job-policy.mjs" rian-commander/eemf-operator/relay.ts; then
