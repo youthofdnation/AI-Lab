@@ -1,0 +1,59 @@
+name: RIAN Commander Owner Gateway compact deploy artifact
+on:
+  push:
+    branches: [feature/rian-eemf-owner-command-mcp]
+    paths:
+      - "rian-commander/eemf-operator/gateway.ts"
+      - "rian-commander/eemf-operator/compact-css.mjs"
+      - ".github/workflows/rian-eemf-owner-compact.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compact-owner-gateway:
+    if: github.repository == 'youthofdnation/AI-Lab' && github.ref == 'refs/heads/feature/rian-eemf-owner-command-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.8'
+      - name: Build a single-file minified Bun Gateway without altering the source
+        working-directory: rian-commander/eemf-operator
+        run: |
+          node compact-css.mjs
+          bun build gateway.deploy.input.ts --target=bun --minify --outfile=gateway.deploy.min.js
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const file = 'gateway.deploy.min.js';
+          const size = fs.statSync(file).size;
+          const max = 98295;
+          console.log('RIAN_OWNER_DEPLOY_BYTES=' + size + ' MAX=' + max);
+          if (size >= max) throw Error('Railway Function limit exceeded: ' + size);
+          const c = fs.readFileSync(file, 'utf8');
+          if (!c.includes('RIAN_DEV_SCOPE_V1')) throw Error('Developer scope missing in generated artifact');
+          if (!c.includes('RIAN Commander')) throw Error('Expected service identity missing');
+          if (c.includes('dev-salpion-pr16-v1')) throw Error('Project-specific profile accidentally present');
+          NODE
+      - name: Import compiled Gateway without starting the service
+        working-directory: rian-commander/eemf-operator
+        env:
+          RIAN_TEST_MODE: "1"
+        run: |
+          bun -e 'let m=await import("./gateway.deploy.min.js");if(typeof m.devTaskParseScope!=="function"||typeof m.devTaskAllowedCommand!=="function")throw Error("Compiled scope exports missing");let cfg=m.devTaskParseScope({cwd:"Documents",timeout:15,argv:["RIAN_DEV_SCOPE_V1","testowner","test-repo","3","a".repeat(40),"src/control.test.ts","b".repeat(40),"src/control.ts"]});if(cfg.repo!=="test-repo")throw Error("Compiled generic scope failed");console.log("COMPACT_GATEWAY_IMPORT_PASS")'
+      - name: Commit only reproducible minified Gateway artifact to the feature branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- rian-commander/eemf-operator/gateway.deploy.min.js
+          if git diff --cached --quiet; then
+            echo "NO_ARTIFACT_CHANGE"
+            exit 0
+          fi
+          git commit -m "build(rian): compact Owner Gateway deploy artifact [skip ci]"
+          git push origin HEAD:feature/rian-eemf-owner-command-mcp

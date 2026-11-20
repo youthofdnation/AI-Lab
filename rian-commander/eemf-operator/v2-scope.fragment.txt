@@ -1,0 +1,145 @@
+const V2_PROFILE="dev-project-history-v2",V2_CWD="Documents",V2_ROOT="Documents/RIAN-Commander-Smoke";
+const V2_HISTORY=V2_ROOT+"/rian_history.json",V2_RUNNER_FILE=V2_ROOT+"/_rian_runner.py";
+const V2_HISTORY_INIT='{"version":1,"entries":[]}';
+const V2_RUNNER=__V2_RUNNER_SOURCE__;
+const V2_BOOT=["python","-I","-S","-c","print('RIAN_PROJECT_V2_READY')"];
+const V2_RUN=["python","-I","-S","RIAN-Commander-Smoke/_rian_runner.py"];
+const V2_POLICY_PIN="v2:project-top-level-python-md|pinned-tests|AST-validated-runner|persisted-prior-text|2026-11-18";
+const V2_MAX_SOURCE_BYTES=5000,V2_MAX_HISTORY_BYTES=11000,V2_MAX_EDITABLE_FILES=8;
+let v2Busy=false;
+export function v2MutablePath(path){
+ if(typeof path!=="string"||!path.startsWith(V2_ROOT+"/")||path.length>220)return false;
+ const suffix=path.slice(V2_ROOT.length+1);
+ if(!/^[a-z][a-z0-9_-]{0,40}\.(?:py|md)$/.test(suffix))return false;
+ if(suffix.startsWith("test_")||suffix==="runner.py"||suffix==="history.py")return false;
+ return true;
+}
+export function v2WriteAllowed(a){
+ if(!a||typeof a!=="object"||Array.isArray(a)||Object.keys(a).some(k=>!["path","content","overwrite"].includes(k))||typeof a.content!=="string"||a.content.includes("\0"))return false;
+ if(a.path===V2_RUNNER_FILE)return a.overwrite===false&&a.content===V2_RUNNER;
+ if(a.path===V2_HISTORY)return a.overwrite===false&&a.content===V2_HISTORY_INIT;
+ return v2MutablePath(a.path)&&a.content.trim().length>0&&Buffer.byteLength(a.content,"utf8")<=V2_MAX_SOURCE_BYTES&&(a.overwrite===true||a.overwrite===false);
+}
+function v2Sha(content){return createHash("sha256").update(content,"utf8").digest("hex")}
+function v2ValidateLedger(data){
+ if(!data||typeof data!=="object"||data.version!==1||!Array.isArray(data.entries)||data.entries.length>7)throw Error("Invalid project history ledger");
+ for(const entry of data.entries){
+  if(!entry||typeof entry!=="object"||!v2MutablePath(entry.path)||!["PREPARED","COMPLETE","ABORTED"].includes(entry.state)||
+    !Number.isInteger(entry.at)||entry.at<0||
+    typeof entry.before!=="string"||Buffer.byteLength(entry.before,"utf8")>V2_MAX_SOURCE_BYTES||
+    typeof entry.before_sha!=="string"||!/^[a-f0-9]{64}$/.test(entry.before_sha)||
+    typeof entry.after_sha!=="string"||!/^[a-f0-9]{64}$/.test(entry.after_sha)||
+    (entry.before!==""&&v2Sha(entry.before)!==entry.before_sha))throw Error("Invalid history entry");
+ }
+ return data;
+}
+async function v2ReadLedger(){
+ const data=await relay("rian_eemf_read_file",{path:V2_HISTORY});
+ const content=data?.result?.content;
+ if(typeof content!=="string"||Buffer.byteLength(content,"utf8")>V2_MAX_HISTORY_BYTES)throw Error("Project history not initialized or too large");
+ try{return v2ValidateLedger(JSON.parse(content))}catch(e){throw Error("Project history unreadable or invalid: "+String(e.message))}
+}
+async function v2SaveLedger(ledger){
+ v2ValidateLedger(ledger);
+ let serialized=JSON.stringify(ledger);
+ while(Buffer.byteLength(serialized,"utf8")>V2_MAX_HISTORY_BYTES-500&&ledger.entries.length>1){
+  ledger.entries.shift();serialized=JSON.stringify(ledger);
+ }
+ if(Buffer.byteLength(serialized,"utf8")>V2_MAX_HISTORY_BYTES-500)throw Error("History too large; write stopped");
+ await relay("rian_eemf_write_file",{path:V2_HISTORY,content:serialized,overwrite:true},true);
+ const r=await relay("rian_eemf_read_file",{path:V2_HISTORY});
+ if(r?.result?.content!==serialized)throw Error("Durable history readback failed");
+}
+async function v2RecoverLedger(ledger){
+ const last=ledger.entries.at(-1);
+ if(!last||last.state!=="PREPARED")return;
+ const r=await relay("rian_eemf_read_file",{path:last.path});
+ const live=r?.result?.content;
+ if(typeof live!=="string")throw Error("Pending history cannot be recovered");
+ const hash=v2Sha(live);
+ if(hash===last.after_sha)last.state="COMPLETE";
+ else if(hash===last.before_sha)last.state="ABORTED";
+ else throw Error("History conflict: source diverged; manual review required");
+ await v2SaveLedger(ledger);
+}
+async function v2CheckPath(path){
+ if(!v2MutablePath(path))throw Error("Only owner-approved project files may be edited");
+ const dir=await relay("rian_eemf_list_directory",{path:V2_ROOT});
+ const entries=dir?.result?.entries;
+ if(!Array.isArray(entries)||entries.length>400)throw Error("Invalid project folder");
+ const filename=path.slice(V2_ROOT.length+1);
+ const existing=entries.find(x=>x.name===filename);
+ if(existing&&existing.type!=="file")throw Error("Target is not a regular file");
+ const editable=entries.filter(x=>x.type==="file"&&v2MutablePath(V2_ROOT+"/"+x.name));
+ if(editable.length>V2_MAX_EDITABLE_FILES)throw Error("Project file-count limit exceeded");
+ return {exists:!!existing,count:editable.length};
+}
+async function v2CheckPathOnPC(path){
+ const relative=path.slice("Documents/".length);
+ const script="from pathlib import Path;import sys;r=Path('RIAN-Commander-Smoke');p=Path(sys.argv[1]);assert not r.is_symlink() and r.is_dir() and p.parent.resolve()==r.resolve() and not p.is_symlink();print('PATH_OK')";
+ const args={argv:["python","-I","-S","-c",script,relative],cwd:V2_CWD,timeout:20};
+ const out=await relay("rian_eemf_run_command",args,true);
+ if(out?.result?.exit_code!==0||!String(out?.result?.stdout||"").includes("PATH_OK"))throw Error("PC canonical-path/symlink guard denied");
+}
+async function v2Write(sessionId,args,clientId){
+ const sess=ownedSession(sessionId,clientId);
+ if(sess.profile!==V2_PROFILE||currentSessionState(sess)!=="ACTIVE"||sess.remaining<=0||!v2WriteAllowed(args))throw Error("No project edit grant or write out of scope");
+ if(sess.busy||v2Busy)throw Error("Another project operation is running");
+ sess.busy=true;v2Busy=true;
+ try{
+  if(sess.sourceHash!==await trustedSourceDigest(V2_PROFILE)){sess.state="REVOKED";sess.remaining=0;throw Error("Project policy changed; session revoked")}
+  if(args.path===V2_RUNNER_FILE||args.path===V2_HISTORY){
+   const files=await relay("rian_eemf_list_directory",{path:V2_ROOT});
+   const name=args.path.slice(V2_ROOT.length+1);
+   if(files?.result?.entries?.some(x=>x.name===name))throw Error("Reserved project file already exists");
+   if(currentSessionState(sess)!=="ACTIVE")throw Error("Session expired");
+   sess.remaining--;await relay("rian_eemf_write_file",args,true);
+   const checked=await relay("rian_eemf_read_file",{path:args.path});
+   if(checked?.result?.content!==args.content)throw Error("Bootstrap file readback failure");
+   auditTrusted("v2_project_bootstrap",sessionId,{file:name,remaining:sess.remaining});
+   return sessionReply({profile:V2_PROFILE,device,path:args.path,state:currentSessionState(sess),write_verified:true,remaining_calls:sess.remaining,sha256:v2Sha(args.content)});
+  }
+  const pathState=await v2CheckPath(args.path);
+  if(args.overwrite!==pathState.exists)throw Error("Create/overwrite flag does not match remote file state");
+  if(!args.overwrite&&pathState.count>=V2_MAX_EDITABLE_FILES)throw Error("Project file count at limit");
+  await v2CheckPathOnPC(args.path);
+  let previous="",shaBefore=v2Sha(previous);
+  if(args.overwrite){
+   const snapshot=projectSnapshots.get(projectKey(clientId,args.path));
+   if(!snapshot||snapshot.until<=now())throw Error("Read source file in chat before editing: snapshot missing or expired");
+   const r=await relay("rian_eemf_read_file",{path:args.path});
+   previous=r?.result?.content;
+   if(typeof previous!=="string"||v2Sha(previous)!==snapshot.hash)throw Error("CAS conflict: file changed after last read");
+   shaBefore=v2Sha(previous);
+   if(previous===args.content)return sessionReply({profile:V2_PROFILE,path:args.path,state:currentSessionState(sess),no_change:true,sha256:shaBefore,remaining_calls:sess.remaining});
+  }
+  const ledger=await v2ReadLedger();
+  await v2RecoverLedger(ledger);
+  const newSha=v2Sha(args.content);
+  const rollback=ledger.entries.some(e=>e.state==="COMPLETE"&&e.path===args.path&&e.before_sha===newSha&&e.after_sha===shaBefore);
+  const log={path:args.path,at:now(),before:previous,before_sha:shaBefore,after_sha:newSha,state:"PREPARED",rollback,client_digest:projectDigest(clientId).slice(0,12)};
+  ledger.entries.push(log);
+  while(ledger.entries.length>6)ledger.entries.shift();
+  await v2SaveLedger(ledger);
+  if(currentSessionState(sess)!=="ACTIVE")throw Error("Session expired after durable history preparation");
+  if(args.overwrite){
+   const check=await relay("rian_eemf_read_file",{path:args.path});
+   if(v2Sha(check?.result?.content||"")!==shaBefore)throw Error("File changed during patch preparation");
+  }
+  sess.remaining--;
+  auditTrusted("v2_patch_submitted",sessionId,{file:args.path.slice(V2_ROOT.length+1),remaining:sess.remaining,rollback});
+  await relay("rian_eemf_write_file",{path:args.path,content:args.content,overwrite:args.overwrite},true);
+  const final=await relay("rian_eemf_read_file",{path:args.path});
+  if(final?.result?.content!==args.content)throw Error("Source write readback differs from requested content");
+  log.state="COMPLETE";
+  await v2SaveLedger(ledger);
+  projectTrackRead(clientId,args.path,args.content);
+  auditTrusted("v2_patch_completed",sessionId,{remaining:sess.remaining,rollback});
+  return sessionReply({device,profile:V2_PROFILE,path:args.path,state:currentSessionState(sess),write_verified:true,rollback,remaining_calls:sess.remaining,precondition_sha256:shaBefore,sha256:newSha,history_file:V2_HISTORY,history_records:ledger.entries.length,diff:projectDiff(previous,args.content)});
+ }finally{sess.busy=false;v2Busy=false}
+}
+async function v2CheckRunner(){
+ const [r,t]=await Promise.all([relay("rian_eemf_read_file",{path:V2_RUNNER_FILE}),relay("rian_eemf_read_file",{path:SMOKE_TEST_PATH})]);
+ if(r?.result?.content!==V2_RUNNER||t?.result?.content!==SMOKE_TEST)throw Error("Pinned unit test runner or fixture changed; execution blocked");
+ await v2CheckPathOnPC(V2_ROOT+"/calculator.py");
+}

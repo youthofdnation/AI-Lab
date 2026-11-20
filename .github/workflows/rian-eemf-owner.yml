@@ -1,0 +1,61 @@
+name: RIAN Commander EEMFO3L scoped owner MCP
+on:
+  push:
+    branches: [feature/rian-eemf-owner-command-mcp]
+  pull_request:
+    paths:
+      - 'rian-commander/eemf-operator/**'
+      - '.github/workflows/rian-eemf-owner.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gateway-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.8'
+      - name: Compile EEMF owner gateway and scoped relay
+        working-directory: rian-commander/eemf-operator
+        run: |
+          bun build gateway.ts --target=bun --outfile=/tmp/rian-eemf-gateway.js
+          bun build relay.ts --target=bun --outfile=/tmp/rian-eemf-relay.js
+      - name: Verify compact Railway Function payload preserves portal CSS
+        working-directory: rian-commander/eemf-operator
+        run: |
+          node compact-css.mjs
+          bun build gateway.deploy.input.ts --target=bun --minify --outfile=/tmp/rian-owner-compact.js
+          node -e 'const fs=require("node:fs");const n=fs.statSync("/tmp/rian-owner-compact.js").size;console.log("RIAN_COMPACT_BYTES",n);if(n>=98295)process.exit(1)'
+      - name: Assert distinct credentials and explicit approval gates
+        working-directory: rian-commander/eemf-operator
+        run: bun test security.test.ts trusted-session.test.ts connection-preflight.test.ts
+  powershell-policy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse EEMF owner opt-in script without changing computer
+        shell: powershell
+        working-directory: rian-commander/eemf-operator
+        run: |
+          $content=Get-Content -LiteralPath 'enable-eemf-owner.ps1' -Raw
+          $tokens=$null
+          $errors=$null
+          $ast=[System.Management.Automation.Language.Parser]::ParseInput($content,[ref]$tokens,[ref]$errors)
+          if($errors.Count -gt 0){throw ('PowerShell parse errors: '+$errors.Count)}
+          Write-Output 'PowerShell syntax PASS. No agent configuration touched.'
+      - name: Check Windows PowerShell automatic variable collision
+        shell: powershell
+        working-directory: rian-commander/eemf-operator
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scriptText = Get-Content -LiteralPath 'enable-eemf-owner.ps1' -Raw
+          $tokens = $null
+          $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptText,[ref]$tokens,[ref]$errors)
+          if ($errors.Count -ne 0) { throw 'Script parsing failure' }
+          $assignments = @($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst]}, $true))
+          $blocked = @($assignments | Where-Object { $_.Left.Extent.Text.ToLowerInvariant() -eq ('$' + 'home') })
+          if ($blocked.Count -gt 0) { throw 'PowerShell automatic HOME variable cannot be assigned' }
+          Write-Output 'PowerShell reserved HOME variable check PASS.'

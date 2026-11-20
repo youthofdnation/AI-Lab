@@ -1,0 +1,115 @@
+name: RIAN Commander tenant jobs and artifact isolation (staging)
+on:
+  push:
+    branches: [feature/rian-eemf-owner-command-mcp]
+    paths:
+      - 'rian-commander/eemf-operator/tenant-artifact-*.mjs'
+      - 'rian-commander/eemf-operator/tenant-job-*.mjs'
+      - 'rian-commander/eemf-operator/outlook-ops-scope*.mjs'
+      - 'rian-commander/eemf-operator/staging-*.mjs'
+      - 'rian-commander/eemf-operator/durable-*.mjs'
+      - 'rian-commander/eemf-operator/staging-entry.mjs'
+      - 'rian-commander/eemf-operator/Dockerfile.staging'
+      - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
+      - '.github/workflows/rian-tenant-artifacts.yml'
+  pull_request:
+    paths:
+      - 'rian-commander/eemf-operator/tenant-artifact-*.mjs'
+      - 'rian-commander/eemf-operator/tenant-job-*.mjs'
+      - 'rian-commander/eemf-operator/outlook-ops-scope*.mjs'
+      - 'rian-commander/eemf-operator/staging-*.mjs'
+      - 'rian-commander/eemf-operator/durable-*.mjs'
+      - 'rian-commander/eemf-operator/staging-entry.mjs'
+      - 'rian-commander/eemf-operator/Dockerfile.staging'
+      - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
+      - '.github/workflows/rian-tenant-artifacts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tenant-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Confirm isolated staging code parses
+        run: |
+          node --check rian-commander/eemf-operator/tenant-artifact-core.mjs
+          node --check rian-commander/eemf-operator/tenant-artifact-http.mjs
+          node --check rian-commander/eemf-operator/tenant-job-policy.mjs
+          node --check rian-commander/eemf-operator/staging-sqlite.mjs
+          node --check rian-commander/eemf-operator/durable-tenant-artifacts.mjs
+          node --check rian-commander/eemf-operator/durable-tenant-jobs.mjs
+          node --check rian-commander/eemf-operator/staging-entry.mjs
+      - name: Exercise multi-tenant negative tests and resumable chunks
+        run: node --test rian-commander/eemf-operator/tenant-artifact-*.test.mjs rian-commander/eemf-operator/tenant-job-policy.test.mjs rian-commander/eemf-operator/durable-staging.test.mjs rian-commander/eemf-operator/staging-crosslang-e2e.test.mjs rian-commander/eemf-operator/outlook-ops-scope.test.mjs
+      - name: Prevent accidental attachment to live legacy relay
+        run: |
+          if grep -Eq "tenant-artifact-http.mjs|tenant-job-policy.mjs" rian-commander/eemf-operator/relay.ts; then
+            echo 'Staging artifact API must not mount on legacy relay before durable storage and migration review'
+            exit 1
+          fi
+
+  staging-volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated staging image, no production credentials
+        run: |
+          docker build --file rian-commander/eemf-operator/Dockerfile.staging \
+            --tag rian-commander-stage-ci rian-commander/eemf-operator
+      - name: Verify health-only default and durable volume across container replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          volume_dir="$(mktemp -d)"
+          chmod 700 "$volume_dir"
+          key="$(openssl rand -hex 32)"
+          cleanup() {
+            docker rm -f rian-stage-ci >/dev/null 2>&1 || true
+            sudo rm -rf -- "$volume_dir"
+          }
+          trap cleanup EXIT
+          for cycle in 1 2; do
+            docker run -d --name rian-stage-ci --publish 127.0.0.1:31888:3000 \
+              --volume "$volume_dir:/data" \
+              --env RIAN_STAGE_ONLY=1 --env RIAN_STAGE_DB_PATH=/data/rian-stage.db \
+              --env RIAN_STAGE_STORAGE_KEY="$key" \
+              rian-commander-stage-ci >/dev/null
+            ok=0
+            for attempt in $(seq 1 25); do
+              if curl --fail --silent http://127.0.0.1:31888/health | grep -q '"apiEnabled":false'; then ok=1; break; fi
+              sleep 1
+            done
+            if [ "$ok" != 1 ]; then docker logs rian-stage-ci; exit 1; fi
+            # API disabled by default. No tenant or device operation is exposed.
+            [ "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              http://127.0.0.1:31888/v2/tenant/devices)" = 404 ]
+            docker logs rian-stage-ci 2>&1 | grep -q "RIAN_STAGING_VOLUME_BOOT_SEQUENCE $cycle"
+            docker rm -f rian-stage-ci >/dev/null
+          done
+          echo 'RIAN_ISOLATED_STAGING_VOLUME_RESTART_PASS'
+
+  agent-tests-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate standalone Python agent and synthetic transfer recovery
+        run: |
+          python3 -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
+          python3 rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
+  agent-tests-windows:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Windows Python agent without installing anything
+        shell: pwsh
+        run: |
+          python -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
+          python rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
