@@ -81,5 +81,17 @@ export class StagingSqlite {
       this.db.prepare("DELETE FROM jobs WHERE deadline < ? AND state IN ('DONE','CANCELLED','EXPIRED','UNKNOWN_DO_NOT_RETRY')").run(now-86400);
     });
   }
+  bootSequence() {
+    return this.transaction(()=>{
+      const row=this.db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('boot-counter');
+      const previous=row?Number(this.decrypt(row,'riancmd:v1:boot-counter').toString('utf8')):0;
+      if(!Number.isSafeInteger(previous)||previous<0)throw Error('INVALID_BOOT_COUNTER');
+      const next=previous+1;
+      const encrypted=this.encrypt(Buffer.from(String(next)),'riancmd:v1:boot-counter');
+      this.db.prepare('INSERT INTO meta(key,cipher,iv,tag) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET cipher=excluded.cipher,iv=excluded.iv,tag=excluded.tag')
+        .run('boot-counter',encrypted.cipher,encrypted.iv,encrypted.tag);
+      return next;
+    });
+  }
   close() {if(!this.#closed){this.#closed=true;this.#db.close();}}
 }
