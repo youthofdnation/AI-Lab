@@ -99,3 +99,68 @@ do not claim they passed until their own evidence is available.
 The production Relay still uses its earlier global device/admin data model.
 Do not claim tenant isolation is deployed until migrated and tested with two
 separate accounts. No 1Q permissions were changed and no D23 job was started.
+
+## 2026-11-20: durable staging implementation and live volume verification
+
+Added separate, **not production-connected** modules:
+
+- staging-sqlite.mjs: Node 22.16+ SQLite WAL, FULL synchronous commits,
+  encrypted AES-256-GCM transfer chunks and job args/results, durable approval
+  nonces and idempotency, tenant-scoped audit metadata, and a key sentinel.
+- durable-tenant-artifacts.mjs: 64 KiB resumable chunks, 8 MiB max per transfer,
+  32 MiB active quota per tenant, atomic database operations, encrypted chunks,
+  whole-file digest, destination acknowledgment and cancellation.
+- durable-tenant-jobs.mjs: exact-scoped signed approval, tenant/device polling,
+  encrypted output, request-key deduplication and fail-closed restart recovery.
+  A dispatched job interrupted by restart becomes UNKNOWN_DO_NOT_RETRY, **not**
+  a replayable job.
+- staging-entry.mjs + Dockerfile.staging: isolated service with /health and a
+  disabled-by-default /v2 authenticated API. It requires a separate staging
+  tenant directory, separate browser approval signer, explicit env opt-in and
+  an encrypted persistent /data volume.
+- tenant-artifact-agent.py: opt-in Python standard-library client over outbound
+  HTTPS only, file source-root and destination-inbox confinement, SHA-256,
+  chunk retry, no-overwrite atomic hard-link commit and safe acknowledgment.
+  No cross-PC inbound port or Tailscale policy change is needed by its design.
+
+**Railway staging evidence:** A separate private Railway project named
+rian-commander-tenant-staging was created, with one isolated service and an
+attached 512 MiB persistent volume. A known CI-tested source SHA was pinned
+for its initial deployment; healthcheck and deploy succeeded. A separate
+redeploy succeeded and the encrypted volume boot counter advanced **1 to 2**.
+No public service domain was created. The v2 file/command API remains OFF.
+The existing five Railway production functions and four-PC fleet configuration
+were not changed.
+
+**CI evidence:** the 37 Node policy/restart tests passed, the Docker-based
+volume replacement test passed, and the 10 synthetic Python agent tests passed
+on Linux and Windows in the checked workflow. These are tests with *fake
+tenant accounts and fixture files*, NOT live EEM↔1Q file exchange.
+
+### Remaining hard release blockers
+
+1. A *separate* browser-based exact-scope owner consent issuer; the development
+   approval signers must never be callable through an agent or public API.
+2. Two real independently authenticated owner accounts, tenant provisioning,
+   secret rotation, revocation, audit export/retention, quota alarms, and negative
+   E2E penetration tests in staging.
+3. Agent enrollment and opt-in for source and destination PC, with verified
+   device identity, per-device credential provisioning and an approved local
+   source path and destination inbox. Current Python client is a manually
+   configured prototype, not a signed Windows/macOS installer.
+4. Durable transactional job cancellation/ack of process stop and detailed
+   retry reconciliation. UNKNOWN_DO_NOT_RETRY preserves safety but requires a
+   human or idempotent agent to reconcile outcomes.
+5. SQLite-backed staging uses **one replica only** and Node's experimental
+   sqlite API. Multi-replica commercial production requires external
+   transactional storage, independent encrypted object storage, backup and
+   restoration tests, and key rotation.
+6. Actual approved Windows EEMFO3L and 1Q transfer, test of loss/reconnect,
+   and explicit 1Q write opt-in. Leave the read-only 1Q flags unchanged until
+   its owner explicitly consents to a bounded transfer.
+7. Relay production/source privilege drift: do not copy source over production
+   or merge PR #2 wholesale without reviewed migration and rollback.
+8. Verify source/target file paths and platform-specific filesystem race
+   protections; do not access SALPION D23 training data as a product fixture.
+
+Customer release remains **BLOCKED**. Staging deploy is not a public beta.
