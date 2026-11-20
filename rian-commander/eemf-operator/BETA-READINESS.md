@@ -70,3 +70,55 @@ No customer onboarding until all P0 gates are verified in production-like stagin
 ## Current next release step
 
 The new `connection-preflight.ts` and `rian_fleet_connectivity_preflight` MCP method have passed CI **in GitHub source**, but the Relay production source currently differs from GitHub's hardened implementation. **Do not copy over the entire relay and deploy without reviewing the impact on existing permissions.** After reconciling the drift, build a single-file Relay artifact, stage just the Relay Function change, get explicit deployment approval and test from the connected fleet account. Neither Tailscale nor host firewalls are touched by this module.
+
+## 2026-11-21: EEMFO3L mail command regression — P0 before beta
+
+An owner-approved local Outlook/ECOUNT bridge task was reported as
+`RIAN_RELAY_AGENT_REJECTED_UNCLASSIFIED`. This **does not prove** the local
+agent refused it. The deployed legacy Relay's synchronous `runTool` polls
+112 × 250 ms (about 28 seconds), then raises `Job pending <UUID>`. The owner
+gateway previously categorized that relay error as an unspecified agent
+rejection. Jobs may later complete or expire without an owner-scoped result
+lookup. **Never blindly retry sync**: re-running a task of unknown status
+can duplicate work or local cache changes.
+
+The deployed Outlook trusted profile permits **doctor / metadata search
+only**. Mail `sync` and message `read` are explicitly excluded. Generic
+command approval does not imply agent execution policy permits those
+operations. The owner should not be routinely asked to open PowerShell to
+complete the product workflow.
+
+**Changes in PR #2, source only:** safer relay error taxonomy distinguishes
+pending/unconfirmed, expired/unconfirmed, policy refusal, execution disabled,
+missing executable, transport, workdir, timeout and process exit. Approval
+failure UI displays bounded guidance with no raw sensitive error text.
+Source-only `outlook-ops-scope.mjs` validates exact, bounded operations:
+doctor/search (metadata), single message ID read (one-time specific owner
+approval), and local-cache sync (1–14 days; max 1,000 messages, separate
+owner approval). It **does not execute** any operation or expand permissions.
+No changed gateway / mail permissions have been deployed.
+
+### Acceptance criteria for actual user-ready mail functions
+
+1. A single owner-approved EEMFO3L sync runs via the **durable asynchronous**
+   job queue; use a scoped device identity and stable job ID. Show queued,
+   running, completed, failed, expired, canceled or unknown (do not report
+   a pending job as an agent rejection). Persist status and redacted reason.
+2. The job runs without browser PIN, ZIP copying or repeated PowerShell
+   once authorized; restart/reconnect must never duplicate unconfirmed sync.
+3. Reading a selected email is separately approved for **exactly one message
+   ID**. Limit output/pagination, prevent cross-account reads, don't log mail
+   bodies or credentials, and respect organization retention controls.
+4. Explicitly distinguish missing executable, local agent command policy,
+   missing mail credentials, workdir mismatch, transport failure, and
+   job timeouts before suggesting any environment changes.
+5. An approval grants only an exact device, fixed script hash, bounded
+   operation, allowed arguments, valid duration, and maximum calls. No
+   general shell, send, delete, or mailbox mutation rights.
+6. Run independent mock, Windows EEMFO3L (owner-approved), Relay restart,
+   revoked token, oversize output and two-tenant access denial tests.
+7. Do not enable user-facing mail features until the bridge's documented CLI
+   and employer's authorized mailbox/data-handling scope are verified.
+
+**Release gate:** the error classification tests and source-only command plan
+are not a completed email connector. Product release is still blocked.
