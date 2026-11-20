@@ -132,10 +132,14 @@ No public service domain was created. The v2 file/command API remains OFF.
 The existing five Railway production functions and four-PC fleet configuration
 were not changed.
 
-**CI evidence:** the 37 Node policy/restart tests passed, the Docker-based
+**CI evidence:** the 38 Node policy/restart/cross-language integration tests passed, the Docker-based
 volume replacement test passed, and the 10 synthetic Python agent tests passed
-on Linux and Windows in the checked workflow. These are tests with *fake
-tenant accounts and fixture files*, NOT live EEM↔1Q file exchange.
+on Linux and Windows in the checked workflow. These are tests with *fake tenant accounts and fixture files*, NOT live EEM↔1Q file exchange.
+The newest Node suite starts a local HTTP broker, invokes the real Python
+source and destination agents as separate subprocesses, transfers a two-chunk
+fixture, verifies the received SHA-256, denies another tenant's status request,
+and reopens the encrypted SQLite DB to confirm the delivered state survived.
+That is an actual cross-language loopback transport test, not a physical PC test.
 
 ### Remaining hard release blockers
 
@@ -164,3 +168,20 @@ tenant accounts and fixture files*, NOT live EEM↔1Q file exchange.
    protections; do not access SALPION D23 training data as a product fixture.
 
 Customer release remains **BLOCKED**. Staging deploy is not a public beta.
+
+### Final integration evidence
+
+- 2026-11-20 GitHub CI: **38/38 Node policy/durable/cross-language E2E tests PASS**.
+- Python agent: **10/10 tests PASS on each of Linux and Windows**.
+- Staging Docker volume test: **two consecutive container instances PASS**.
+- Live private Railway staging healthcheck: **PASS**; persistent encrypted
+  boot counter advanced from 1 to 2 across live redeployment.
+- Staging API: **OFF** until browser owner approval, provisioning,
+  and external security review are complete.
+- This validation does not prove the D23 Runner works; the product test
+  deliberately leaves it disconnected.
+
+The separate pre-beta staging project has its initial CI-tested code revision
+pinned, so newer PR code and agent scripts are **not automatically installed
+or deployed**. Before enabling real users, review and pin a new revision,
+obtain owner/device approvals, and test the entire authorized lifecycle.
