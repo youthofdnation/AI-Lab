@@ -54,6 +54,10 @@ def valid_id(raw):
 def safe_name(raw):
     if not isinstance(raw, str) or not NAME.fullmatch(raw) or raw in (".", ".."):
         raise TransferError("INVALID_FILENAME")
+    # Windows rejects reserved basenames and names ending in a dot or space.
+    base = raw.split(".", 1)[0].upper()
+    if base in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(COM|LPT)[1-9]", base) or raw.endswith((".", " ")):
+        raise TransferError("INVALID_FILENAME")
     return raw
 
 
@@ -147,7 +151,12 @@ def upload(client, source_root, relative_name, transfer_id):
         raise TransferError("TRANSFER_NOT_UPLOADABLE")
     if manifest["name"] != path.name:
         raise TransferError("MANIFEST_FILENAME_MISMATCH")
-    with path.open("rb") as reader:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if path.is_symlink():
+        raise TransferError("SYMLINK_NOT_ALLOWED")
+    with os.fdopen(os.open(path, flags), "rb") as reader:
         content = reader.read(MAX_BYTES + 1)
     if len(content) != manifest["sizeBytes"] or sha256(content) != manifest["sha256"]:
         raise TransferError("SOURCE_HASH_MISMATCH")
@@ -217,6 +226,8 @@ def download(client, approved_inbox_root, transfer_id):
             os.link(partial, final)
         except FileExistsError:
             raise TransferError("DESTINATION_CREATED_CONCURRENTLY") from None
+        except OSError:
+            raise TransferError("ATOMIC_COMMIT_UNAVAILABLE") from None
         partial.unlink()
     except Exception:
         # Leave partial file for safe resume after network loss.
@@ -233,8 +244,8 @@ def main(argv=None):
     parser.add_argument("--transfer-id", required=True)
     parser.add_argument("--file", help="Relative file under approved source root; upload only")
     opts = parser.parse_args(argv)
-    client = Client(os.environ.get("RIAN_ARTIFACT_RELAY_URL", ""), os.environ.get("RIAN_ARTIFACT_DEVICE_TOKEN", ""))
     try:
+        client = Client(os.environ.get("RIAN_ARTIFACT_RELAY_URL", ""), os.environ.get("RIAN_ARTIFACT_DEVICE_TOKEN", ""))
         if opts.action == "upload":
             if not opts.file:
                 raise TransferError("SOURCE_FILE_REQUIRED")
