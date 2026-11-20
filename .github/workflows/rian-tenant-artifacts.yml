@@ -9,6 +9,7 @@ on:
       - 'rian-commander/eemf-operator/durable-*.mjs'
       - 'rian-commander/eemf-operator/staging-entry.mjs'
       - 'rian-commander/eemf-operator/Dockerfile.staging'
+      - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
       - '.github/workflows/rian-tenant-artifacts.yml'
   pull_request:
     paths:
@@ -18,6 +19,7 @@ on:
       - 'rian-commander/eemf-operator/durable-*.mjs'
       - 'rian-commander/eemf-operator/staging-entry.mjs'
       - 'rian-commander/eemf-operator/Dockerfile.staging'
+      - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
       - '.github/workflows/rian-tenant-artifacts.yml'
   workflow_dispatch:
 permissions:
@@ -89,3 +91,23 @@ jobs:
             docker rm -f rian-stage-ci >/dev/null
           done
           echo 'RIAN_ISOLATED_STAGING_VOLUME_RESTART_PASS'
+
+  agent-tests-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate standalone Python agent and synthetic transfer recovery
+        run: |
+          python3 -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
+          python3 rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
+  agent-tests-windows:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Windows Python agent without installing anything
+        shell: pwsh
+        run: |
+          python -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
+          python rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
