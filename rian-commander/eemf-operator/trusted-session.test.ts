@@ -483,8 +483,8 @@ describe("Outlook failure root-cause classification and safe recovery",()=>{
   expect(classifyEemfFailure({ok:false,error:"very-private-mail-subject"})).toBe("AGENT_REJECTED_UNCLASSIFIED");
  });
  test("pending/expired uncertainty has actionable guidance, never instructs blind retry",()=>{
-  expect(eemfFailureGuidance("RELAY_JOB_PENDING_UNCONFIRMED")).toContain("재전송하지");
-  expect(eemfFailureGuidance("RELAY_JOB_EXPIRED_UNCONFIRMED")).toContain("중복 실행 전");
+  expect(eemfFailureGuidance("RELAY_JOB_PENDING_UNCONFIRMED")).toContain("중복 실행 금지");
+  expect(eemfFailureGuidance("RELAY_JOB_EXPIRED_UNCONFIRMED")).toContain("작업 ID 확인 필요");
   expect(eemfFailureGuidance("AGENT_POLICY_DENIED")).toContain("허용");
   expect(eemfFailureGuidance("AGENT_REJECTED_UNCLASSIFIED")).not.toContain("원격 실행을 허용합니다");
   expect(source).toContain('const match=/^RIAN_(?:RELAY|EEMF)_([A-Z_]+)$/.exec(failure)');
