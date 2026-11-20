@@ -74,7 +74,7 @@ export function planOutlookOperation(request) {
     readOnlyMailbox:true, // sync modifies only the local cache, not the mailbox.
     localCacheWrite:kind==='sync'||kind==='search',
     maxResultBytes,
-    expectedDurationSecondsUpperBound:expectedDuration,
+    maximumApprovedRuntimeSeconds:expectedDuration,
     ...noForwarding(),
     mustNotRunViaLegacySynchronousRelay:mode==='DURABLE_BACKGROUND_JOB_REQUIRED',
     ownerApprovalCompleted:false,
