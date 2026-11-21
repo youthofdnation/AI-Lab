@@ -45,7 +45,9 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
   }
   let recovery=null;
   if(config.jobsEnabled){
-    jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true}),clock});
+    // Optional per-device allowlist: RIAN_STAGE_DEVICES_JSON [{id,tenantId,allowedKinds:["diag.wait"]}]
+    const deviceKinds=new Map((config.devices||[]).filter(d=>d&&d.allowedKinds!==undefined).map(d=>[d.id,d.allowedKinds]));
+    jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true}),clock,deviceKinds});
     recovery=jobs.recoverAfterRestart();
     jobHandler=createLongJobHandler({directory,queue:jobs,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
   }

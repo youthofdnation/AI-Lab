@@ -18,7 +18,7 @@ function fixture(t){
    .map(([id,tenantId,kind,deviceId])=>({id,tenantId,kind,...(deviceId?{deviceId}:{}),tokenSha256:sha(tkn[id])}))});
  const actors=Object.fromEntries(Object.keys(tkn).map(x=>[x,directory.authenticate('Bearer '+tkn[x])]));
  let ms=1763600400000,store=null;
- const open=()=>{store=new StagingSqlite({filename:file,encryptionKeyHex:key});return new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true}),clock:()=>ms});};
+ const open=(extra={})=>{store=new StagingSqlite({filename:file,encryptionKeyHex:key});return new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true}),clock:()=>ms,...extra});};
  const close=()=>{if(store){store.close();store=null;}};
  t.after(()=>{close();rmSync(dir,{recursive:true,force:true});});
  return {open,close,actors,file,advance:s=>{ms+=s*1000;},store:()=>store,owner:{A:{tenantId:'A',ownerId:'oa'},B:{tenantId:'B',ownerId:'ob'}}};
@@ -36,6 +36,29 @@ test('request returns a job id immediately and nothing runs before owner approva
  assert.equal(c.job.jobId,j.job_id);assert.deepEqual(c.job.params,{seconds:40});
  assert.equal(c.job.maxRuntimeSeconds,960);assert.match(c.job.leaseToken,/^[A-Za-z0-9_-]{43}$/);
  assert.deepEqual(q.claim({actor:f.actors.aa,deviceId:'pcA'}),{job:null},'dispatched exactly once');
+});
+
+test('per-device allowlist: a diagnostics-only PC can never be asked for mail, before any approval page',t=>{
+ const f=fixture(t);
+ let q=f.open({deviceKinds:new Map([['pcA',['diag.wait']]])});
+ for(const [kind,params] of [['mail.sync',{days:1,maxMessages:1}],['mail.search',{query:'x'}],['mail.read',{messageId:'a'.repeat(40)}]])
+  assert.throws(()=>start(q,f.actors.oa,'pcA',kind,params),/KIND_NOT_ALLOWED_FOR_DEVICE/);
+ assert.equal(start(q,f.actors.oa,'pcA','diag.wait',{seconds:5}).state,'AWAITING_APPROVAL');
+ assert.equal(start(q,f.actors.oa,'pcA2','mail.sync',{days:1,maxMessages:1}).state,'AWAITING_APPROVAL','unlisted device unchanged');
+ const devs=Object.fromEntries(q.devices(f.actors.oa).map(d=>[d.device,d]));
+ assert.deepEqual(devs.pcA.allowed_kinds,['diag.wait']);assert.equal('allowed_kinds' in devs.pcA2,false);
+ f.close();
+ assert.throws(()=>f.open({deviceKinds:{pcA:['shell']}}),/INVALID_DEVICE_KINDS/);f.close();
+ assert.throws(()=>f.open({deviceKinds:{pcA:[]}}),/INVALID_DEVICE_KINDS/);f.close();
+ // A mail job queued while pcA2 was unrestricted is closed, not dispatched, once pcA2 is restricted.
+ q=f.open();
+ const queued=start(q,f.actors.oa,'pcA2','mail.search',{query:'x'});
+ q.approve({approver:f.owner.A,jobId:queued.job_id});
+ f.close();
+ q=f.open({deviceKinds:{pcA2:['diag.wait']}});
+ assert.deepEqual(q.claim({actor:f.actors.aa2,deviceId:'pcA2'}),{job:null});
+ assert.equal(q.get({actor:f.actors.oa,jobId:queued.job_id}).state,'CANCELLED');
+ assert.deepEqual(q.claim({actor:f.actors.aa2,deviceId:'pcA2'}),{job:null});
 });
 
 test('long run beyond 28 s: heartbeats extend the lease, progress is visible, result is stored',t=>{

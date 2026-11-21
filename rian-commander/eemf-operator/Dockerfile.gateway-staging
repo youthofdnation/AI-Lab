@@ -1,0 +1,11 @@
+# STAGING-ONLY OAuth Owner Gateway for RIAN Commander V2 validation.
+# Runs the unmodified gateway.ts with Bun; never the production Railway Function.
+# Without RIAN_EEMF_BACKEND_URL the legacy EEMFO3L bridge stays off; only the
+# rian_v2_* tools are forwarded to RIAN_V2_MCP_URL with RIAN_V2_OWNER_TOKEN.
+FROM oven/bun:1.3.8-alpine
+WORKDIR /srv/rian-gateway
+ENV NODE_ENV=production
+COPY gateway.ts ./
+USER bun
+EXPOSE 3000
+CMD ["bun","gateway.ts"]
