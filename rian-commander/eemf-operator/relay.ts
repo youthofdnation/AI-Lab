@@ -80,8 +80,9 @@ function safeFleetPath(path){
  const segments=clean.split("/").filter(x=>x!==""&&x!==".");
  if(segments.some(x=>x===".."))throw Error("Path traversal denied");
  const low=segments.map(x=>x.toLowerCase());
- const blocked=[".ssh",".aws",".gnupg",".kube",".git",".codex",".claude",".config","appdata","application support","keychain","cookies","login data",".env","secrets","credentials","config.json","token.json","ntuser.dat","id_rsa","id_ed25519","mcp_readonly_1q_bridge.py","agent.ps1","agent.py"];
+ const blocked=[".ssh",".aws",".gnupg",".kube",".git",".codex",".claude",".config","appdata","application support","keychain","cookies","login data",".env","secrets","credentials","config.json","token.json","ntuser.dat","id_rsa","id_ed25519","mcp_readonly_1q_bridge.py","agent.ps1","agent.py","rian-mail-v2","rian-outlook-bridge"];
  if(low.some(x=>blocked.includes(x)||x.startsWith(".env.")||x.endsWith(".pem")||x.endsWith(".key")||x.endsWith(".p12")||x.endsWith(".pfx")))throw Error("Sensitive path denied");
+ if(low.some(x=>/\.(eml|mbox|msg|pst|ost)$/.test(x)))throw Error("Mail content is not available through fleet reads; use an approved rian_v2 mail.read job");
  return path;
 }
 async function fleetCall(name,args){
@@ -211,8 +212,8 @@ function eemfRelativePath(raw){
  const normal=raw.replaceAll("\\","/");
  const parts=normal.toLowerCase().split("/");
  if(normal.startsWith("/")||normal.startsWith("~")||normal.includes(":")||parts.includes(".."))throw Error("EEMF path outside home");
- const blocked=[".ssh",".aws",".gnupg",".kube",".codex",".claude",".git","appdata","credentials","secrets","ntuser.dat","token.json",".env"];
- if(parts.some(v=>blocked.includes(v)||/\.(pem|pfx|p12|key)$/.test(v)))throw Error("Sensitive EEMF path");
+ const blocked=[".ssh",".aws",".gnupg",".kube",".codex",".claude",".git","appdata","credentials","secrets","ntuser.dat","token.json",".env","rian-mail-v2"];
+ if(parts.some(v=>blocked.includes(v)||/\.(pem|pfx|p12|key|eml|mbox|msg|pst|ost)$/.test(v)))throw Error("Sensitive EEMF path");
  return normal;
 }
 function eemfArgs(name,raw){

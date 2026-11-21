@@ -523,8 +523,8 @@ function safePath(value){
  const path=value.replaceAll("\\","/");
  if(path.startsWith("/")||path.startsWith("~")||path.includes(":")||path.split("/").some(x=>x===".."))throw Error("Path outside allowed root");
  const segments=path.toLowerCase().split("/");
- const banned=[".ssh",".aws",".kube",".gnupg",".codex",".claude",".git","appdata","credentials","secrets",".env","ntuser.dat"];
- if(segments.some(x=>banned.includes(x)||x.endsWith(".pfx")||x.endsWith(".pem")||x.endsWith(".key")))throw Error("Sensitive path denied");
+ const banned=[".ssh",".aws",".kube",".gnupg",".codex",".claude",".git","appdata","credentials","secrets",".env","ntuser.dat","rian-mail-v2"];
+ if(segments.some(x=>banned.includes(x)||/\.(pfx|pem|key|eml|mbox|msg|pst|ost)$/.test(x)))throw Error("Sensitive path denied");
  return path;
 }
 function safeArgs(name,args){
@@ -612,6 +612,21 @@ async function relay(name,args,ownerApproved=false){
  try{parsed=JSON.parse(v.result?.content?.[0]?.text||"{}")}catch{throw Error("Invalid relay result")}
  if(parsed.ok!==true){const category=classifyEemfFailure(parsed);if(ownerApproved)console.warn("RIAN_AGENT_REJECTED",JSON.stringify({category,device,operation:name}));throw Error("RIAN_EEMF_"+category)}
  return parsed;
+}
+/* V2 durable long-job MCP bridge. The isolated staging service owns jobs, approval and results;
+   this gateway only adds OAuth and forwards rian_v2_* calls with a tenant-owner token. */
+const v2Url=env.RIAN_V2_MCP_URL||"",v2Key=env.RIAN_V2_OWNER_TOKEN||"";
+export const v2Ready=v2Key.length>=40&&(/^https:\/\/[a-z0-9.-]+\/v2\/mcp$/.test(v2Url)||env.RIAN_V2_ALLOW_LOOPBACK==="1"&&/^http:\/\/127\.0\.0\.1:\d+\/v2\/mcp$/.test(v2Url));
+let v2Cache=null;
+export async function v2Rpc(method,params,clientId){
+ const r=await fetch(v2Url,{method:"POST",redirect:"error",headers:{authorization:"Bearer "+v2Key,"content-type":"application/json","x-rian-client-ref":createHash("sha256").update("rian-v2-client|"+clientId).digest("hex").slice(0,32)},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}),signal:AbortSignal.timeout(35000)});
+ if(!r.ok)throw Error("RIAN_V2_HTTP_"+r.status);
+ const v=await r.json();if(v.error||!v.result)throw Error("RIAN_V2_PROTOCOL_REJECTED");
+ return v.result;
+}
+async function v2Tools(clientId){
+ if(!v2Cache||v2Cache.exp<now())v2Cache={exp:now()+300,tools:((await v2Rpc("tools/list",{},clientId)).tools||[]).filter(t=>/^rian_v2_[a-z_]+$/.test(t?.name))};
+ return v2Cache.tools;
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
 export function newTrustedSession(clientId,profile=TRUSTED_PROFILE){
@@ -955,7 +970,7 @@ function denied(){return res({error:"unauthorized",message:"OAuth sign-in requir
 const meta={issuer:origin,authorization_endpoint:origin+"/oauth/authorize",token_endpoint:origin+"/oauth/token",registration_endpoint:origin+"/oauth/register",response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],token_endpoint_auth_methods_supported:["none"],scopes_supported:["eemf:operate","offline_access"],authorization_response_iss_parameter_supported:true,client_id_metadata_document_supported:false};
 if(env.RIAN_TEST_MODE!=="1")Bun.serve({hostname:"0.0.0.0",port:Number(env.PORT||3000),async fetch(req){
  let u=new URL(req.url),p=u.pathname,m=req.method;
- if(p==="/health"&&m==="GET")return res({alive:true,version:"0.5.0",oauth_configured:authReady,backend_configured:bridgeReady,ready:authReady&&bridgeReady,read_only:false,manual_approval_required:true,device_only:"DESKTOP-EEMFO3L"});
+ if(p==="/health"&&m==="GET")return res({alive:true,version:"0.5.0",oauth_configured:authReady,backend_configured:bridgeReady,v2_jobs:v2Ready,ready:authReady&&bridgeReady,read_only:false,manual_approval_required:true,device_only:"DESKTOP-EEMFO3L"});
  if(p==="/"&&m==="GET")return html("<h1>RIAN Commander</h1><p>ChatGPT 원격 MCP 연결. PC 조회를 위해 로그인 승인이 필요합니다.</p>");
  if(p==="/operator"||p.startsWith("/operator/"))return portalHandle(req,p,m);
  if(!authReady)return res({error:"OAuth setup incomplete"},503);
@@ -1102,7 +1117,7 @@ if(p==="/oauth/register"&&m==="POST"){
   return res({error:"unsupported_grant_type"},400)
  }
  if(p==="/mcp"&&(m==="GET"||m==="POST")){
-  if(!bridgeReady)return res({error:"Backend unavailable"},503);
+  if(!bridgeReady&&!v2Ready)return res({error:"Backend unavailable"},503);
   let authorization=req.headers.get("authorization")||"",token=decodeJWT(authorization.startsWith("Bearer ")?authorization.slice(7):"");
   if(!token||token.typ!=="access"||token.aud!==resource||token.sub!=="rian-owner"||token.scope!=="eemf:operate"||!client(token.client_id))return denied();
   if(m==="GET")return new Response(null,{status:405,headers:{"allow":"POST","cache-control":"no-store"}});
@@ -1110,9 +1125,9 @@ if(p==="/oauth/register"&&m==="POST"){
   if(x.method==="notifications/initialized")return new Response(null,{status:202});
   let result,id=x.id??null;
   if(x.method==="initialize")result={protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"rian-eemf-owner",version:"1.0.0"}};
-  else if(x.method==="tools/list")result={tools};
+  else if(x.method==="tools/list")result={tools:[...(bridgeReady?tools:[]),...(v2Ready?await v2Tools(token.client_id).catch(()=>[]):[])]};
   else if(x.method==="ping")result={};
-  else if(x.method==="tools/call"){try{let name=x.params?.name,args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args,token.client_id)}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
+  else if(x.method==="tools/call"){try{let name=x.params?.name;if(v2Ready&&/^rian_v2_[a-z_]+$/.test(name))result=await v2Rpc("tools/call",{name,arguments:x.params?.arguments||{}},token.client_id);else{if(!bridgeReady)throw Error("Backend unavailable");let args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args,token.client_id)}}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
   else return res({jsonrpc:"2.0",id,error:{code:-32601,message:"Unknown method"}});
   return res({jsonrpc:"2.0",id,result});
  }

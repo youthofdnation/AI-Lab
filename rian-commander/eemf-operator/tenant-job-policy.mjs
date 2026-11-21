@@ -11,8 +11,8 @@ function limitedPath(path) {
   if (typeof path!=='string'||!path.trim()||path.length>512||/[\x00-\x1f]/.test(path)) throw new Error('INVALID_PATH');
   const normal=path.replaceAll('\\','/');
   const parts=normal.toLowerCase().split('/');
-  const forbidden=['.ssh','.aws','.gnupg','.git','.kube','.config','.codex','.claude','appdata','credentials','secrets','.env','token.json','config.json'];
-  if(normal.startsWith('/')||normal.startsWith('~')||normal.includes(':')||parts.some(p=>p==='..'||forbidden.includes(p)||p.startsWith('.env.')||/\.(p12|pfx|pem|key)$/.test(p))) throw new Error('INVALID_PATH');
+  const forbidden=['.ssh','.aws','.gnupg','.git','.kube','.config','.codex','.claude','appdata','credentials','secrets','.env','token.json','config.json','rian-mail-v2'];
+  if(normal.startsWith('/')||normal.startsWith('~')||normal.includes(':')||parts.some(p=>p==='..'||forbidden.includes(p)||p.startsWith('.env.')||/\.(p12|pfx|pem|key|eml|mbox|msg|pst|ost)$/.test(p))) throw new Error('INVALID_PATH');
   return normal;
 }
 function exact(raw,allowed,required) {
