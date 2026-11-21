@@ -36,7 +36,10 @@ export function inspectWorktree({approvedRoot,worktree}) {
   const allowed=realpathSync(approvedRoot),actual=realpathSync(worktree);
   const rel=relative(allowed,actual);
   check(rel==='' || (rel!=='..' && !rel.startsWith('..'+sep) && !isAbsolute(rel)),'WORKTREE_OUTSIDE_OWNER_SCOPE');
-  check(realpathSync(git(actual,'rev-parse','--show-toplevel').trim())===actual,'WORKTREE_MUST_BE_GIT_ROOT');
+  // git --show-toplevel can differ from OS realpath on Windows and macOS /var -> /private/var.
+  // --show-prefix is empty only when git -C runs from the worktree root.
+  check(git(actual,'rev-parse','--is-inside-work-tree').trim()==='true' &&
+    git(actual,'rev-parse','--show-prefix').trim()==='', 'WORKTREE_MUST_BE_GIT_ROOT');
   const head=git(actual,'rev-parse','HEAD').trim();
   check(GIT_SHA.test(head),'INVALID_GIT_HEAD');
   const branch=git(actual,'branch','--show-current').trim()||'(detached)';
