@@ -21,7 +21,7 @@ export class StagingSqlite {
     try {
       this.#db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
       const version=Number(this.#db.prepare('PRAGMA user_version').get().user_version);
-      if (version!==0 && version!==1) throw Error('UNSUPPORTED_SCHEMA_VERSION');
+      if (version!==0 && version!==1 && version!==2) throw Error('UNSUPPORTED_SCHEMA_VERSION');
       const ddl=[
         'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, cipher BLOB NOT NULL, iv BLOB NOT NULL, tag BLOB NOT NULL)',
         'CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, filename TEXT NOT NULL, size INTEGER NOT NULL CHECK (size>0), sha TEXT NOT NULL, chunks_total INTEGER NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL)',
@@ -31,17 +31,25 @@ export class StagingSqlite {
         'CREATE TABLE IF NOT EXISTS approval_nonces (nonce TEXT PRIMARY KEY, tenant TEXT NOT NULL, expires INTEGER NOT NULL, kind TEXT NOT NULL)',
         'CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, request_key TEXT NOT NULL, spec_sha TEXT NOT NULL, device TEXT NOT NULL, action TEXT NOT NULL, args_cipher BLOB NOT NULL, args_iv BLOB NOT NULL, args_tag BLOB NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, deadline INTEGER NOT NULL, lease_until INTEGER, result_cipher BLOB, result_iv BLOB, result_tag BLOB, UNIQUE(tenant,owner,request_key))',
         'CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(tenant,device,state,created)',
-        'CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, actor TEXT NOT NULL, object_id TEXT NOT NULL, action TEXT NOT NULL, ts INTEGER NOT NULL)'
+        'CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, actor TEXT NOT NULL, object_id TEXT NOT NULL, action TEXT NOT NULL, ts INTEGER NOT NULL)',
+        // Schema v2 (additive): long-running V2 jobs. Unlike v1 `jobs`, a RUNNING
+        // long job is bound to a secret lease token and is never re-dispatched, so a
+        // server restart keeps it RUNNING and lets the same agent report its result.
+        'CREATE TABLE IF NOT EXISTS long_jobs (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, client_ref TEXT, request_key TEXT, spec_sha TEXT NOT NULL, device TEXT NOT NULL, kind TEXT NOT NULL, lock_group TEXT, params_cipher BLOB NOT NULL, params_iv BLOB NOT NULL, params_tag BLOB NOT NULL, state TEXT NOT NULL, grant_id TEXT, created INTEGER NOT NULL, approval_expires INTEGER, queue_deadline INTEGER, approved_at INTEGER, started INTEGER, run_deadline INTEGER, lease_sha TEXT, lease_until INTEGER, heartbeat_at INTEGER, progress_pct INTEGER, progress_stage TEXT, progress_done INTEGER, progress_total INTEGER, finished INTEGER, outcome TEXT, exit_code INTEGER, result_sha TEXT, result_cipher BLOB, result_iv BLOB, result_tag BLOB, UNIQUE(tenant,owner,request_key))',
+        'CREATE INDEX IF NOT EXISTS idx_long_jobs_device ON long_jobs(tenant,device,state,created)',
+        'CREATE TABLE IF NOT EXISTS long_job_grants (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, kind TEXT NOT NULL, spec_sha TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, runs_left INTEGER NOT NULL, state TEXT NOT NULL)',
+        'CREATE INDEX IF NOT EXISTS idx_long_job_grants ON long_job_grants(tenant,owner,device,kind,spec_sha)',
+        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
       ];
       this.#db.exec(ddl.join(';')+';');
-      if (version===0) this.#db.exec('PRAGMA user_version=1;');
+      if (version!==2) this.#db.exec('PRAGMA user_version=2;');
       const sentinel=this.#db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('storage-sentinel');
       if (sentinel) {
         const plaintext=this.decrypt(sentinel,'riancmd:v1:sentinel');
         if (plaintext.toString('utf8')!=='RIAN_STAGE_STORAGE_V1') throw Error('STORAGE_KEY_MISMATCH');
       } else {
         // Existing rows without a sentinel must never be silently rekeyed.
-        const hasRows=this.#db.prepare('SELECT (SELECT COUNT(*) FROM transfers)+(SELECT COUNT(*) FROM jobs) AS total').get().total;
+        const hasRows=this.#db.prepare('SELECT (SELECT COUNT(*) FROM transfers)+(SELECT COUNT(*) FROM jobs)+(SELECT COUNT(*) FROM long_jobs) AS total').get().total;
         if (hasRows) throw Error('STORAGE_SENTINEL_MISSING');
         const {cipher,iv,tag}=this.encrypt(Buffer.from('RIAN_STAGE_STORAGE_V1'),'riancmd:v1:sentinel');
         this.#db.prepare('INSERT INTO meta(key,cipher,iv,tag) VALUES(?,?,?,?)').run('storage-sentinel',cipher,iv,tag);
@@ -79,6 +87,9 @@ export class StagingSqlite {
       this.db.prepare('DELETE FROM transfers WHERE expires <= ?').run(now);
       this.db.prepare('DELETE FROM approval_nonces WHERE expires <= ?').run(now);
       this.db.prepare("DELETE FROM jobs WHERE deadline < ? AND state IN ('DONE','CANCELLED','EXPIRED','UNKNOWN_DO_NOT_RETRY')").run(now-86400);
+      // Terminal V2 jobs keep their encrypted result for 7 days, then disappear.
+      this.db.prepare("DELETE FROM long_jobs WHERE finished IS NOT NULL AND finished < ?").run(now-7*86400);
+      this.db.prepare("DELETE FROM long_job_grants WHERE expires < ?").run(now-86400);
     });
   }
   bootSequence() {
