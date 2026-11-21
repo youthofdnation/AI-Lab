@@ -22,6 +22,28 @@ from urllib.parse import urlsplit
 LABEL = "company.rian.commander.v2.agent"
 FILES = ("rian-v2-agent.py", "rian_mail_index.py", "tenant-artifact-agent.py")
 KINDS = {"diag.wait", "mail.sync", "mail.search", "mail.read"}
+# launchd respawn delay. The agent heartbeats every <=15 s against a 45 s lease, so a
+# double restart costs at most ~15 s + THROTTLE_SECONDS; 30 s left almost no margin.
+THROTTLE_SECONDS = 10
+
+
+def stable_python(executable=None, version=None):
+    """Interpreter path for launchd that survives Homebrew patch upgrades.
+
+    A resolved Cellar path (.../Cellar/python@3.14/3.14.6/...) disappears after
+    'brew upgrade' + 'brew cleanup'; the matching opt link keeps working.
+    """
+    exe = Path(executable or sys.executable)
+    if not exe.is_absolute() or not exe.is_file():
+        raise RuntimeError("PYTHON_EXECUTABLE_NOT_FOUND")
+    real = exe.resolve()
+    m = re.match(r"^(?P<prefix>.+)/Cellar/(?P<formula>python(?:@\d+\.\d+)?)/[^/]+/", str(real))
+    if m:
+        major, minor = (version or sys.version_info)[:2]
+        opt = Path(m["prefix"]) / "opt" / m["formula"] / "bin" / ("python%d.%d" % (major, minor))
+        if opt.is_file() and opt.resolve() == real:
+            return opt
+    return real
 
 
 def paths():
@@ -168,12 +190,12 @@ def prepare(config_path, allow_mail=False):
             os.chmod(path, 0o600)
     plist = {
         "Label": LABEL,
-        "ProgramArguments": [str(Path(sys.executable).resolve()), str(pp["agent"] / "rian-v2-agent.py"),
+        "ProgramArguments": [str(stable_python()), str(pp["agent"] / "rian-v2-agent.py"),
                              "run", "--config", str(pp["config"])],
         "WorkingDirectory": str(pp["agent"]),
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ThrottleInterval": 30,
+        "ThrottleInterval": THROTTLE_SECONDS,
         "ProcessType": "Background",
         "StandardOutPath": str(pp["logs"] / "stdout.log"),
         "StandardErrorPath": str(pp["logs"] / "stderr.log"),

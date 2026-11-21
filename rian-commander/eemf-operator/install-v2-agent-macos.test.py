@@ -102,6 +102,29 @@ class MacInstallerTests(unittest.TestCase):
         self.assertEqual(result["allowed_kinds"], ["diag.wait"])
         self.assertEqual(result["journal_jobs"], [])
 
+    def test_homebrew_cellar_python_is_pinned_to_stable_opt_link(self):
+        brew = self.home / "brew"
+        cellar_bin = brew / "Cellar" / "python@3.14" / "3.14.6" / "bin"
+        cellar_bin.mkdir(parents=True)
+        (cellar_bin / "python3.14").write_text("", encoding="utf-8")
+        (brew / "opt").mkdir()
+        (brew / "opt" / "python@3.14").symlink_to("../Cellar/python@3.14/3.14.6")
+        (brew / "bin").mkdir()
+        (brew / "bin" / "python3").symlink_to("../Cellar/python@3.14/3.14.6/bin/python3.14")
+        chosen = installer.stable_python(str(brew / "bin" / "python3"), (3, 14))
+        self.assertEqual(chosen, brew.resolve() / "opt" / "python@3.14" / "bin" / "python3.14")
+        self.assertNotIn("3.14.6", str(chosen))
+        # Without an opt link the real interpreter path is kept.
+        (brew / "opt" / "python@3.14").unlink()
+        self.assertEqual(installer.stable_python(str(brew / "bin" / "python3"), (3, 14)), (cellar_bin / "python3.14").resolve())
+
+    def test_throttle_leaves_margin_inside_agent_lease(self):
+        installer.prepare(self.config)
+        data = plistlib.loads(self.pp["prepared_plist"].read_bytes())
+        # heartbeat <=15 s + respawn delay + startup must stay well inside the 45 s lease.
+        self.assertLessEqual(15 + data["ThrottleInterval"] + 5, 30)
+        self.assertEqual(data["ProgramArguments"][0], str(installer.stable_python()))
+
     def test_rejects_mail_without_explicit_opt_in(self):
         self.cfg["allowed_kinds"] = ["diag.wait", "mail.read"]
         self.save()

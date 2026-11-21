@@ -47,6 +47,7 @@ MAX_OUTPUT = 96 * 1024
 # request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
 MAX_WIRE = 90_000
 ALIVE_STALE_SECONDS = 20
+ALREADY_RUNNING_EXIT = 75  # EX_TEMPFAIL: another supervisor already owns this state directory
 
 
 def log(event, **fields):
@@ -200,6 +201,31 @@ def pid_running(pid):
         return False
 
 
+def single_instance(state_dir):
+    """Exclusive, non-blocking lock so two supervisors never share one journal.
+
+    The OS releases it when the process exits, including SIGKILL/TerminateProcess.
+    Python descriptors are non-inheritable and the runner is spawned with
+    close_fds=True, so a detached runner never keeps the lock across a restart.
+    Returns the open lock file (keep a reference) or None if another supervisor holds it.
+    """
+    state = Path(state_dir)
+    state.mkdir(parents=True, exist_ok=True)
+    handle = open(state / "supervisor.lock", "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 class Supervisor:
     def __init__(self, cfg, config_path, client):
         self.cfg, self.config_path, self.client = cfg, str(config_path), client
@@ -351,8 +377,16 @@ def main(argv=None):
         return run_job(a.job_dir, cfg)
     if a.command == "status":
         return status(cfg)
-    client = Client(cfg["relay_url"], device_token(cfg), allow_test_loopback=cfg.get("allow_test_loopback") is True, timeout=25)
-    Supervisor(cfg, a.config, client).loop(cfg.get("poll_seconds", 5), a.max_seconds)
+    lock = single_instance(cfg["state_dir"])
+    if lock is None:
+        # e.g. a manual start while launchd/the logon task already runs the agent
+        log("AGENT_ALREADY_RUNNING", device=cfg["device_id"])
+        return ALREADY_RUNNING_EXIT
+    try:
+        client = Client(cfg["relay_url"], device_token(cfg), allow_test_loopback=cfg.get("allow_test_loopback") is True, timeout=25)
+        Supervisor(cfg, a.config, client).loop(cfg.get("poll_seconds", 5), a.max_seconds)
+    finally:
+        lock.close()
     return 0
 
 

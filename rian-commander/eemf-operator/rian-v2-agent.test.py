@@ -172,6 +172,23 @@ class SupervisorTests(Base):
         wire = json.dumps({"leaseToken": "t" * 43, **result}, separators=(",", ":"))
         self.assertLess(len(wire.encode()), 110_000, "complete() request must fit the staging body limit")
 
+    def test_second_supervisor_on_same_state_dir_is_refused(self):
+        first = agent.single_instance(self.cfg["state_dir"])
+        self.assertIsNotNone(first)
+        try:
+            self.assertIsNone(agent.single_instance(self.cfg["state_dir"]))
+            # A separate process is refused before any token read or network call.
+            import subprocess
+            p = subprocess.run([sys.executable, str(HERE / "rian-v2-agent.py"), "run", "--config", str(self.cfg_path), "--max-seconds", "1"],
+                               capture_output=True, text=True, timeout=20)
+            self.assertEqual(p.returncode, agent.ALREADY_RUNNING_EXIT, p.stderr[-300:])
+            self.assertIn("AGENT_ALREADY_RUNNING", p.stdout)
+        finally:
+            first.close()
+        again = agent.single_instance(self.cfg["state_dir"])
+        self.assertIsNotNone(again)
+        again.close()
+
     def test_windows_safe_process_probe(self):
         import os
         self.assertTrue(agent.pid_running(os.getpid()))
