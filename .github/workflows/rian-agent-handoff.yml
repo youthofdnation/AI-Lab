@@ -1,0 +1,34 @@
+name: RIAN Commander agent handoff foundation
+on:
+  push:
+    branches: ['feature/rian-commander-agent-handoff-*']
+    paths:
+      - 'rian-commander/eemf-operator/agent-handoff.*'
+      - 'rian-commander/eemf-operator/AGENT-HANDOFF.md'
+      - '.github/workflows/rian-agent-handoff.yml'
+  pull_request:
+    paths:
+      - 'rian-commander/eemf-operator/agent-handoff.*'
+      - 'rian-commander/eemf-operator/AGENT-HANDOFF.md'
+      - '.github/workflows/rian-agent-handoff.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-only-unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Safe handoff tests (no Claude/Codex execution)
+        working-directory: rian-commander/eemf-operator
+        run: |
+          node --check agent-handoff.mjs
+          node --test agent-handoff.test.mjs
