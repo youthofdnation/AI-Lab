@@ -1,7 +1,7 @@
 name: RIAN Commander tenant jobs and artifact isolation (staging)
 on:
   push:
-    branches: [feature/rian-eemf-owner-command-mcp]
+    branches: [feature/rian-eemf-owner-command-mcp, 'feature/rian-commander-v2-**']
     paths:
       - 'rian-commander/eemf-operator/tenant-artifact-*.mjs'
       - 'rian-commander/eemf-operator/tenant-job-*.mjs'
@@ -11,6 +11,7 @@ on:
       - 'rian-commander/eemf-operator/staging-entry.mjs'
       - 'rian-commander/eemf-operator/Dockerfile.staging'
       - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
+      - 'rian-commander/eemf-operator/long-job-*.mjs'
       - '.github/workflows/rian-tenant-artifacts.yml'
   pull_request:
     paths:
@@ -22,6 +23,7 @@ on:
       - 'rian-commander/eemf-operator/staging-entry.mjs'
       - 'rian-commander/eemf-operator/Dockerfile.staging'
       - 'rian-commander/eemf-operator/tenant-artifact-agent*.py'
+      - 'rian-commander/eemf-operator/long-job-*.mjs'
       - '.github/workflows/rian-tenant-artifacts.yml'
   workflow_dispatch:
 permissions:

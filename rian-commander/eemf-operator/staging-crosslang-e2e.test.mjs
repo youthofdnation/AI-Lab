@@ -19,6 +19,8 @@ import {createStagingArtifactHandler} from './tenant-artifact-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const PYTHON=fileURLToPath(new URL('./tenant-artifact-agent.py',import.meta.url));
+// Windows has no real `python3` (only a Store alias stub); honour PYTHON for CI matrices.
+const PYTHON_EXE=process.env.PYTHON||(process.platform==='win32'?'python':'python3');
 const PY_SCRIPT=String.raw`
 import importlib.util,json,sys
 spec=importlib.util.spec_from_file_location("rian_agent",sys.argv[1])
@@ -33,7 +35,7 @@ print(json.dumps(result))
 
 function runPython(args){
  return new Promise((resolve,reject)=>{
-   const p=spawn('python3',['-c',PY_SCRIPT,PYTHON,...args],{stdio:['ignore','pipe','pipe']});
+   const p=spawn(PYTHON_EXE,['-c',PY_SCRIPT,PYTHON,...args],{stdio:['ignore','pipe','pipe']});
    let stdout='',stderr='';
    p.stdout.on('data',x=>stdout+=x.toString('utf8'));
    p.stderr.on('data',x=>stderr+=x.toString('utf8'));

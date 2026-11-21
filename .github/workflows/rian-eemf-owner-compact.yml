@@ -28,6 +28,7 @@ jobs:
         run: |
           node compact-css.mjs
           bun build gateway.deploy.input.ts --target=bun --minify --outfile=gateway.deploy.min.js
+          node compact-utf8.mjs gateway.deploy.min.js
           node - <<'NODE'
           const fs = require('node:fs');
           const file = 'gateway.deploy.min.js';
