@@ -77,6 +77,19 @@ class MacInstallerTests(unittest.TestCase):
         subprocess.run(["plutil", "-lint", str(self.pp["prepared_plist"])], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertFalse(installer.status(self.pp)["launchd_loaded"])
 
+    def test_install_only_explicitly_activates_and_preserves_launchagents_permissions(self):
+        parent = self.pp["plist"].parent
+        parent.mkdir(parents=True)
+        parent.chmod(0o755)
+        with patch.object(installer, "loaded", side_effect=[False, True]), patch.object(installer.subprocess, "run") as runner:
+            result = installer.install(self.config)
+        self.assertTrue(result["launchd_started"])
+        self.assertTrue(self.pp["plist"].exists())
+        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+        self.assertEqual(len(runner.call_args_list), 2)
+        self.assertEqual(runner.call_args_list[0].args[0][1], "bootstrap")
+        self.assertEqual(runner.call_args_list[1].args[0][1], "kickstart")
+
     def test_agent_status_from_prepared_directory_never_connects(self):
         installer.prepare(self.config)
         p = subprocess.run(
