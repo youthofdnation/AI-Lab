@@ -1,8 +1,29 @@
 # RIAN Commander V2 — macOS first-device pilot (Apple Silicon)
 
 **Pilot target:** `Oui-MacStudio.local` (macOS 26.7.3, arm64).
-**Status:** macOS source/CI work; real Mac install, enrollment and real-device E2E are NOT complete.
+**Status (2026-11-22):** installed on the real Mac (owner-approved, per-user LaunchAgent) and
+verified end to end against a **Mac-only Railway staging service**, directly and through a
+**staging** OAuth gateway. Not yet done: a real ChatGPT connector session, a macOS reboot/login
+test, and any production Relay/Gateway rollout.
 **Do not use DESKTOP-EEMFO3L for this pilot.**
+
+## Real-device results (Oui-MacStudio, diag.wait only)
+
+| Scope | Result |
+|---|---|
+| Local (Python 3.14.6/3.12.7, Node 26, launchd loopback) | Python 54/54, Node 66/66, launchd 38/38 |
+| Railway direct API (`rian-v2-mac-stage`, own volume, tenants `MAC` + `MAC-ISO`) | registration/auth/isolation/mail refusal 15/15; 40 s job with progress, dedupe, supervisor SIGKILL and Railway restart 25/25; standing grant/revoke/cancel 11/11; launchd reconnect 3/3 |
+| Real relay outage (deployment removed mid-job, ~11 min) | runner kept working, result held locally, delivered once after redeploy (`SUCCEEDED`, same runner PID) |
+| Staging OAuth gateway (`rian-v2-mac-gateway-stage`, `Dockerfile.gateway-staging`) | OAuth DCR + PKCE + /mcp 9/9; 40 s job through the gateway 13/13 |
+| Product checks | no admin, Apple Silicon, ~36 MB idle RSS, second supervisor refused (exit 75), update keeps token/config/history, uninstall keeps data and goes offline, reinstall reconnects |
+
+Bugs found on the real device and fixed in this branch: Cellar-pinned interpreter, 30 s launchd
+throttle vs 45 s lease, missing supervisor lock, 0755 journal dirs, server accepting mail kinds for
+a diagnostics-only device (`allowedKinds`), hosting-edge 404 during an outage read as "lease
+lost", and unreaped runner zombies hiding a crashed runner.
+
+Staging devices may restrict kinds server-side:
+`RIAN_STAGE_DEVICES_JSON=[{"id":"Oui-MacStudio.local","tenantId":"MAC","allowedKinds":["diag.wait"]}]`.
 
 ## Boundaries
 
