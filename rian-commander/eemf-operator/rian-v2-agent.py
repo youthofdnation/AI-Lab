@@ -201,6 +201,15 @@ def pid_running(pid):
         return False
 
 
+def private_dir(path):
+    """Create the directory (or tighten one left by an older agent) as owner-only on POSIX."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+    return path
+
+
 def single_instance(state_dir):
     """Exclusive, non-blocking lock so two supervisors never share one journal.
 
@@ -209,9 +218,9 @@ def single_instance(state_dir):
     close_fds=True, so a detached runner never keeps the lock across a restart.
     Returns the open lock file (keep a reference) or None if another supervisor holds it.
     """
-    state = Path(state_dir)
-    state.mkdir(parents=True, exist_ok=True)
-    handle = open(state / "supervisor.lock", "a+b")
+    state = private_dir(state_dir)
+    fd = os.open(state / "supervisor.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    handle = os.fdopen(fd, "r+b")
     try:
         if os.name == "nt":
             import msvcrt
@@ -231,7 +240,8 @@ class Supervisor:
         self.cfg, self.config_path, self.client = cfg, str(config_path), client
         self.state = Path(cfg["state_dir"])
         self.jobs = self.state / "jobs"
-        self.jobs.mkdir(parents=True, exist_ok=True)
+        private_dir(self.state)
+        private_dir(self.jobs)
         self.seen_file = self.state / "executed-job-ids.json"
         self.backoff = 1
 
@@ -266,7 +276,7 @@ class Supervisor:
             log("JOB_REFUSED_DUPLICATE", job=job_id)
             return None
         job_dir = self.jobs / job_id
-        job_dir.mkdir(parents=True, exist_ok=False)
+        job_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         record = {"jobId": job_id, "kind": job["kind"], "params": job["params"], "leaseToken": job["leaseToken"],
                   "leaseSeconds": job["leaseSeconds"], "runDeadline": time.time() + job["maxRuntimeSeconds"], "claimedAt": time.time()}
         try:

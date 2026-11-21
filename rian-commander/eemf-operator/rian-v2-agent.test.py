@@ -101,6 +101,24 @@ class SupervisorTests(Base):
         self.assertIsNone(sup.claim())
         self.assertEqual(list(sup.active()), [])
 
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX permissions")
+    def test_journal_directories_are_owner_only(self):
+        import os
+        import stat
+        jobs = Path(self.cfg["state_dir"]) / "jobs"
+        jobs.mkdir(parents=True)
+        os.chmod(jobs, 0o755)  # as left by an older agent version
+        client = FakeClient({"jobId": JOB, "kind": "mail.sync", "params": {"days": 1, "maxMessages": 1}, "leaseToken": "t" * 43, "leaseSeconds": 45, "maxRuntimeSeconds": 60})
+        sup = agent.Supervisor(self.cfg, self.cfg_path, client)
+        self.assertEqual(sup.claim(), JOB)  # rejected locally: journal written, nothing executed
+        for path in (sup.state, sup.jobs, sup.jobs / JOB):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700, str(path))
+        lock = agent.single_instance(sup.state)
+        try:
+            self.assertEqual(stat.S_IMODE((sup.state / "supervisor.lock").stat().st_mode), 0o600)
+        finally:
+            lock.close()
+
     def test_relay_job_outside_local_allowlist_is_reported_failed_not_run(self):
         client = FakeClient({"jobId": JOB, "kind": "mail.sync", "params": {"days": 1, "maxMessages": 1}, "leaseToken": "t" * 43, "leaseSeconds": 45, "maxRuntimeSeconds": 60})
         sup = agent.Supervisor(self.cfg, self.cfg_path, client)
