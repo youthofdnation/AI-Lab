@@ -188,7 +188,13 @@ def prepare(config_path, allow_mail=False):
 def install(config_path, allow_mail=False):
     pp = paths()
     prepared = prepare(config_path, allow_mail=allow_mail)
-    mkdir_private(pp["plist"].parent)
+    # LaunchAgents is a shared per-user folder; never chmod an existing folder
+    # belonging to other applications. Only the RIAN plist is managed here.
+    if pp["plist"].parent.is_symlink():
+        raise RuntimeError("SYMLINK_LAUNCHAGENTS_DENIED")
+    pp["plist"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if pp["plist"].parent.stat().st_uid != os.getuid():
+        raise RuntimeError("LAUNCHAGENTS_OWNER_MISMATCH")
     if loaded():
         subprocess.run(["launchctl", "bootout", launch_target()], check=True)
     atomic_bytes(pp["plist"], pp["prepared_plist"].read_bytes())
