@@ -59,7 +59,11 @@ class MacInstallerTests(unittest.TestCase):
         self.assertTrue(r["prepared"])
         self.assertFalse(r["launchd_started"])
         self.assertFalse(r["mail_enabled"])
-        data = plistlib.loads(self.pp["plist"].read_bytes())
+        data = plistlib.loads(self.pp["prepared_plist"].read_bytes())
+        # Prepare-only must never enable auto-start on the next login.
+        self.assertFalse(self.pp["plist"].exists())
+        self.assertFalse(self.pp["plist"].parent.exists())
+        self.assertFalse(installer.status(self.pp)["installed"])
         self.assertEqual(data["Label"], installer.LABEL)
         self.assertEqual(data["ProgramArguments"][2:], ["run", "--config", str(self.pp["config"])])
         self.assertEqual(data["EnvironmentVariables"], {"PYTHONUNBUFFERED": "1"})
@@ -68,9 +72,9 @@ class MacInstallerTests(unittest.TestCase):
         self.assertEqual(set(p.name for p in self.pp["agent"].iterdir()), set(installer.FILES))
         for key in ("base", "state", "logs", "agent"):
             self.assertEqual(stat.S_IMODE(self.pp[key].stat().st_mode), 0o700)
-        for key in ("config", "plist"):
+        for key in ("config", "prepared_plist"):
             self.assertEqual(stat.S_IMODE(self.pp[key].stat().st_mode), 0o600)
-        subprocess.run(["plutil", "-lint", str(self.pp["plist"])], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["plutil", "-lint", str(self.pp["prepared_plist"])], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertFalse(installer.status(self.pp)["launchd_loaded"])
 
     def test_agent_status_from_prepared_directory_never_connects(self):
