@@ -150,6 +150,25 @@ class SupervisorTests(Base):
         self.assertEqual(ok.calls[-1][1]["outcome"], "SUCCEEDED")
         self.assertFalse(d.exists())
 
+    def test_own_runner_that_died_without_result_is_reaped_and_reported_interrupted(self):
+        import os
+        import subprocess
+        d = self.job_dir("diag.wait", {"seconds": 30})
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])  # exits at once without result.json
+        time.sleep(0.5)  # the child has exited but nobody has waited for it yet
+        meta = agent.read_json(d / "job.json")
+        meta["runnerPid"] = proc.pid
+        agent.write_json(d / "job.json", meta)
+        if os.name != "nt":
+            self.assertTrue(agent.pid_running(proc.pid), "unreaped child is a zombie that still looks alive")
+        client = FakeClient()
+        sup = agent.Supervisor(self.cfg, self.cfg_path, client)
+        sup.children[JOB] = proc
+        sup.supervise(d)
+        self.assertEqual(client.calls[-1][1]["outcome"], "INTERRUPTED")
+        self.assertFalse(agent.pid_running(proc.pid))
+        self.assertFalse(d.exists())
+
     def test_hosting_edge_404_during_relay_outage_is_retried_not_lease_lost(self):
         # Railway answers 404 'Application not found' while the relay deployment is down.
         d = self.job_dir("diag.wait", {"seconds": 30})

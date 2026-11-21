@@ -244,6 +244,15 @@ class Supervisor:
         private_dir(self.jobs)
         self.seen_file = self.state / "executed-job-ids.json"
         self.backoff = 1
+        # Runners started by THIS supervisor are its children: they must be reaped, or a runner that
+        # died without a result stays a zombie that pid_running() reports as alive forever.
+        self.children, self.exited = {}, set()
+
+    def reap(self):
+        for job_id, proc in list(self.children.items()):
+            if proc.poll() is not None:
+                del self.children[job_id]
+                self.exited.add(job_id)
 
     def executed(self):
         return set(read_json(self.seen_file) or [])
@@ -260,6 +269,7 @@ class Supervisor:
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen(args, **kwargs)
+        self.children[job_dir.name] = proc
         meta = read_json(job_dir / "job.json")
         meta["runnerPid"] = proc.pid
         write_json(job_dir / "job.json", meta)
@@ -303,7 +313,9 @@ class Supervisor:
         if result is None:
             alive = job_dir / "alive"
             fresh = alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_STALE_SECONDS
-            if not fresh and not pid_running(job.get("runnerPid")) and time.time() - job.get("claimedAt", 0) > 10:
+            self.reap()
+            gone = job["jobId"] in self.exited or not pid_running(job.get("runnerPid"))
+            if not fresh and gone and time.time() - job.get("claimedAt", 0) > 10:
                 result = {"outcome": "INTERRUPTED", "exitCode": -1, "output": json.dumps({"ok": False, "error": "RUNNER_LOST_DURING_AGENT_RESTART"})}
                 write_json(job_dir / "result.json", result)
                 log("JOB_INTERRUPTED", job=job["jobId"])
@@ -349,6 +361,7 @@ class Supervisor:
         log("AGENT_STARTED", device=self.cfg["device_id"], recovered=len(self.active()))
         while max_seconds is None or time.time() - started < max_seconds:
             try:
+                self.reap()
                 for job_dir in self.active():
                     self.supervise(job_dir)
                 if not self.active():
