@@ -55,7 +55,12 @@ class MacInstallerTests(unittest.TestCase):
         self.assertFalse(self.pp["base"].exists())
 
     def test_prepare_generates_valid_private_plist_and_config(self):
-        r = installer.prepare(self.config)
+        # launchd state is per user, not per HOME: on a Mac where the agent is really installed
+        # the label is loaded. Prepare must leave that state as it is and never call launchctl.
+        loaded_before = installer.loaded()
+        with patch.object(installer.subprocess, "run", wraps=installer.subprocess.run) as runner:
+            r = installer.prepare(self.config)
+        self.assertFalse([c for c in runner.call_args_list if c.args and c.args[0] and c.args[0][0] == "launchctl"])
         self.assertTrue(r["prepared"])
         self.assertFalse(r["launchd_started"])
         self.assertFalse(r["mail_enabled"])
@@ -75,7 +80,7 @@ class MacInstallerTests(unittest.TestCase):
         for key in ("config", "prepared_plist"):
             self.assertEqual(stat.S_IMODE(self.pp[key].stat().st_mode), 0o600)
         subprocess.run(["plutil", "-lint", str(self.pp["prepared_plist"])], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertFalse(installer.status(self.pp)["launchd_loaded"])
+        self.assertEqual(installer.status(self.pp)["launchd_loaded"], loaded_before)
 
     def test_install_only_explicitly_activates_and_preserves_launchagents_permissions(self):
         parent = self.pp["plist"].parent

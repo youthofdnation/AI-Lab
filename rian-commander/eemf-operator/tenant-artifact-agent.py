@@ -32,6 +32,29 @@ class TransferError(RuntimeError):
     pass
 
 
+RELAY_ERROR = re.compile(r"^[A-Z][A-Z0-9_]{1,80}(:[0-9a-f-]{36})?$")
+
+
+def answered_by_relay(err):
+    """True only when an HTTP error comes from the RIAN relay itself.
+
+    While the relay is redeploying or removed, the hosting edge answers instead
+    (Railway: 404 'Application not found' with x-railway-fallback; proxies: 502/503
+    HTML). Such answers mean "relay unavailable" and must be retried, never read
+    as an authoritative "lease lost" or "job not found".
+    """
+    if err.code == 413:
+        return True  # the relay sends 413 with an empty body; too large is too large either way
+    try:
+        if str(err.headers.get("x-railway-fallback", "")).lower() == "true":
+            return False
+        body = json.loads(err.read(4096).decode("utf-8"))
+    except Exception:  # noqa: BLE001 - any unreadable body is not a relay answer
+        return False
+    return (isinstance(body, dict) and isinstance(body.get("error"), str) and bool(RELAY_ERROR.fullmatch(body["error"]))
+            and "status" not in body and "message" not in body)
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise TransferError("REDIRECT_BLOCKED")
@@ -120,7 +143,8 @@ class Client:
                 return obj
         except urllib.error.HTTPError as err:
             # Do not include response bodies: they may include confidential detail.
-            raise TransferError("BROKER_HTTP_" + str(err.code)) from None
+            prefix = "BROKER_HTTP_" if answered_by_relay(err) else "BROKER_EDGE_HTTP_"
+            raise TransferError(prefix + str(err.code)) from None
         except (urllib.error.URLError, TimeoutError, OSError):
             raise TransferError("BROKER_UNREACHABLE") from None
         except (UnicodeError, ValueError, json.JSONDecodeError):

@@ -150,6 +150,56 @@ class SupervisorTests(Base):
         self.assertEqual(ok.calls[-1][1]["outcome"], "SUCCEEDED")
         self.assertFalse(d.exists())
 
+    def test_hosting_edge_404_during_relay_outage_is_retried_not_lease_lost(self):
+        # Railway answers 404 'Application not found' while the relay deployment is down.
+        d = self.job_dir("diag.wait", {"seconds": 30})
+        (d / "alive").write_text("1")
+        sup = agent.Supervisor(self.cfg, self.cfg_path, FakeClient(fail=lambda p: "BROKER_EDGE_HTTP_404"))
+        with self.assertRaises(agent.TransferError):
+            sup.supervise(d)
+        self.assertFalse((d / "cancel").exists(), "runner must keep working")
+        agent.write_json(d / "result.json", {"outcome": "SUCCEEDED", "exitCode": 0, "output": "{}"})
+        with self.assertRaises(agent.TransferError):
+            sup.supervise(d)
+        self.assertTrue((d / "result.json").exists(), "result kept until the relay itself answers")
+
+    def test_client_tells_relay_errors_from_hosting_edge_errors(self):
+        import http.server
+        import threading
+        routes = {
+            "/v2/edge": (404, {"x-railway-fallback": "true"}, b'{"status":"error","code":404,"message":"Application not found","request_id":"x"}'),
+            "/v2/edge-json": (404, {}, b'{"status":"error","code":404,"message":"Application not found"}'),
+            "/v2/proxy": (502, {"content-type": "text/html"}, b"<html>Bad gateway</html>"),
+            "/v2/relay404": (404, {}, b'{"error":"NOT_FOUND"}'),
+            "/v2/relay409": (409, {}, b'{"error":"LEASE_MISMATCH"}'),
+            "/v2/too-large": (413, {}, b""),
+        }
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                code, headers, body = routes[self.path]
+                self.send_response(code)
+                for k, v in {"content-type": "application/json", **headers}.items():
+                    self.send_header(k, v)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client = agent.Client("http://127.0.0.1:%d" % server.server_address[1], "t" * 43, allow_test_loopback=True, timeout=5)
+        expect = {"/v2/edge": "BROKER_EDGE_HTTP_404", "/v2/edge-json": "BROKER_EDGE_HTTP_404", "/v2/proxy": "BROKER_EDGE_HTTP_502",
+                  "/v2/relay404": "BROKER_HTTP_404", "/v2/relay409": "BROKER_HTTP_409", "/v2/too-large": "BROKER_HTTP_413"}
+        for path, code in expect.items():
+            with self.assertRaises(agent.TransferError) as ctx:
+                client.request("POST", path, {})
+            self.assertEqual(str(ctx.exception), code, path)
+
     def test_lost_lease_signals_runner_to_stop(self):
         d = self.job_dir("diag.wait", {"seconds": 30})
         (d / "alive").write_text("1")
