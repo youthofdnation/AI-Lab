@@ -35,6 +35,7 @@ def paths():
         "state": base / "state",
         "logs": base / "logs",
         "plist": home / "Library" / "LaunchAgents" / (LABEL + ".plist"),
+        "prepared_plist": base / "prepared-agent.plist",
     }
 
 
@@ -154,7 +155,7 @@ def prepare(config_path, allow_mail=False):
     for f in FILES:
         if not (source / f).is_file():
             raise RuntimeError("MISSING_AGENT_FILE_" + f)
-    for path in (pp["base"], pp["agent"], pp["state"], pp["logs"], pp["plist"].parent):
+    for path in (pp["base"], pp["agent"], pp["state"], pp["logs"]):
         mkdir_private(path)
     for f in FILES:
         atomic_bytes(pp["agent"] / f, (source / f).read_bytes())
@@ -178,15 +179,19 @@ def prepare(config_path, allow_mail=False):
         "StandardErrorPath": str(pp["logs"] / "stderr.log"),
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
     }
-    atomic_bytes(pp["plist"], plistlib.dumps(plist))
+    # 'prepare' must NOT place a plist in ~/Library/LaunchAgents:
+    # launchd would otherwise start it automatically at the next login.
+    atomic_bytes(pp["prepared_plist"], plistlib.dumps(plist))
     return {"prepared": True, "device": cfg["device_id"], "launchd_started": False, "mail_enabled": allow_mail}
 
 
 def install(config_path, allow_mail=False):
     pp = paths()
     prepared = prepare(config_path, allow_mail=allow_mail)
+    mkdir_private(pp["plist"].parent)
     if loaded():
         subprocess.run(["launchctl", "bootout", launch_target()], check=True)
+    atomic_bytes(pp["plist"], pp["prepared_plist"].read_bytes())
     subprocess.run(["launchctl", "bootstrap", "gui/" + str(os.getuid()), str(pp["plist"])], check=True)
     subprocess.run(["launchctl", "kickstart", launch_target()], check=True)
     if not loaded():
