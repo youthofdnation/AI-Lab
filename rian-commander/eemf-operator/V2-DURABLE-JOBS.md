@@ -52,6 +52,8 @@ claimed in 6 h), `UNKNOWN_DO_NOT_RETRY` (lease lost). Nothing is ever re-queued.
 * **Duplicates**: request key idempotency, identical active spec returns the same
   job, one active job per lock group (one mail sync per PC), PC-side executed-id list.
 * **Cancel**: pending approval, queued job, or running job (agent stops at a safe point).
+* **Oversized result**: replaced once by `OUTPUT_TOO_LARGE` instead of retrying forever.
+* **Approval brute force**: 5 failures per client and 10 per job (spoofed `X-Forwarded-For` cannot bypass).
 
 ## ChatGPT tools (via the existing OAuth gateway)
 
@@ -66,7 +68,7 @@ There is **no approve tool**; approval always needs the owner password in the br
   index (last 10) and writes atomically. Different account → `ACCOUNT_MISMATCH`
   before any write. A legacy JSON index can seed the V2 index once (read-only).
 * `mail.search {query, limit ≤ 20}` — subject/sender/date/message id only.
-* `mail.read {messageId}` — exactly one message body (≤ 64 KB); **never pre-approvable**.
+* `mail.read {messageId}` — exactly one message body (≤ 64 KB, shrunk to fit the relay request limit); **never pre-approvable**; the encrypted body result is purged from the server 1 h after the read.
 * General fleet / owner file reads now deny `rian-mail-v2`, `rian-outlook-bridge`
   (fleet) and `.eml/.mbox/.msg/.pst/.ost` (relay, gateway, tenant policy).
 * No send, delete, move, flag or append code path exists.
@@ -98,10 +100,10 @@ artifact shrinks 97,965 → 89,178 bytes, leaving room for the V2 bridge under t
 
 | Suite | Result |
 |---|---|
-| `durable-long-jobs.test.mjs` | 13/13 |
-| `long-job-http.test.mjs` | 6/6 |
+| `durable-long-jobs.test.mjs` | 14/14 |
+| `long-job-http.test.mjs` | 7/7 |
 | `rian_mail_index.test.py` | 14/14 |
-| `rian-v2-agent.test.py` | 12/12 |
+| `rian-v2-agent.test.py` | 14/14 |
 | Existing Node suites (incl. crosslang, now Windows-safe) | 44/44 |
 | Existing Bun gateway/relay suites + `v2-bridge.test.ts` (Node shim locally; CI runs Bun) | 100/100 |
 | `v2-process-e2e.test.mjs` real processes | PASS (≈ 52 s) |

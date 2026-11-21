@@ -170,10 +170,13 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
     if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 다시 입력하세요.');
     const ip=(request.headers.get('x-forwarded-for')||'local').split(',')[0].trim().slice(0,60),key=preview.tenantId+'|'+ip;
+    // Per client and per job: a spoofed X-Forwarded-For cannot buy unlimited guesses for one job.
+    const jobKey='job|'+jobId;
     let f=failures.get(key);if(!f||f.until<nowS())f={count:0,until:nowS()+600};
-    if(f.count>=5)return page('<h1>암호 시도 횟수 초과</h1><p>10분 뒤 다시 시도하세요.</p>',429);
+    let g=failures.get(jobKey);if(!g||g.until<nowS())g={count:0,until:nowS()+900};
+    if(f.count>=5||g.count>=10)return page('<h1>암호 시도 횟수 초과</h1><p>잠시 뒤 다시 시도하세요.</p>',429);
     const approver=approverMap.get(preview.tenantId+'|'+preview.ownerId);
-    if(!passwordOK(approver,form.get('password')||'')){f.count++;failures.set(key,f);return approvalPage(preview,'승인 암호가 일치하지 않습니다.');}
+    if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다.');}
     failures.delete(key);
     let grant=null;
     if(form.get('standing')==='1'){

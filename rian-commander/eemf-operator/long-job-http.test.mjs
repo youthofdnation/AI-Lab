@@ -138,3 +138,12 @@ test('client reference digest matches the gateway formula and never carries the 
  assert.match(ref,/^[a-f0-9]{32}$/);
  assert.equal(ref,createHash('sha256').update('rian-v2-client|rian.client-id-example').digest('hex').slice(0,32));
 });
+
+test('spoofed X-Forwarded-For cannot bypass the per-job password attempt limit',async t=>{
+ const f=fixture(t);
+ const s=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'diag.wait',params:{seconds:4}});
+ const {ticket}=await f.approvePage(s.job_id);
+ const post=(ip,password)=>f.handler(new Request(ORIGIN+'/v2/approve/'+s.job_id,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:ORIGIN,'x-forwarded-for':ip},body:new URLSearchParams({ticket,password}).toString()}));
+ for(let i=0;i<10;i++)await post('10.0.0.'+i,'wrong-password-but-long-enough');
+ assert.equal((await post('10.9.9.9',f.pwA)).status,429);
+});

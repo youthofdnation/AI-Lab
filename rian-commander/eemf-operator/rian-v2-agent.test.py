@@ -20,8 +20,9 @@ class FakeClient:
 
     def request(self, method, path, payload=None):
         self.calls.append((path, payload))
-        if self.fail and self.fail(path):
-            raise agent.TransferError(self.fail(path))
+        code = self.fail(path) if self.fail else None
+        if code:
+            raise agent.TransferError(code)
         if path.endswith("/claim"):
             job, self.job = self.job, None
             return {"job": job}
@@ -137,6 +138,39 @@ class SupervisorTests(Base):
         sup = agent.Supervisor(self.cfg, self.cfg_path, FakeClient(fail=lambda p: "BROKER_HTTP_409" if p.endswith("/heartbeat") else None))
         sup.supervise(d)
         self.assertEqual((d / "cancel").read_text(), "LEASE_LOST")
+
+    def test_oversized_result_is_replaced_once_not_retried_forever(self):
+        d = self.job_dir("diag.wait", {"seconds": 1})
+        agent.write_json(d / "result.json", {"outcome": "SUCCEEDED", "exitCode": 0, "output": "x"})
+        calls = []
+
+        def fail(path):
+            calls.append(path)
+            return "BROKER_HTTP_413" if len(calls) == 1 else None
+        sup = agent.Supervisor(self.cfg, self.cfg_path, FakeClient(fail=fail))
+        sup.supervise(d)
+        self.assertIn("OUTPUT_TOO_LARGE", agent.read_json(d / "result.json")["output"])
+        client = FakeClient()
+        agent.Supervisor(self.cfg, self.cfg_path, client).supervise(d)
+        self.assertEqual(client.calls[-1][1]["outcome"], "FAILED")
+        self.assertFalse(d.exists())
+
+    def test_long_korean_body_fits_relay_request_limit(self):
+        cfg = {**self.cfg, "allowed_kinds": ["mail.read"]}
+        data = Path(cfg["mail"]["data_dir"])
+        store = agent.mail.MailStore(data)
+        mid = "d" * 40
+        store.root.mkdir(parents=True)
+        agent.mail.atomic_write(store.index_path, json.dumps({"version": 2, "account": "e" * 64, "messages": {mid: {"date": "2026-11-20T00:00:00Z", "from": "a", "subject": "s"}}}).encode())
+        store.put_body(mid, "한국어 본문 " * 12000)
+        d = self.job_dir("mail.read", {"messageId": mid})
+        agent.run_job(d, cfg)
+        result = agent.read_json(d / "result.json")
+        self.assertEqual(result["outcome"], "SUCCEEDED")
+        out = json.loads(result["output"])
+        self.assertTrue(out["truncated"])
+        wire = json.dumps({"leaseToken": "t" * 43, **result}, separators=(",", ":"))
+        self.assertLess(len(wire.encode()), 110_000, "complete() request must fit the staging body limit")
 
     def test_windows_safe_process_probe(self):
         import os

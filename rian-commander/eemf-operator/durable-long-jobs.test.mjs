@@ -229,3 +229,15 @@ test('v1 short-job restart semantics stay unchanged next to the V2 tables',t=>{
  f.close();q=f.open();
  assert.equal(f.store().db.prepare('PRAGMA user_version').get().user_version,2);
 });
+
+test('a selected mail body is purged from the server one hour after the read finished',t=>{
+ const f=fixture(t),q=f.open();
+ const j=start(q,f.actors.oa,'pcA','mail.read',{messageId:'e'.repeat(40)});
+ q.approve({approver:f.owner.A,jobId:j.job_id});
+ const {job}=q.claim({actor:f.actors.aa,deviceId:'pcA'});
+ q.complete({actor:f.actors.aa,jobId:job.jobId,leaseToken:job.leaseToken,outcome:'SUCCEEDED',exitCode:0,output:JSON.stringify({body:'synthetic-body-zzz'})});
+ assert.equal(q.get({actor:f.actors.oa,jobId:j.job_id}).result.body,'synthetic-body-zzz');
+ f.advance(3601);
+ const later=q.get({actor:f.actors.oa,jobId:j.job_id});
+ assert.equal(later.result,null);assert.equal(later.result_purged,true);assert.equal(later.state,'SUCCEEDED');
+});

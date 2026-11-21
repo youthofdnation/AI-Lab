@@ -77,16 +77,35 @@ jobs:
       - name: Gateway V2 bridge and existing gateway/relay policy tests
         working-directory: rian-commander/eemf-operator
         run: bun test v2-bridge.test.ts security.test.ts trusted-session.test.ts connection-preflight.test.ts
-      - name: Compact Railway Function payload stays under the limit and imports
+      - name: Build compact Railway Function payload with lossless UTF-8 compaction
         working-directory: rian-commander/eemf-operator
+        run: |
+          node compact-css.mjs
+          mkdir -p compact
+          bun build gateway.deploy.input.ts --target=bun --minify --outfile=compact/rian-owner-compact.js
+          node compact-utf8.mjs compact/rian-owner-compact.js | tee /tmp/utf8.json
+          echo "::notice::$(cat /tmp/utf8.json)"
+      - name: Compact payload stays under the Railway Function limit
+        working-directory: rian-commander/eemf-operator
+        run: |
+          n=$(stat -c %s compact/rian-owner-compact.js)
+          echo "::notice::RIAN_COMPACT_BYTES=$n MAX=98295"
+          [ "$n" -lt 98295 ] || { echo "::error::compact gateway too large: $n"; exit 1; }
+      - name: Compiled compact gateway imports with V2 bridge off and Korean text intact
+        working-directory: rian-commander/eemf-operator/compact
         env:
           RIAN_TEST_MODE: "1"
         run: |
-          node compact-css.mjs
-          bun build gateway.deploy.input.ts --target=bun --minify --outfile=/tmp/rian-owner-compact.js
-          node compact-utf8.mjs /tmp/rian-owner-compact.js
-          node -e 'const n=require("node:fs").statSync("/tmp/rian-owner-compact.js").size;console.log("RIAN_COMPACT_BYTES",n);if(n>=98295)process.exit(1)'
-          bun -e 'let m=await import("/tmp/rian-owner-compact.js");if(m.v2Ready!==false||typeof m.v2Rpc!=="function"||typeof m.devTaskParseScope!=="function")throw Error("compiled exports");if(!m.eemfFailureGuidance("EXECUTABLE_NOT_FOUND").includes("실행 파일"))throw Error("Korean text changed");console.log("COMPACT_UTF8_IMPORT_PASS")'
+          cat > import-check.mjs <<'JS'
+          const fail=m=>{console.log("::error::"+m);process.exit(1);};
+          let m;try{m=await import("./rian-owner-compact.js");}catch(e){fail("import failed: "+String(e?.message||e).slice(0,300));}
+          if(m.v2Ready!==false)fail("v2Ready should be false without config, got "+String(m.v2Ready));
+          if(typeof m.v2Rpc!=="function"||typeof m.devTaskParseScope!=="function")fail("compiled exports missing: "+Object.keys(m).join(","));
+          const text=m.eemfFailureGuidance("EXECUTABLE_NOT_FOUND");
+          if(text!=="실행 파일 및 PATH 확인 필요.")fail("Korean text changed: "+JSON.stringify(text));
+          console.log("::notice::COMPACT_UTF8_IMPORT_PASS");
+          JS
+          bun import-check.mjs
 
   staging-image:
     runs-on: ubuntu-latest

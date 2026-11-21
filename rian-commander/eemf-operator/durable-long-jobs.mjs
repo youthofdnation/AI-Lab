@@ -35,7 +35,7 @@ const ACTIVE=['AWAITING_APPROVAL','QUEUED','RUNNING','CANCEL_REQUESTED'];
 const RUNNING=['RUNNING','CANCEL_REQUESTED'];
 const OUTCOMES={SUCCEEDED:'SUCCEEDED',FAILED:'FAILED',CANCELLED:'CANCELLED',TIMED_OUT:'TIMED_OUT',INTERRUPTED:'INTERRUPTED'};
 const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','INTERRUPTED','APPROVAL_CANCELLED','APPROVAL_EXPIRED','EXPIRED','UNKNOWN_DO_NOT_RETRY']);
-export const LONG_JOB_LIMITS=Object.freeze({approvalTtlSeconds:900,queueTtlSeconds:21600,bootGraceSeconds:180,maxOpenPerDevice:5,maxResultBytes:100000,onlineSeconds:60,lateResultSeconds:86400,grantMaxMinutes:1440,grantMaxRuns:50});
+export const LONG_JOB_LIMITS=Object.freeze({approvalTtlSeconds:900,queueTtlSeconds:21600,bootGraceSeconds:180,maxOpenPerDevice:5,maxResultBytes:100000,onlineSeconds:60,lateResultSeconds:86400,grantMaxMinutes:1440,grantMaxRuns:50,mailBodyRetentionSeconds:3600});
 const placeholder=(n)=>Array(n).fill('?').join(',');
 
 /** Korean guidance shown to ChatGPT so it never asks the user to rerun PowerShell or to retry blindly. */
@@ -105,6 +105,7 @@ export class LongJobQueue {
       progress:j.progress_pct===null&&j.progress_stage===null?null:{percent:j.progress_pct,stage:j.progress_stage,done:j.progress_done,total:j.progress_total},
       outcome:j.outcome,exit_code:j.exit_code,
       result:withResult&&terminal?this.#result(j):null,
+      result_purged:terminal&&j.kind==='mail.read'&&j.result_cipher===null&&j.outcome==='SUCCEEDED',
       retry_automatically:false,guidance:longJobGuidance(j.state)};
   }
   #reapLocked(now,where='',args=[]){
@@ -116,6 +117,8 @@ export class LongJobQueue {
       if(done.changes===1){this.#store.audit(r.tenant,'system',r.id,'LONG_JOB_'+next,now);changed.push(r.id);}
     }
     db.prepare("UPDATE long_job_grants SET state='EXPIRED' WHERE state='ACTIVE' AND expires<=?").run(now);
+    // A selected mail body is kept (encrypted) only long enough for the owner to read it.
+    db.prepare("UPDATE long_jobs SET result_cipher=NULL,result_iv=NULL,result_tag=NULL WHERE kind='mail.read' AND result_cipher IS NOT NULL AND finished<=?").run(now-this.#limits.mailBodyRetentionSeconds);
     return changed.length;
   }
   reap(){const now=this.#now();return this.#store.transaction(()=>this.#reapLocked(now));}

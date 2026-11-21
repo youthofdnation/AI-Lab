@@ -43,6 +43,9 @@ Client, TransferError = _artifact.Client, _artifact.TransferError
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"}
 MAX_OUTPUT = 96 * 1024
+# The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
+# request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
+MAX_WIRE = 90_000
 ALIVE_STALE_SECONDS = 20
 
 
@@ -150,7 +153,11 @@ def run_job(job_dir, cfg):
             elif job["kind"] == "mail.search":
                 output = mail.search(data_dir, params["query"], params.get("limit", 20))
             else:
-                output = mail.read_message(data_dir, params["messageId"])
+                limit = mail.MAX_BODY_RETURN_BYTES
+                output = mail.read_message(data_dir, params["messageId"], max_bytes=limit)
+                while len(json.dumps(json.dumps(output, ensure_ascii=False))) > MAX_WIRE and limit > 1024:
+                    limit //= 2
+                    output = mail.read_message(data_dir, params["messageId"], max_bytes=limit)
         outcome, code = "SUCCEEDED", 0
     except mail.MailCancelled:
         outcome = "TIMED_OUT" if time.time() >= deadline else "CANCELLED"
@@ -160,7 +167,7 @@ def run_job(job_dir, cfg):
     except Exception as err:  # noqa: BLE001 - only the exception type is reported
         code, output = 1, {"ok": False, "error": "RUNNER_" + type(err).__name__.upper()}
     text = json.dumps(output, ensure_ascii=False)
-    if len(text.encode("utf-8")) > MAX_OUTPUT:
+    if len(text.encode("utf-8")) > MAX_OUTPUT or len(json.dumps(text)) > MAX_WIRE:
         text = json.dumps({"ok": False, "error": "OUTPUT_TOO_LARGE"})
         outcome, code = "FAILED", 3
     write_json(job_dir / "result.json", {"outcome": outcome, "exitCode": code, "output": text})
@@ -269,7 +276,13 @@ class Supervisor:
                 self.client.request("POST", path + "/complete", {"leaseToken": job["leaseToken"], **result})
                 log("JOB_REPORTED", job=job["jobId"], outcome=result["outcome"])
             except TransferError as err:
-                if str(err) in ("BROKER_HTTP_409", "BROKER_HTTP_404", "BROKER_HTTP_400"):
+                small = {"outcome": "FAILED", "exitCode": 3, "output": json.dumps({"ok": False, "error": "OUTPUT_TOO_LARGE"})}
+                if str(err) == "BROKER_HTTP_413" and result != small:
+                    # Never loop on an oversized result: replace it once with a small, explicit failure.
+                    write_json(job_dir / "result.json", small)
+                    log("JOB_RESULT_TOO_LARGE", job=job["jobId"])
+                    return
+                if str(err) in ("BROKER_HTTP_409", "BROKER_HTTP_404", "BROKER_HTTP_400", "BROKER_HTTP_413"):
                     log("JOB_RESULT_REFUSED", job=job["jobId"], code=str(err))
                 else:
                     raise  # relay unreachable: keep journal, retry later
