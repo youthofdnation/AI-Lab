@@ -101,6 +101,24 @@ class SupervisorTests(Base):
         self.assertIsNone(sup.claim())
         self.assertEqual(list(sup.active()), [])
 
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX permissions")
+    def test_journal_directories_are_owner_only(self):
+        import os
+        import stat
+        jobs = Path(self.cfg["state_dir"]) / "jobs"
+        jobs.mkdir(parents=True)
+        os.chmod(jobs, 0o755)  # as left by an older agent version
+        client = FakeClient({"jobId": JOB, "kind": "mail.sync", "params": {"days": 1, "maxMessages": 1}, "leaseToken": "t" * 43, "leaseSeconds": 45, "maxRuntimeSeconds": 60})
+        sup = agent.Supervisor(self.cfg, self.cfg_path, client)
+        self.assertEqual(sup.claim(), JOB)  # rejected locally: journal written, nothing executed
+        for path in (sup.state, sup.jobs, sup.jobs / JOB):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700, str(path))
+        lock = agent.single_instance(sup.state)
+        try:
+            self.assertEqual(stat.S_IMODE((sup.state / "supervisor.lock").stat().st_mode), 0o600)
+        finally:
+            lock.close()
+
     def test_relay_job_outside_local_allowlist_is_reported_failed_not_run(self):
         client = FakeClient({"jobId": JOB, "kind": "mail.sync", "params": {"days": 1, "maxMessages": 1}, "leaseToken": "t" * 43, "leaseSeconds": 45, "maxRuntimeSeconds": 60})
         sup = agent.Supervisor(self.cfg, self.cfg_path, client)
@@ -171,6 +189,23 @@ class SupervisorTests(Base):
         self.assertTrue(out["truncated"])
         wire = json.dumps({"leaseToken": "t" * 43, **result}, separators=(",", ":"))
         self.assertLess(len(wire.encode()), 110_000, "complete() request must fit the staging body limit")
+
+    def test_second_supervisor_on_same_state_dir_is_refused(self):
+        first = agent.single_instance(self.cfg["state_dir"])
+        self.assertIsNotNone(first)
+        try:
+            self.assertIsNone(agent.single_instance(self.cfg["state_dir"]))
+            # A separate process is refused before any token read or network call.
+            import subprocess
+            p = subprocess.run([sys.executable, str(HERE / "rian-v2-agent.py"), "run", "--config", str(self.cfg_path), "--max-seconds", "1"],
+                               capture_output=True, text=True, timeout=20)
+            self.assertEqual(p.returncode, agent.ALREADY_RUNNING_EXIT, p.stderr[-300:])
+            self.assertIn("AGENT_ALREADY_RUNNING", p.stdout)
+        finally:
+            first.close()
+        again = agent.single_instance(self.cfg["state_dir"])
+        self.assertIsNotNone(again)
+        again.close()
 
     def test_windows_safe_process_probe(self):
         import os
