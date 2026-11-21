@@ -50,7 +50,7 @@ test('Active job, unknown state, foreign provider and unapproved switching fail 
   assert.equal(handoff.state,'READY_FOR_CODEX');
   assert.throws(()=>planCodexHandoff(handoff),/OWNER_HANDOFF_APPROVAL_REQUIRED/);
   const plan=planCodexHandoff(handoff,{ownerApproved:true});
-  assert.deepEqual(plan.args,['exec','--json','--sandbox','workspace-write','--cd',repo,'-']);
+  assert.deepEqual(plan.args,['exec','--json','--sandbox','workspace-write','--cd',state.worktree,'-']);
   assert.equal(plan.command,'codex');
   assert.match(plan.stdin,/Run unit tests/);
   assert.equal(plan.stdin.includes('SHOULD_NOT_LEAK'),false);
