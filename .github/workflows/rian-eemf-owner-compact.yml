@@ -46,7 +46,7 @@ jobs:
         env:
           RIAN_TEST_MODE: "1"
         run: |
-          bun -e 'let m=await import("./gateway.deploy.min.js");if(typeof m.devTaskParseScope!=="function"||typeof m.devTaskAllowedCommand!=="function")throw Error("Compiled scope exports missing");let cfg=m.devTaskParseScope({cwd:"Documents",timeout:15,argv:["RIAN_DEV_SCOPE_V1","testowner","test-repo","3","a".repeat(40),"src/control.test.ts","b".repeat(40),"src/control.ts"]});if(cfg.repo!=="test-repo")throw Error("Compiled generic scope failed");console.log("COMPACT_GATEWAY_IMPORT_PASS")'
+          bun -e 'let m=await import("./gateway.deploy.min.js");if(typeof m.devTaskParseScope!=="function"||typeof m.devTaskAllowedCommand!=="function")throw Error("Compiled scope exports missing");let cfg=m.devTaskParseScope({cwd:"Documents",timeout:15,argv:["RIAN_DEV_SCOPE_V1","testowner","test-repo","3","a".repeat(40),"src/control.test.ts","b".repeat(40),"src/control.ts"]});if(cfg.repo!=="test-repo")throw Error("Compiled generic scope failed");if(m.eemfFailureGuidance("EXECUTABLE_NOT_FOUND")!=="실행 파일 및 PATH 확인 필요.")throw Error("Korean text corrupted in compact artifact");console.log("COMPACT_GATEWAY_IMPORT_PASS")'
       - name: Commit only reproducible minified Gateway artifact to the feature branch
         run: |
           git config user.name "github-actions[bot]"

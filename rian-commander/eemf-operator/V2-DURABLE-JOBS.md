@@ -91,10 +91,13 @@ No secret value belongs in GitHub, chat or logs.
 
 ## Railway Function size
 
-`compact-utf8.mjs` rewrites Bun's `\uXXXX` Hangul escapes (6 B) to UTF-8 (3 B)
-and refuses to write unless the change is byte-for-byte reversible. The current
-artifact shrinks 97,965 → 89,178 bytes, leaving room for the V2 bridge under the
-98,295-byte limit.
+With the V2 bridge the minified gateway is 99,061 bytes — over the 98,295-byte
+Railway Function limit. `compact-utf8.mjs` rewrites Bun's `\uXXXX` Hangul
+escapes (6 B) to UTF-8 (3 B) and refuses to write unless the change is
+byte-for-byte reversible (→ ~90.3 KB in CI). CI caught that Bun's `// @bun`
+pre-transpiled fast path decodes the file as Latin-1 (Korean became mojibake),
+so the script also removes that pragma and CI imports the result with Bun and
+compares the Korean guidance text exactly before it can pass.
 
 ## Verification on DESKTOP-1QGT8D6 (Windows 11, Node 24.11.1, Python 3.12.10)
 
