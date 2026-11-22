@@ -419,6 +419,22 @@ export async function runDetachedDispatch({manifestPath,grantWorktree,storeDir=d
   }
 }
 
+/** Are the five grant hooks present in the worktree's project-local (or project) Claude Code settings? */
+const GRANT_HOOK_EVENTS=['SessionStart','UserPromptSubmit','PostToolUse','PostToolUseFailure','StopFailure'];
+export function grantHooksInstalled(worktree){
+  const found=new Set(),files=[];
+  for(const name of ['settings.local.json','settings.json']){
+    let cfg;try{cfg=JSON.parse(readFileSync(join(worktree,'.claude',name),'utf8'));}catch{continue;}
+    files.push('.claude/'+name);
+    for(const ev of GRANT_HOOK_EVENTS)for(const group of Array.isArray(cfg?.hooks?.[ev])?cfg.hooks[ev]:[])
+      for(const h of Array.isArray(group?.hooks)?group.hooks:[])
+        if(h?.type==='command'&&Array.isArray(h.args)&&h.args.includes('hook-grant')&&
+          (ev!=='StopFailure'||!group.matcher||/(^|\|)rate_limit(\||$)/.test(group.matcher)))found.add(ev);
+  }
+  const missing=GRANT_HOOK_EVENTS.filter(e=>!found.has(e));
+  return {installed:missing.length===0,missing,files};
+}
+
 /** Read-only status of a project grant: scope, expiry, runs left, checkpoints, last handoff, Codex login. */
 export function grantHandoffStatus({worktree,storeDir=defaultStore(),codexCommand='codex',codexPrefixArgs=[],probeCodex=true,now=Date.now()}){
   const out={grant:null,lastCheckpoint:null,lastTrigger:null,lease:null,codex:null,blockers:[],warnings:[]};
@@ -436,6 +452,10 @@ export function grantHandoffStatus({worktree,storeDir=defaultStore(),codexComman
       if(used>=grant.maxRuns)out.blockers.push('GRANT_RUNS_EXHAUSTED');
     }catch(e){out.grant={state:e.message.replace(/^GRANT_/,''),error:e.message};out.blockers.push(e.message);}
   }else if(real)out.blockers.push('GRANT_NOT_FOUND');
+  if(real){
+    out.hooks=grantHooksInstalled(real);
+    if(!out.hooks.installed)out.warnings.push('HOOKS_NOT_INSTALLED: missing '+out.hooks.missing.join(', ')+' in the project-local Claude Code settings');
+  }
   if(real&&store){
     const key=hash(real),statusFile=join(store,'hook-status',key+'.json');
     if(existsSync(statusFile)){

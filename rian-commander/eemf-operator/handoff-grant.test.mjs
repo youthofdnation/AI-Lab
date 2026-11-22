@@ -124,3 +124,18 @@ function mkdtempGit(){
   execFileSync('git',['-C',d,'init','-q']);
   return d;
 }
+
+test('status reports whether the five grant hooks are installed in the worktree',async t=>{
+  const f=fixture(t);
+  await createProjectGrant({worktree:f.repo,storeDir:f.store,runs:1,days:1,runMinutes:1,confirm:f.confirm});
+  const before=grantHandoffStatus({worktree:f.repo,storeDir:f.store,probeCodex:false});
+  assert.equal(before.hooks.installed,false);assert.equal(before.hooks.missing.length,5);
+  assert.ok(before.warnings.some(w=>/HOOKS_NOT_INSTALLED/.test(w)));
+  const h=(m)=>[{...(m?{matcher:m}:{}),hooks:[{type:'command',command:'node',args:['/x/automatic-handoff-cli.mjs','hook-grant'],timeout:20}]}];
+  mkdirSync(join(f.repo,'.claude'));
+  writeFileSync(join(f.repo,'.claude','settings.local.json'),JSON.stringify({hooks:{SessionStart:h(),UserPromptSubmit:h(),PostToolUse:h(),PostToolUseFailure:h(),StopFailure:h('server_error')}}));
+  assert.deepEqual(grantHandoffStatus({worktree:f.repo,storeDir:f.store,probeCodex:false}).hooks.missing,['StopFailure'],'StopFailure must match rate_limit');
+  writeFileSync(join(f.repo,'.claude','settings.local.json'),JSON.stringify({hooks:{SessionStart:h(),UserPromptSubmit:h(),PostToolUse:h(),PostToolUseFailure:h(),StopFailure:h('rate_limit')}}));
+  const after=grantHandoffStatus({worktree:f.repo,storeDir:f.store,probeCodex:false});
+  assert.equal(after.hooks.installed,true);assert.deepEqual(after.hooks.files,['.claude/settings.local.json']);
+});
