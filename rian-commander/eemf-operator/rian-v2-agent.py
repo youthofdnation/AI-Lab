@@ -180,8 +180,14 @@ def run_job(job_dir, cfg):
         if job["kind"] in FLEET_KINDS:
             import rian_fleet_tasks as fleet  # only fleet installs ship it
             f = cfg.get("fleet") or {}
+            if f.get("low_priority", True):
+                fleet.lower_priority()  # the PC's own services win over fleet work
+            # Checked here, on the PC, at start: the relay's placement used an inventory that may be minutes old.
+            hold = fleet.memory_hold(job["kind"], int(f.get("min_available_mib", 1024)))
             try:
-                if job["kind"] == "fleet.inventory":
+                if hold:
+                    output = hold
+                elif job["kind"] == "fleet.inventory":
                     output = fleet.inventory(progress)
                 elif job["kind"] == "fleet.cpu_bench":
                     output = fleet.cpu_bench(params["chunk"], params["units"], progress, cancelled)

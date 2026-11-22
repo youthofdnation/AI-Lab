@@ -11,10 +11,15 @@
  *  - Private data only goes to devices with `privateDataApproved: true` AND `private` in dataClasses.
  *  - A GPU job is not recommended to a device whose GPU runs a protected process (e.g. a production
  *    llama-server or another project's runner) - the existing occupant keeps its GPU.
+ *  - A device keeps `ramReserveMiB` (default 2048) of available memory for its own services; work is
+ *    placed only into what is left. A device whose inventory reports memory pressure gets only light
+ *    work (at most LIGHT_RAM_MIB), so a PC that is already paging is not pushed further.
  * Recommendation uses the latest read-only inventory result per device, minus the resources
  * reserved by that device's active jobs. Stale or missing inventory means "do not place here".
  */
 export const DATA_CLASSES = Object.freeze(['public', 'synthetic', 'private']);
+export const LIGHT_RAM_MIB = 128;
+export const DEFAULT_RAM_RESERVE_MIB = 2048;
 const STATUS = new Set(['ACTIVE', 'QUARANTINED']);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const HOST = /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/;
@@ -60,6 +65,7 @@ export class FleetPolicy {
         id: x.id, hostname: x.hostname, role: typeof x.role === 'string' ? x.role.slice(0, 120) : '', status: x.status,
         maxConcurrent: int(x.maxConcurrent, 1, 16, 'FLEET_POLICY_DEVICE_INVALID'),
         gpuSlots: int(x.gpuSlots ?? 0, 0, 4, 'FLEET_POLICY_DEVICE_INVALID'),
+        ramReserveMiB: int(x.ramReserveMiB ?? DEFAULT_RAM_RESERVE_MIB, 0, 1 << 20, 'FLEET_POLICY_DEVICE_INVALID'),
         allowedKinds: Object.freeze(kinds), dataClasses: Object.freeze(dataClasses), privateDataApproved: privateOk,
         protectedGpuProcesses: Object.freeze(strList(x.protectedGpuProcesses || [], /^[A-Za-z0-9._-]{1,64}$/, 'FLEET_POLICY_DEVICE_INVALID', {allowEmpty: true}).map((p) => p.toLowerCase())),
         quarantineReason: x.status === 'QUARANTINED' ? String(x.quarantineReason || 'UNVERIFIED').slice(0, 200) : null,
@@ -98,7 +104,7 @@ export class FleetPolicy {
   }
   summary() {
     return {devices: [...this.#devices.values()].map((d) => ({id: d.id, role: d.role, status: d.status, maxConcurrent: d.maxConcurrent,
-      gpuSlots: d.gpuSlots, allowedKinds: this.deviceKinds().get(d.id) || [], dataClasses: d.dataClasses,
+      gpuSlots: d.gpuSlots, ramReserveMiB: d.ramReserveMiB, allowedKinds: this.deviceKinds().get(d.id) || [], dataClasses: d.dataClasses,
       quarantineReason: d.quarantineReason})), denylistEntries: this.#deniedHosts.size + this.#deniedIds.size};
   }
 }
@@ -107,6 +113,9 @@ export class FleetPolicy {
  * Rank devices for one job. `inventories`: Map deviceId -> {captured (unix s), snapshot}; `active`:
  * [{device, state, needsGpu, cpu, ramMiB, vramMiB, workUnits}] reserved by not-yet-terminal jobs.
  * Every excluded device carries the first reason it failed, so the owner can see why work did not go there.
+ * Memory: INSUFFICIENT_RAM when the job does not fit in available memory at all, MEMORY_PRESSURE when the
+ * device reports pressure and the job is heavier than LIGHT_RAM_MIB, MEMORY_RESERVE when the job would
+ * eat into the memory the device keeps for its own services.
  *
  * placement 'throughput' (default when `throughput` has samples): each device's measured seconds per
  * work unit for this kind (median of its finished jobs) gives an expected finish time
@@ -142,9 +151,12 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
     const cores = s.cpu?.logical || 0, load = Math.min(100, Math.max(0, s.cpu?.load_pct ?? 100));
     const freeCores = cores * (1 - load / 100) - occupying.reduce((a, x) => a + (x.cpu || 1), 0);
     const freeRam = (s.ram?.available_mib || 0) - occupying.reduce((a, x) => a + (x.ramMiB || 0), 0);
+    const spareRam = freeRam - d.ramReserveMiB;
     const idleSlot = mine.length < d.maxConcurrent;
     if (idleSlot && freeCores < r.cpu - 0.25) { excluded.push({device: id, reason: 'INSUFFICIENT_CPU'}); continue; }
     if (freeRam < r.ramMiB) { excluded.push({device: id, reason: 'INSUFFICIENT_RAM'}); continue; }
+    if (s.ram?.pressure === 'high' && r.ramMiB > LIGHT_RAM_MIB) { excluded.push({device: id, reason: 'MEMORY_PRESSURE'}); continue; }
+    if (spareRam < r.ramMiB) { excluded.push({device: id, reason: 'MEMORY_RESERVE'}); continue; }
     let freeVram = null;
     if (r.needsGpu) {
       const gpus = Array.isArray(s.gpus) ? s.gpus : [];
@@ -156,7 +168,7 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
       freeVram = (g.vram_total_mib || 0) - (g.vram_used_mib || 0) - mine.reduce((a, x) => a + (x.vramMiB || 0), 0);
       if (freeVram < r.vramMiB) { excluded.push({device: id, reason: 'INSUFFICIENT_VRAM'}); continue; }
     }
-    const base = {device: id, free: {cores: Math.round(freeCores * 10) / 10, ram_mib: Math.round(freeRam), vram_mib: freeVram},
+    const base = {device: id, free: {cores: Math.round(freeCores * 10) / 10, ram_mib: Math.round(spareRam), vram_mib: freeVram},
       open: mine.length, maxConcurrent: d.maxConcurrent};
     if (mode === 'throughput') {
       const backlog = mine.reduce((a, x) => a + (x.workUnits || 1), 0);
@@ -165,7 +177,7 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
         finish_estimate_s: sample ? Math.round((backlog / d.maxConcurrent + r.workUnits) * unitS * 10) / 10 : null});
     } else {
       // Headroom score: free cores weigh most for CPU work, free VRAM for GPU work.
-      candidates.push({...base, basis: 'cores', score: Math.round((r.needsGpu ? freeVram / 1024 : 0) * 10 + freeCores * 5 + freeRam / 4096)});
+      candidates.push({...base, basis: 'cores', score: Math.round((r.needsGpu ? freeVram / 1024 : 0) * 10 + freeCores * 5 + spareRam / 4096)});
     }
   }
   if (mode === 'throughput') {

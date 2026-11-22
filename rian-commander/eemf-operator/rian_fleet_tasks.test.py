@@ -187,5 +187,62 @@ class TestShard(unittest.TestCase):
                 A.validate_local("dev.test_shard", bad, c)
 
 
+
+class Memory(unittest.TestCase):
+    # Measured 2026-11-22 on a 32 GB fleet PC: under 1 GB available while its own services ran.
+    TIGHT = {"total_mib": 32133, "available_mib": 962}
+
+    def test_pressure_rule_reads_every_os_signal(self):
+        self.assertEqual(F.classify_pressure(32133, 962), ("high", ["LOW_AVAILABLE"]))
+        self.assertEqual(F.classify_pressure(32108, 8110, commit_pct=80.2), ("normal", []))        # another 32 GB PC the same day
+        self.assertEqual(F.classify_pressure(32108, 8110, commit_pct=93.0)[1], ["COMMIT_HIGH"])
+        self.assertEqual(F.classify_pressure(65536, 20000, os_level=2)[1], ["OS_PRESSURE"])
+        self.assertEqual(F.classify_pressure(16000, 9000, psi_some_avg10=12.5)[1], ["PSI_STALLS"])
+        self.assertEqual(F.classify_pressure(4096, 900)[0], "high")                                 # floor is at least 1 GiB
+
+    def test_this_pc_measures_itself(self):
+        st = F.memory_state()
+        self.assertIn(st["pressure"], ("normal", "high"))
+        self.assertGreater(st["total_mib"], 0)
+        self.assertTrue(0 < st["available_mib"] <= st["total_mib"])
+
+    def test_short_of_memory_only_light_work_starts_and_inventory_always_runs(self):
+        st = dict(self.TIGHT)
+        st["pressure"], st["pressure_reasons"] = F.classify_pressure(st["total_mib"], st["available_mib"])
+        self.assertIsNone(F.memory_hold("fleet.inventory", 4096, st))
+        self.assertEqual(F.memory_hold("fleet.cpu_bench", 1024, st)["error"], "LOCAL_MEMORY_HOLD")
+        self.assertIsNone(F.memory_hold("fleet.cpu_bench", 512, st))                               # light work, owner's floor
+        for kind in ("fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"):
+            self.assertEqual(F.memory_hold(kind, 512, st)["error"], "LOCAL_MEMORY_PRESSURE", kind)
+        self.assertEqual(F.memory_hold("fleet.cpu_bench", 512, {"available_mib": None})["error"], "LOCAL_MEMORY_UNKNOWN")
+        self.assertIsNone(F.memory_hold("dev.test_shard", 1024, {"total_mib": 32108, "available_mib": 8110, "pressure": "normal"}))
+
+    def test_fleet_work_runs_below_normal_priority(self):
+        import subprocess
+        probe = ("import os,sys,ctypes; sys.path.insert(0, sys.argv[1]); import rian_fleet_tasks as F; ok = F.lower_priority()\n"
+                 "if F.WIN:\n k = ctypes.WinDLL('kernel32'); k.GetCurrentProcess.restype = ctypes.c_void_p\n"
+                 " k.GetPriorityClass.argtypes = [ctypes.c_void_p]; print(ok, k.GetPriorityClass(k.GetCurrentProcess()) == 0x4000)\n"
+                 "else:\n print(ok, os.nice(0) >= 10)\n")
+        out = subprocess.run([sys.executable, "-c", probe, str(HERE)], capture_output=True, text=True, timeout=60).stdout.split()
+        self.assertEqual(out, ["True", "True"])
+
+    def test_the_agent_refuses_before_any_work_and_says_why(self):
+        import time
+        d = Path(tempfile.mkdtemp())
+        A.write_json(d / "job.json", {"jobId": "j1", "kind": "fleet.cpu_bench", "params": {"chunk": 1, "units": 1},
+                                      "runDeadline": time.time() + 60})
+        cfg = {"allowed_kinds": ["fleet.cpu_bench"], "fleet": {"denied_hosts": ["SOME-OTHER-PC"], "low_priority": False,
+                                                               "min_available_mib": 1 << 30}}
+        A.run_job(d, cfg)
+        r = A.read_json(d / "result.json")
+        out = json.loads(r["output"])
+        self.assertEqual((r["outcome"], out["error"]), ("FAILED", "LOCAL_MEMORY_HOLD"))
+        self.assertNotIn("digest", out)                                   # nothing was computed
+        self.assertEqual(out["memory"]["min_available_mib"], 1 << 30)
+        cfg["fleet"]["min_available_mib"] = 0
+        A.run_job(d, cfg)
+        self.assertEqual(A.read_json(d / "result.json")["outcome"], "SUCCEEDED")
+
+
 if __name__ == "__main__":
     unittest.main()

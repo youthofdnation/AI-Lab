@@ -9,7 +9,8 @@ import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds,FLEET_KIND_NAMES} from './long-job-kinds.mjs';
-import {FleetPolicy,recommend} from './fleet-policy.mjs';
+import {FleetPolicy,recommend,LIGHT_RAM_MIB} from './fleet-policy.mjs';
+import {fleetRecommend} from './fleet-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const KINDS=['fleet.inventory','fleet.cpu_bench','fleet.blob_verify'];
@@ -107,4 +108,37 @@ test('test-shard kind: suite name and full commit only, the shard must exist',()
  assert.deepEqual(k.canonical('fast','dev.test_shard',{suite:'commander-node',commit:c,shard:1,shards:3}).params,{commit:c,shard:1,shards:3,suite:'commander-node'});
  for(const bad of [{suite:'x;rm',commit:c,shard:0,shards:1},{suite:'ok',commit:'HEAD',shard:0,shards:1},{suite:'ok',commit:c,shard:3,shards:3}])
   assert.throws(()=>k.canonical('fast','dev.test_shard',bad),/INVALID_PARAMS/);
+});
+
+test('a PC short of memory gets only light work and keeps its reserve (numbers measured 2026-11-22)',()=>{
+ const K=['fleet.inventory','fleet.cpu_bench','fleet.blob_verify','dev.test_shard'];
+ const p=new FleetPolicy({version:1,denylist:{hostnames:['DENIED-PC']},devices:[
+  {id:'tight',hostname:'TIGHT',status:'ACTIVE',maxConcurrent:2,ramReserveMiB:512,allowedKinds:K,dataClasses:['public','synthetic']},
+  {id:'roomy',hostname:'ROOMY',status:'ACTIVE',maxConcurrent:4,allowedKinds:K,dataClasses:['public','synthetic']},
+  {id:'small',hostname:'SMALL',status:'ACTIVE',maxConcurrent:4,allowedKinds:K,dataClasses:['public','synthetic']}]},{knownKinds:new Set(FLEET_KIND_NAMES)});
+ const at=(available_mib,total_mib,pressure)=>({captured:990,snapshot:{cpu:{logical:20,load_pct:5},ram:{available_mib,total_mib,pressure},gpus:[]}});
+ const inventories=new Map([['tight',at(962,32133,'high')],['roomy',at(8110,32108,'normal')],['small',at(2200,8192,'normal')]]);
+ const why=(kind,ramMiB)=>{const r=recommend(p,{kind,ramMiB},inventories,[],1000,{placement:'cores'});
+  return {to:r.candidates.map(c=>c.device),...Object.fromEntries(r.excluded.map(e=>[e.device,e.reason]))};};
+ assert.deepEqual(why('fleet.cpu_bench',64),{to:['roomy','small','tight']});              // light: 962-512 left >= 64
+ assert.deepEqual(why('fleet.blob_verify',256),{to:['roomy'],tight:'MEMORY_PRESSURE',small:'MEMORY_RESERVE'});
+ assert.deepEqual(why('dev.test_shard',2048),{to:['roomy'],tight:'INSUFFICIENT_RAM',small:'MEMORY_RESERVE'});
+ assert.equal(LIGHT_RAM_MIB,128);
+ // a job already running on the tight PC counts against what is left
+ const r=recommend(p,{kind:'fleet.cpu_bench',ramMiB:64},inventories,[{device:'tight',state:'RUNNING',cpu:1,ramMiB:420}],1000,{placement:'cores'});
+ assert.equal(r.excluded.find(e=>e.device==='tight').reason,'MEMORY_RESERVE');
+ assert.equal(p.summary().devices.find(d=>d.id==='roomy').ramReserveMiB,2048);
+ assert.throws(()=>new FleetPolicy({version:1,denylist:{hostnames:['DENIED-PC']},devices:[{id:'x',hostname:'X',status:'ACTIVE',maxConcurrent:1,
+  ramReserveMiB:-1,allowedKinds:['fleet.inventory'],dataClasses:['synthetic']}]}),/FLEET_POLICY_DEVICE_INVALID/);
+});
+
+test("a kind's memory need is the floor: a caller cannot understate it to squeeze work onto a PC",t=>{
+ const f=fixture(t),q=f.open();
+ const j=q.request({actor:f.a.owner,deviceId:'slow',kind:'fleet.blob_verify',params:{store:'ok-store',shard:0,shards:1},fleet:{ramMiB:1}});
+ assert.equal(q.fleetActive(f.a.owner).find(x=>x.job_id===j.job_id).ramMiB,256);
+ const big=q.request({actor:f.a.owner,deviceId:'slow',kind:'fleet.cpu_bench',params:{chunk:1,units:1},fleet:{ramMiB:4096}});
+ assert.equal(q.fleetActive(f.a.owner).find(x=>x.job_id===big.job_id).ramMiB,4096);           // asking for more is fine
+ assert.equal(fleetRecommend(q,f.a.owner,{kind:'fleet.blob_verify',ramMiB:1},1000).requirements.ramMiB,256);
+ assert.equal(fleetRecommend(q,f.a.owner,{kind:'fleet.cpu_bench'},1000).requirements.ramMiB,64);
+ assert.throws(()=>fleetRecommend(q,f.a.owner,{kind:'fleet.cpu_bench',ramMiB:'5'},1000),/INVALID_REQUIREMENTS/);
 });

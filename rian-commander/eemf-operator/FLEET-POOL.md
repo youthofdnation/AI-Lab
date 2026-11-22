@@ -74,3 +74,26 @@ The first "1.5x" of the 16-unit run compared against the no-queue baseline; agai
 two-PC gain for CPU units is 13 %, bounded by the second PC being ~3x slower per unit. Verifying a store
 where it lives moved only job JSON over the network; pulling the second PC's 16.9 GB to one PC at the
 measured 6.6 MB/s would have taken ~44 min of transfer alone. All 266 jobs of the run: dispatched once each.
+
+## Follow-up: memory guard for PCs that serve other work
+
+A fleet PC may already run its own services (a model server, another project's containers). One such PC
+was measured with under 1 GB of 32 GB available; sending it ordinary work would push those services into
+paging. The fleet therefore treats memory as the PC's first, not the fleet's:
+
+- **Kinds declare their memory need** (`ramMiB`: inventory 128, cpu_bench 64, blob_verify 256,
+  test_shard 2048, gpu_probe 512, qlora_probe 6144). It is a floor: a request or recommendation that
+  states less is raised to it, more is kept.
+- **Inventory reports pressure** (`ram.pressure` normal/high with reasons): available memory below
+  max(1 GiB, 5 %) on every OS, plus committed memory >= 90 % of the limit (Windows), the kernel pressure
+  level (macOS) or memory stall time (Linux PSI).
+- **Placement** (`ramReserveMiB` per PC in the policy, default 2048): `INSUFFICIENT_RAM` when the job does
+  not fit at all, `MEMORY_PRESSURE` when the PC reports pressure and the job is heavier than 128 MiB,
+  `MEMORY_RESERVE` when the job would eat into the memory the PC keeps for its own services. Jobs already
+  running on the PC count against what is left.
+- **The PC checks again at start** (`fleet.min_available_mib`, default 1024; inventory always runs): below
+  the floor nothing else starts (`LOCAL_MEMORY_HOLD`), under pressure only inventory and cpu_bench start
+  (`LOCAL_MEMORY_PRESSURE`). The refusal happens before any work and reports the measurement, so the job
+  is FAILED-not-started and can be requested again.
+- **Fleet work runs below normal priority** (`fleet.low_priority`, default true; Windows
+  BELOW_NORMAL_PRIORITY_CLASS, `nice 10` elsewhere), inherited by the test and probe child processes.

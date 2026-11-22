@@ -145,7 +145,9 @@ export class LongJobQueue {
     this.#fleet.assertDispatchable(deviceId,kind,{needsGpu,dataClass});
     // Work units: the kind knows its size (e.g. hash units); the caller may only state it for kinds that do not.
     const units=typeof spec.workUnits==='function'?spec.workUnits(params):n(r.workUnits,1,1,1_000_000);
-    return {priority:n(r.priority,0,-100,100),needsGpu,cpu:n(r.cpu,1,1,256),ramMiB:n(r.ramMiB,0,0,1<<20),vramMiB:n(r.vramMiB,needsGpu?512:0,0,1<<18),dataClass,workUnits:units};
+    // Memory: the kind's own need is the floor, so a caller cannot squeeze heavy work onto a PC by understating it.
+    const ramMiB=Math.max(spec.ramMiB||0,n(r.ramMiB,0,0,1<<20));
+    return {priority:n(r.priority,0,-100,100),needsGpu,cpu:n(r.cpu,1,1,256),ramMiB,vramMiB:n(r.vramMiB,needsGpu?512:0,0,1<<18),dataClass,workUnits:units};
   }
   /** Not-yet-terminal fleet jobs with what they reserve (for placement). */
   fleetActive(actor){

@@ -10,7 +10,12 @@ reads file contents, credentials or process command lines, kills a process, or c
                          that the GPU memory came back (gpu_release)
   youngmin.qlora_probe   checks the QLoRA stack first; measures only when this PC's own config sets
                          fleet.qlora_measure=true (random weights + synthetic tokens, no data files)
+
+memory_state() is what inventory reports and what the agent checks before it starts fleet work: a PC
+that is short of memory (or already under OS memory pressure) is not given heavy work, and fleet work
+runs below normal priority so the PC's own services (a production model server, other projects) win.
 """
+import ctypes
 import hashlib
 import json
 import os
@@ -176,29 +181,18 @@ def inventory(progress):
         p = p[0] if isinstance(p, list) else p
         if p:
             cpu.update(model=p.get("Name"), physical=p.get("NumberOfCores"), load_pct=_num(p.get("LoadPercentage")))
-        m = _ps("Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory")
-        ram = {"total_mib": round(_num(m["TotalVisibleMemorySize"]) / 1024), "available_mib": round(_num(m["FreePhysicalMemory"]) / 1024)} if m else {}
     elif not MAC:  # Linux (CI runners, future nodes)
         info = Path("/proc/cpuinfo").read_text("utf-8", "replace") if Path("/proc/cpuinfo").exists() else ""
         model = re.search(r"^model name\s*:\s*(.+)$", info, re.M)
         cpu.update(model=model.group(1).strip() if model else None,
                    load_pct=round(min(100.0, 100.0 * os.getloadavg()[0] / max(1, os.cpu_count() or 1)), 1))
-        mem = Path("/proc/meminfo").read_text("utf-8", "replace") if Path("/proc/meminfo").exists() else ""
-        kib = {k: int(v) for k, v in re.findall(r"^(\w+):\s+(\d+) kB", mem, re.M)}
-        ram = {"total_mib": round(kib.get("MemTotal", 0) / 1024), "available_mib": round(kib.get("MemAvailable", 0) / 1024)}
     else:
         cpu.update(model=(_run(["sysctl", "-n", "machdep.cpu.brand_string"]) or "").strip(),
                    physical=int((_run(["sysctl", "-n", "hw.physicalcpu"]) or "0").strip() or 0))
         top = _run(["top", "-l", "1", "-n", "0"]) or ""
         idle = re.search(r"([\d.]+)% idle", top)
         cpu["load_pct"] = round(100 - float(idle.group(1)), 1) if idle else None
-        total = int((_run(["sysctl", "-n", "hw.memsize"]) or "0").strip() or 0)
-        vm = _run(["vm_stat"]) or ""
-        page = int((re.search(r"page size of (\d+)", vm) or [0, 16384])[1])
-        free_pages = sum(int(x) for k in ("Pages free", "Pages inactive", "Pages speculative")
-                         for x in re.findall(k + r":\s+(\d+)", vm))
-        ram = {"total_mib": round(total / 2**20), "available_mib": round(free_pages * page / 2**20)}
-    snap["cpu"], snap["ram"] = cpu, ram
+    snap["cpu"], snap["ram"] = cpu, memory_state()
     progress(stage="gpu", percent=35)
     g = nvidia_gpus()
     if g:
@@ -224,6 +218,105 @@ def inventory(progress):
         n = _ps("Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name,LinkSpeed")
         snap["network"] = [{"name": x.get("Name"), "link": x.get("LinkSpeed")} for x in (n if isinstance(n, list) else [n] if n else [])]
     return {"ok": True, "snapshot": snap}
+
+
+# ------------------------------------------------------------------ memory
+LIGHT_KINDS = frozenset({"fleet.inventory", "fleet.cpu_bench"})   # at most ~128 MiB, no files
+
+
+def classify_pressure(total_mib, available_mib, commit_pct=None, os_level=None, psi_some_avg10=None):
+    """Pure rule, the same on every OS: 'high' when any signal says the PC is short of memory."""
+    reasons = []
+    if available_mib is not None and total_mib and available_mib < max(1024, 0.05 * total_mib):
+        reasons.append("LOW_AVAILABLE")
+    if commit_pct is not None and commit_pct >= 90:
+        reasons.append("COMMIT_HIGH")            # Windows: committed memory near the page-file limit
+    if os_level is not None and os_level >= 2:
+        reasons.append("OS_PRESSURE")            # macOS kern.memorystatus_vm_pressure_level: 2 warn, 4 critical
+    if psi_some_avg10 is not None and psi_some_avg10 >= 10:
+        reasons.append("PSI_STALLS")             # Linux: tasks stalled on memory >= 10% of the last 10 s
+    return ("high" if reasons else "normal"), reasons
+
+
+def memory_state():
+    """{total_mib, available_mib, commit_pct?, swap_used_mib?, os_level?, psi_some_avg10?, pressure, pressure_reasons}"""
+    out = {"total_mib": None, "available_mib": None}
+    try:
+        if WIN:
+            class MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MemStatus()
+            m.dwLength = ctypes.sizeof(MemStatus)
+            if ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(m)):
+                out.update(total_mib=round(m.ullTotalPhys / 2**20), available_mib=round(m.ullAvailPhys / 2**20))
+                if m.ullTotalPageFile:
+                    out["commit_pct"] = round(100.0 * (1 - m.ullAvailPageFile / m.ullTotalPageFile), 1)
+        elif MAC:
+            total = int((_run(["sysctl", "-n", "hw.memsize"]) or "0").strip() or 0)
+            vm = _run(["vm_stat"]) or ""
+            page = int((re.search(r"page size of (\d+)", vm) or [0, 16384])[1])
+            free_pages = sum(int(x) for k in ("Pages free", "Pages inactive", "Pages speculative")
+                             for x in re.findall(k + r":\s+(\d+)", vm))
+            out.update(total_mib=round(total / 2**20), available_mib=round(free_pages * page / 2**20))
+            level = (_run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]) or "").strip()
+            if level.isdigit():
+                out["os_level"] = int(level)
+            swap = re.search(r"used = ([\d.]+)M", _run(["sysctl", "-n", "vm.swapusage"]) or "")
+            if swap:
+                out["swap_used_mib"] = round(float(swap.group(1)))
+        else:
+            mem = Path("/proc/meminfo").read_text("utf-8", "replace") if Path("/proc/meminfo").exists() else ""
+            kib = {k: int(v) for k, v in re.findall(r"^(\w+):\s+(\d+) kB", mem, re.M)}
+            out.update(total_mib=round(kib.get("MemTotal", 0) / 1024), available_mib=round(kib.get("MemAvailable", 0) / 1024))
+            if "SwapTotal" in kib:
+                out["swap_used_mib"] = round((kib["SwapTotal"] - kib.get("SwapFree", 0)) / 1024)
+            psi = Path("/proc/pressure/memory")
+            hit = re.search(r"^some avg10=([\d.]+)", psi.read_text("utf-8", "replace"), re.M) if psi.exists() else None
+            if hit:
+                out["psi_some_avg10"] = float(hit.group(1))
+    except (OSError, ValueError, AttributeError):
+        pass
+    out["pressure"], out["pressure_reasons"] = classify_pressure(out["total_mib"], out["available_mib"], out.get("commit_pct"),
+                                                                 out.get("os_level"), out.get("psi_some_avg10"))
+    if not out["available_mib"]:
+        out["pressure"], out["pressure_reasons"] = "unknown", ["NOT_MEASURED"]
+    return out
+
+
+def memory_hold(kind, min_available_mib, state=None):
+    """None when fleet work of this kind may start now, else the refusal (with the measurement).
+
+    Inventory always runs (it is how the owner sees the PC). Below `min_available_mib` nothing else
+    starts; under pressure only LIGHT_KINDS start. An unmeasurable PC is treated as short of memory."""
+    if kind == "fleet.inventory":
+        return None
+    st = state if state is not None else memory_state()
+    seen = {k: st.get(k) for k in ("available_mib", "total_mib", "pressure", "pressure_reasons")}
+    if not st.get("available_mib"):
+        return {"ok": False, "error": "LOCAL_MEMORY_UNKNOWN", "memory": seen}
+    if st["available_mib"] < min_available_mib:
+        return {"ok": False, "error": "LOCAL_MEMORY_HOLD", "memory": dict(seen, min_available_mib=min_available_mib)}
+    if st.get("pressure") == "high" and kind not in LIGHT_KINDS:
+        return {"ok": False, "error": "LOCAL_MEMORY_PRESSURE", "memory": seen}
+    return None
+
+
+def lower_priority():
+    """Run this process (and the children it starts) below normal priority. Returns True on success."""
+    try:
+        if WIN:
+            k = ctypes.WinDLL("kernel32")
+            k.GetCurrentProcess.restype = ctypes.c_void_p
+            k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            return bool(k.SetPriorityClass(k.GetCurrentProcess(), 0x00004000))   # BELOW_NORMAL_PRIORITY_CLASS
+        os.nice(10)
+        return True
+    except (OSError, AttributeError):
+        return False
 
 
 # ------------------------------------------------------------------ CPU bench

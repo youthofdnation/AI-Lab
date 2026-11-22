@@ -34,7 +34,10 @@ function inventories(queue, actor) {
 export function fleetRecommend(queue, actor, args, now) {
   const spec = queue.kinds.get(args.kind);
   const {placement, ...req} = args;
-  return recommend(queue.fleet, {...req, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now,
+  if (req.ramMiB !== undefined && !Number.isInteger(req.ramMiB)) throw Error('INVALID_REQUIREMENTS');
+  // The kind's own memory need is the floor, as at request time.
+  const ramMiB = Math.max(spec.ramMiB || 0, req.ramMiB ?? 0) || undefined;
+  return recommend(queue.fleet, {...req, ramMiB, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now,
     {throughput: queue.fleetThroughput({actor, kind: args.kind}), placement: placement || null, maxOpenPerDevice: queue.limits.maxOpenPerDevice});
 }
 
