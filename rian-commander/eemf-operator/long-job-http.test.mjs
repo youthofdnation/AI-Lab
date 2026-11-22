@@ -67,6 +67,21 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  assert.equal(anon.status,401,'anonymous MCP call rejected');
 });
 
+test('real browsers can submit the approval form (Origin is not nulled by the referrer policy)',async t=>{
+ const f=fixture(t);
+ const s=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:1,maxMessages:1}});
+ const get=await f.handler(new Request(ORIGIN+'/v2/approve/'+s.job_id));
+ // Fetch spec: a POST under referrer policy "no-referrer" carries "Origin: null".
+ assert.equal(get.headers.get('referrer-policy'),'same-origin');
+ const ticket=/name="ticket" value="([^"]+)"/.exec(await get.text())[1];
+ const post=(headers,password=f.pwA)=>f.handler(new Request(ORIGIN+'/v2/approve/'+s.job_id,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...headers},body:new URLSearchParams({ticket,password})}));
+ assert.equal((await post({origin:'null','sec-fetch-site':'cross-site'})).status,403);
+ assert.equal((await post({origin:'null'})).status,403,'null origin without browser fetch metadata stays blocked');
+ assert.equal((await post({origin:'https://evil.example','sec-fetch-site':'same-origin'})).status,403);
+ const ok=await post({origin:'null','sec-fetch-site':'same-origin'});
+ assert.equal(ok.status,200);assert.match(await ok.text(),/승인 완료/);
+});
+
 test('approval page: exact scope, origin check, CSRF ticket, wrong password, then queued',async t=>{
  const f=fixture(t);
  const s=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:1000}});

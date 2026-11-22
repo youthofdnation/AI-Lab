@@ -94,7 +94,9 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     return timingSafeEqual(scryptSync(password,Buffer.from(approver.salt,'hex'),32),Buffer.from(approver.hash,'hex'));
   };
   const page=(body,status=200)=>new Response('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RIAN Commander V2 승인</title><style>body{background:#0b1423;color:#e3ebfa;font:16px system-ui;margin:0}main{max-width:560px;margin:6vh auto;padding:28px;background:#172840;border:1px solid #334965;border-radius:16px}li,p{color:#c4d0e3;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;font:inherit}button{background:#367afa;color:#fff;border:0;margin-top:16px;font-weight:600}fieldset{border:1px solid #334965;border-radius:10px;margin-top:14px}code{overflow-wrap:anywhere}</style><main>'+body+'</main></html>',
-    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+    // 'same-origin', not 'no-referrer': with no-referrer browsers send "Origin: null" on the
+    // approval form POST (Fetch spec), so the Origin check below rejected every real browser.
+    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
   const approvalUrl=id=>publicOrigin+'/v2/approve/'+id;
   const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:approvalUrl(s.job_id)}:s;
 
@@ -163,7 +165,10 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
 
   async function approve(request,jobId){
     const origin=request.headers.get('origin');
-    if(origin!==publicOrigin)return page('<h1>다른 출처의 승인 요청 차단</h1>',403);
+    // A browser that still sends "Origin: null" is accepted only with its own same-origin fetch
+    // metadata (Sec-Fetch-Site cannot be set by page scripts). The HMAC ticket and password still apply.
+    const sameOriginBrowser=origin==='null'&&request.headers.get('sec-fetch-site')==='same-origin';
+    if(origin!==publicOrigin&&!sameOriginBrowser)return page('<h1>다른 출처의 승인 요청 차단</h1>',403);
     if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let preview;try{preview=queue.approvalPreview(jobId);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
