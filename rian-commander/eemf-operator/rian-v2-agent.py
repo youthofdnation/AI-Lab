@@ -35,7 +35,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rian_mail_index as mail  # noqa: E402  (shipped next to this file)
-import rian_fleet_tasks as fleet  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("rian_tenant_artifact_agent", HERE / "tenant-artifact-agent.py")
 _artifact = importlib.util.module_from_spec(_spec)
@@ -167,6 +166,7 @@ def run_job(job_dir, cfg):
         validate_local(job["kind"], job["params"], cfg)
         params = job["params"]
         if job["kind"] in FLEET_KINDS:
+            import rian_fleet_tasks as fleet  # only fleet installs ship it
             f = cfg.get("fleet") or {}
             try:
                 if job["kind"] == "fleet.inventory":

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 LABEL = "company.rian.commander.v2.agent"
-FILES = ("rian-v2-agent.py", "rian_mail_index.py", "tenant-artifact-agent.py")
+FILES = ("rian-v2-agent.py", "rian_mail_index.py", "tenant-artifact-agent.py", "rian_fleet_tasks.py", "youngmin_qlora_measure.py")
 KINDS = {"diag.wait", "mail.sync", "mail.search", "mail.read"}
 # launchd respawn delay. The agent heartbeats every <=15 s against a 45 s lease, so a
 # double restart costs at most ~15 s + THROTTLE_SECONDS; 30 s left almost no margin.
