@@ -14,6 +14,7 @@
 import {createHmac,randomBytes,scryptSync,timingSafeEqual,createHash} from 'node:crypto';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
+import {fleetToolDefs,callFleetTool,placeAuto} from './fleet-http.mjs';
 
 const MAX_BODY=110_000;
 const JSON_HEADERS={'cache-control':'no-store','content-type':'application/json; charset=utf-8','x-content-type-options':'nosniff'};
@@ -44,6 +45,7 @@ export function publicError(e){
   const m=String(e?.message||'');
   if(/^ACTIVE_JOB_CONFLICT:[0-9a-f-]{36}$/.test(m))return m;
   if(/^MAIL_SCOPE_DENIED/.test(m))return 'MAIL_SCOPE_DENIED';
+  if(/^FLEET_NO_ELIGIBLE_DEVICE:[A-Za-z0-9._=,-]{0,300}$/.test(m))return m;   // device ids + reason codes only
   if(['ACCESS_DENIED','JOB_NOT_FOUND','GRANT_NOT_FOUND'].includes(m))return 'NOT_FOUND';
   if(/^[A-Z][A-Z0-9_]{2,60}$/.test(m))return m;
   return 'INVALID_REQUEST';
@@ -104,9 +106,12 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('INVALID_ARGUMENTS');
     if(name==='rian_v2_devices'){exact(args,[]);return {devices:queue.devices(actor)};}
     if(name==='rian_v2_start_job'){
-      exact(args,['device','kind','params','request_key'],['device','kind','params']);
+      exact(args,['device','kind','params','request_key',...(queue.fleet?['fleet']:[])],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
-      return withApproval(queue.request({actor,deviceId:args.device,kind:args.kind,params:args.params,requestKey:args.request_key,clientRef}));
+      let device=args.device,placement;
+      if(queue.fleet&&device==='auto')({device,placement}=placeAuto(queue,actor,args.kind,args.fleet,Math.floor(clock()/1000)));
+      const r=withApproval(queue.request({actor,deviceId:device,kind:args.kind,params:args.params,requestKey:args.request_key,clientRef,fleet:queue.fleet?args.fleet??null:null}));
+      return placement?{...r,placement}:r;
     }
     if(name==='rian_v2_job_status'){
       exact(args,['job_id','wait_seconds'],['job_id']);
@@ -121,6 +126,8 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(name==='rian_v2_cancel_job'){exact(args,['job_id'],['job_id']);return queue.cancel({actor,jobId:args.job_id});}
     if(name==='rian_v2_list_grants'){exact(args,[]);return {grants:queue.listGrants(actor)};}
     if(name==='rian_v2_revoke_grant'){exact(args,['grant_id'],['grant_id']);return queue.revokeGrant({actor,grantId:args.grant_id});}
+    const fleetResult=callFleetTool(queue,actor,name,args,Math.floor(clock()/1000),exact);
+    if(fleetResult!==undefined)return fleetResult;
     throw Error('UNKNOWN_TOOL');
   }
 
@@ -136,7 +143,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(x.method==='notifications/initialized')return new Response(null,{status:202});
     let result;
     if(x.method==='initialize')result={protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'rian-commander-v2-jobs',version:'2.0.0'}};
-    else if(x.method==='tools/list')result={tools:tools(queue.kinds)};
+    else if(x.method==='tools/list')result={tools:[...tools(queue.kinds),...fleetToolDefs(queue)]};
     else if(x.method==='ping')result={};
     else if(x.method==='tools/call'){
       try{result=text(await callTool(actor,x.params?.name,x.params?.arguments??{},clientRef&&/^[a-f0-9]{16,64}$/.test(clientRef)?clientRef:null));}

@@ -26,6 +26,7 @@ import {randomUUID,randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
+import {FleetPolicy,verifyGpuRelease} from './fleet-policy.mjs';
 
 const KEY=/^[A-Za-z0-9_-]{16,80}$/;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -58,25 +59,36 @@ export function longJobGuidance(state){
 }
 
 export class LongJobQueue {
-  #store;#directory;#kinds;#clock;#limits;#deviceKinds;
+  #store;#directory;#kinds;#clock;#limits;#deviceKinds;#fleet;
   /**
    * deviceKinds (optional): Map/entries of deviceId -> allowed kind names. A listed device can
    * only be asked for those kinds (server-side, before any approval page); unlisted devices keep
    * every configured kind. The PC agent still enforces its own local allowlist independently.
+   *
+   * fleet (optional FleetPolicy): turns on pool scheduling. Then the policy is the device
+   * allowlist (a device outside it gets nothing), the denylist is checked on every request and
+   * claim, a device runs at most `maxConcurrent` jobs and `gpuSlots` GPU jobs at once (the rest
+   * wait QUEUED, highest priority first), and a finished GPU job gets a memory hand-back verdict.
    */
-  constructor({directory,store,kinds=new LongJobKinds(),clock=()=>Date.now(),limits={},deviceKinds=null}){
+  constructor({directory,store,kinds=new LongJobKinds(),clock=()=>Date.now(),limits={},deviceKinds=null,fleet=null}){
     if(!(directory instanceof TenantDirectory)||!(store instanceof StagingSqlite)||!(kinds instanceof LongJobKinds)||typeof clock!=='function')throw Error('INVALID_LONG_JOB_QUEUE');
-    this.#store=store;this.#directory=directory;this.#kinds=kinds;this.#clock=clock;
+    if(fleet!==null&&!(fleet instanceof FleetPolicy))throw Error('INVALID_LONG_JOB_QUEUE');
+    if(fleet&&deviceKinds)throw Error('FLEET_POLICY_OWNS_DEVICE_KINDS');
+    this.#store=store;this.#directory=directory;this.#kinds=kinds;this.#clock=clock;this.#fleet=fleet;
     this.#limits=Object.freeze({...LONG_JOB_LIMITS,...limits});
     this.#deviceKinds=new Map();
     const known=new Set(kinds.names());
-    for(const [device,list] of deviceKinds instanceof Map?deviceKinds:Object.entries(deviceKinds||{})){
+    for(const [device,list] of fleet?fleet.deviceKinds():deviceKinds instanceof Map?deviceKinds:Object.entries(deviceKinds||{})){
       if(typeof device!=='string'||!Array.isArray(list)||!list.length||!list.every(k=>typeof k==='string'&&known.has(k)))throw Error('INVALID_DEVICE_KINDS');
       this.#deviceKinds.set(device,new Set(list));
     }
   }
-  #kindAllowed(deviceId,kind){const allowed=this.#deviceKinds.get(deviceId);return !allowed||allowed.has(kind);}
+  #kindAllowed(deviceId,kind){
+    if(this.#fleet){if(this.#fleet.isDenied(deviceId))return false;return !!this.#deviceKinds.get(deviceId)?.has(kind);}
+    const allowed=this.#deviceKinds.get(deviceId);return !allowed||allowed.has(kind);
+  }
   get kinds(){return this.#kinds;}
+  get fleet(){return this.#fleet;}
   get limits(){return this.#limits;}
   #now(){return Math.floor(this.#clock()/1000);}
   #db(){return this.#store.db;}
@@ -118,7 +130,39 @@ export class LongJobQueue {
       outcome:j.outcome,exit_code:j.exit_code,
       result:withResult&&terminal?this.#result(j):null,
       result_purged:terminal&&j.kind==='mail.read'&&j.result_cipher===null&&j.outcome==='SUCCEEDED',
-      retry_automatically:false,guidance:longJobGuidance(j.state)};
+      retry_automatically:false,guidance:longJobGuidance(j.state),...this.#fleetSummary(j)};
+  }
+  /** Validated fleet facts for a new job, or null without a fleet policy. Never trusts caller-owned flags. */
+  #fleetRequest(deviceId,kind,spec,req){
+    if(!this.#fleet){if(req!==null&&req!==undefined)throw Error('FLEET_NOT_ENABLED');return null;}
+    const r=req===null||req===undefined?{}:req;
+    if(typeof r!=='object'||Array.isArray(r)||Object.keys(r).some(k=>!['priority','cpu','ramMiB','vramMiB','dataClass'].includes(k)))throw Error('INVALID_FLEET_REQUEST');
+    const n=(v,d,lo,hi)=>{const x=v===undefined?d:v;if(!Number.isInteger(x)||x<lo||x>hi)throw Error('INVALID_FLEET_REQUEST');return x;};
+    const needsGpu=spec.gpu===true;
+    // A kind's own data class is the floor: a caller cannot relabel private work as synthetic.
+    const dataClass=r.dataClass===undefined?spec.dataClass||'private':r.dataClass;
+    if(spec.dataClass==='private'&&dataClass!=='private')throw Error('INVALID_FLEET_REQUEST');
+    this.#fleet.assertDispatchable(deviceId,kind,{needsGpu,dataClass});
+    return {priority:n(r.priority,0,-100,100),needsGpu,cpu:n(r.cpu,1,1,256),ramMiB:n(r.ramMiB,0,0,1<<20),vramMiB:n(r.vramMiB,needsGpu?512:0,0,1<<18),dataClass};
+  }
+  /** Not-yet-terminal fleet jobs with what they reserve (for placement). */
+  fleetActive(actor){
+    this.#directory.assertOwner(actor);
+    return this.#db().prepare(`SELECT lj.id,lj.device,lj.kind,lj.state,fj.priority,fj.needs_gpu,fj.cpu,fj.ram_mib,fj.vram_mib FROM long_jobs lj JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.state IN (${placeholder(ACTIVE.length)}) ORDER BY lj.created`)
+      .all(actor.tenantId,...ACTIVE).map(x=>({job_id:x.id,device:x.device,kind:x.kind,state:x.state,priority:x.priority,needsGpu:!!x.needs_gpu,cpu:x.cpu,ramMiB:x.ram_mib,vramMiB:x.vram_mib}));
+  }
+  /** The newest SUCCEEDED result of one kind on one device (e.g. its last inventory). */
+  latestSucceeded({actor,deviceId,kind}){
+    this.#directory.assertOwner(actor);
+    const j=this.#db().prepare("SELECT * FROM long_jobs WHERE tenant=? AND device=? AND kind=? AND state='SUCCEEDED' ORDER BY finished DESC LIMIT 1").get(actor.tenantId,deviceId,kind);
+    return j?{job_id:j.id,finished:j.finished,result:this.#result(j)}:null;
+  }
+  #fleetSummary(j){
+    if(!this.#fleet)return {};
+    const f=this.#db().prepare('SELECT * FROM fleet_jobs WHERE job_id=?').get(j.id);
+    if(!f)return {};
+    return {fleet:{priority:f.priority,needs_gpu:!!f.needs_gpu,reserved:{cpu:f.cpu,ram_mib:f.ram_mib,vram_mib:f.vram_mib},
+      data_class:f.data_class,gpu_release:f.gpu_release?JSON.parse(f.gpu_release):null}};
   }
   #reapLocked(now,where='',args=[]){
     const db=this.#db(),changed=[];
@@ -153,13 +197,15 @@ export class LongJobQueue {
       ...(this.#deviceKinds.has(d.id)?{allowed_kinds:[...this.#deviceKinds.get(d.id)]}:{})}));
   }
   /** Owner request. Returns immediately with a job id; never waits for execution. */
-  request({actor,deviceId,kind,params,requestKey,clientRef=null}){
+  request({actor,deviceId,kind,params,requestKey,clientRef=null,fleet=null}){
     this.#directory.assertOwner(actor);
+    if(this.#fleet&&this.#fleet.isDenied(deviceId))throw Error('DEVICE_DENIED');
     this.#directory.assertDevice(actor.tenantId,deviceId);
-    if(!this.#kindAllowed(deviceId,kind))throw Error('KIND_NOT_ALLOWED_FOR_DEVICE');
+    if(!this.#kindAllowed(deviceId,kind))throw Error(this.#fleet&&this.#fleet.ids().includes(deviceId)&&this.#fleet.device(deviceId).status==='QUARANTINED'?'DEVICE_QUARANTINED':'KIND_NOT_ALLOWED_FOR_DEVICE');
     if(requestKey!==undefined&&requestKey!==null&&(typeof requestKey!=='string'||!KEY.test(requestKey)))throw Error('INVALID_REQUEST_KEY');
     if(clientRef!==null&&(typeof clientRef!=='string'||!/^[a-f0-9]{16,64}$/.test(clientRef)))throw Error('INVALID_CLIENT_REF');
     const {kind:spec,params:safe,specSha}=this.#kinds.canonical(deviceId,kind,params);
+    const fl=this.#fleetRequest(deviceId,kind,spec,fleet);
     const now=this.#now(),db=this.#db();
     return this.#store.transaction(()=>{
       this.#reapLocked(now,' AND tenant=? AND device=?',[actor.tenantId,deviceId]);
@@ -188,6 +234,8 @@ export class LongJobQueue {
       db.prepare('INSERT INTO long_jobs(id,tenant,owner,client_ref,request_key,spec_sha,device,kind,lock_group,params_cipher,params_iv,params_tag,state,grant_id,created,approval_expires,queue_deadline,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id,actor.tenantId,actor.id,clientRef,requestKey||null,specSha,deviceId,kind,spec.lockGroup,enc.cipher,enc.iv,enc.tag,state,grant?grant.id:null,now,
           grant?null:now+this.#limits.approvalTtlSeconds,grant?now+this.#limits.queueTtlSeconds:null,grant?now:null);
+      if(fl)db.prepare('INSERT INTO fleet_jobs(job_id,priority,needs_gpu,cpu,ram_mib,vram_mib,data_class) VALUES(?,?,?,?,?,?,?)')
+        .run(id,fl.priority,fl.needsGpu?1:0,fl.cpu,fl.ramMiB,fl.vramMiB,fl.dataClass);
       if(grant){
         const left=grant.runs_left-1;
         db.prepare("UPDATE long_job_grants SET runs_left=?,state=? WHERE id=?").run(left,left>0?'ACTIVE':'EXHAUSTED',grant.id);
@@ -278,14 +326,30 @@ export class LongJobQueue {
     });
   }
   /** Agent claims the oldest approved job for its own device. Exactly-once dispatch. */
+  #pickQueued(actor,deviceId,now){
+    const db=this.#db();
+    if(!this.#fleet)return db.prepare("SELECT * FROM long_jobs WHERE tenant=? AND device=? AND state='QUEUED' AND queue_deadline>? ORDER BY approved_at ASC,created ASC LIMIT 1").get(actor.tenantId,deviceId,now);
+    const d=this.#fleet.device(deviceId);
+    const running=db.prepare(`SELECT lj.kind,COALESCE(fj.needs_gpu,0) AS gpu FROM long_jobs lj LEFT JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.device=? AND lj.state IN (${placeholder(RUNNING.length)})`).all(actor.tenantId,deviceId,...RUNNING);
+    if(running.length>=d.maxConcurrent)return {held:'CONCURRENCY_LIMIT'};
+    const gpuBusy=running.filter(x=>x.gpu).length>=d.gpuSlots;
+    // After a GPU job whose memory did not verifiably come back, only the hand-back probe may use the GPU.
+    const last=db.prepare("SELECT fj.gpu_release FROM long_jobs lj JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.device=? AND fj.needs_gpu=1 AND fj.gpu_release IS NOT NULL ORDER BY lj.finished DESC,fj.rowid DESC LIMIT 1").get(actor.tenantId,deviceId);
+    const suspect=!!last&&JSON.parse(last.gpu_release).state!=='VERIFIED';
+    const rows=db.prepare("SELECT lj.*,COALESCE(fj.priority,0) AS fleet_priority,COALESCE(fj.needs_gpu,0) AS fleet_gpu FROM long_jobs lj LEFT JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.device=? AND lj.state='QUEUED' AND lj.queue_deadline>? ORDER BY fleet_priority DESC,lj.approved_at ASC,lj.created ASC LIMIT 50").all(actor.tenantId,deviceId,now);
+    const j=rows.find(x=>!(x.fleet_gpu&&(gpuBusy||(suspect&&x.kind!=='fleet.gpu_probe'))));
+    return j||(rows.length?{held:suspect&&!gpuBusy?'GPU_RELEASE_UNVERIFIED':'GPU_SLOT_BUSY'}:undefined);
+  }
   claim({actor,deviceId}){
+    if(this.#fleet&&this.#fleet.isDenied(deviceId))throw Error('DEVICE_DENIED');
     this.#directory.assertAgent(actor,actor.tenantId,deviceId);
     const now=this.#now(),db=this.#db();
     return this.#store.transaction(()=>{
       db.prepare('INSERT INTO agent_seen(tenant,device,seen) VALUES(?,?,?) ON CONFLICT(tenant,device) DO UPDATE SET seen=excluded.seen').run(actor.tenantId,deviceId,now);
       this.#reapLocked(now,' AND tenant=? AND device=?',[actor.tenantId,deviceId]);
-      const j=db.prepare("SELECT * FROM long_jobs WHERE tenant=? AND device=? AND state='QUEUED' AND queue_deadline>? ORDER BY approved_at ASC,created ASC LIMIT 1").get(actor.tenantId,deviceId,now);
+      const j=this.#pickQueued(actor,deviceId,now);
       if(!j)return {job:null};
+      if(j.held)return {job:null,held:j.held};
       if(!this.#kindAllowed(deviceId,j.kind)){
         // Queued before the device allowlist was tightened: never dispatch, close it explicitly.
         db.prepare("UPDATE long_jobs SET state='CANCELLED',finished=? WHERE id=? AND state='QUEUED'").run(now,j.id);
@@ -345,7 +409,14 @@ export class LongJobQueue {
       this.#db().prepare('UPDATE long_jobs SET state=?,outcome=?,exit_code=?,finished=?,result_sha=?,result_cipher=?,result_iv=?,result_tag=?,progress_pct=CASE WHEN ?=\'SUCCEEDED\' THEN 100 ELSE progress_pct END WHERE id=?')
         .run(outcome,outcome,exitCode,now,resultSha,enc.cipher,enc.iv,enc.tag,outcome,j.id);
       this.#audit(j,actor.id,late?'LONG_JOB_LATE_RESULT_ACCEPTED':'LONG_JOB_'+outcome);
-      return {jobId:j.id,state:outcome,duplicate:false,late};
+      let gpuRelease;
+      if(this.#fleet&&this.#db().prepare('SELECT needs_gpu FROM fleet_jobs WHERE job_id=?').get(j.id)?.needs_gpu){
+        // Every GPU job, successful or not, must show its memory came back; otherwise the slot is suspect.
+        gpuRelease=verifyGpuRelease(parsed);
+        this.#db().prepare('UPDATE fleet_jobs SET gpu_release=? WHERE job_id=?').run(JSON.stringify(gpuRelease),j.id);
+        this.#audit(j,'system','FLEET_GPU_RELEASE_'+gpuRelease.state);
+      }
+      return {jobId:j.id,state:outcome,duplicate:false,late,...(gpuRelease?{gpu_release:gpuRelease}:{})};
     });
   }
 }
