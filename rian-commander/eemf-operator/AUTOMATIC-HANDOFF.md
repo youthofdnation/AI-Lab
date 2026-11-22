@@ -1,4 +1,86 @@
-# P2 opt-in Claude Code → Codex handoff
+# RIAN Commander Claude Code → Codex handoff
+
+## P2.2 project standing grants (Issue #9, recommended)
+
+**Status:** P2.2 is implemented in source and opt-in only. No live project hooks
+or grants are installed by this PR. A live Claude Code usage-limit event
+has **not** been observed end-to-end. Mac tests use a simulated structured
+rate-limit event and real Codex in a disposable project; CI uses a fake Codex.
+
+**The owner should not have to type `APPROVE <digest>` for every task.** Instead,
+the grant UI asks for one explicit click per device + canonical Git worktree.
+The same grant covers distinct future owner requests in that worktree, subject
+to its limits: at most 20 handoffs, 30 days, and 30 minutes per handoff.
+The owner can revoke it immediately. Changing devices or worktrees, an expired
+or exhausted grant, or an unsafe task requires a new approval or blocks work.
+
+The approval dialog shows the device, exact worktree, provider pair, sandbox
+write permission, no-network/no-push/no-deploy/no-credentials policy, duration
+and run count. macOS uses a native dialog (Approve / Decline), Windows uses a
+native Yes/No dialog. Linux falls back to an interactive owner confirmation.
+**An initial consent is still required; the program must never forge a click.**
+An approval for a throwaway sandbox does not authorize the real project.
+
+Local CLI operations (developer/operator documentation; NOT instructions to
+repeat a typed approval for every task):
+
+```sh
+# One-time explicit owner consent for a dedicated development worktree
+node automatic-handoff-cli.mjs grant --worktree "/ABS/PROJECT" --runs 5 --days 7 --run-minutes 20
+# Safe read-only readiness and last-trigger diagnostics
+node automatic-handoff-cli.mjs status --worktree "/ABS/PROJECT"
+# Revoke immediately without an approval dialogue
+node automatic-handoff-cli.mjs revoke --worktree "/ABS/PROJECT"
+```
+
+After the owner approves, the developer must still install the Claude Code
+**project-local** hooks explicitly, pointing to a **fixed, reviewed copy of the
+handoff runtime outside the editable worktree**. All five hook events
+(`SessionStart`, `UserPromptSubmit`, `PostToolUse`,
+`PostToolUseFailure`, and `StopFailure` with `rate_limit` matcher) must
+invoke `automatic-handoff-cli.mjs hook-grant` with the hook JSON on standard
+input. The latter uses the official event's `cwd` to identify the exact worktree;
+it must not accept a different worktree from a remote sender. The current
+`automatic-handoff-hooks.sample.json` documents the older per-task
+`--manifest` flow, **not** the new standing-grant installation. An
+`install-plan` preview/generator for the grant mode is a separate future task;
+do not suggest manual replacement of a global Claude settings file.
+
+The `UserPromptSubmit` hook saves the owner's last request locally, with
+sensitive-looking text refused. On an official `StopFailure(error=rate_limit)`,
+a fresh same-session checkpoint, unchanged Git content, non-overlapping
+writer lease, valid grant, and unused task/run slots are required. Codex
+starts as its **own** session and receives the task and Git state, not
+Claude's hidden conversation/thoughts or either provider's credentials.
+For each distinct request the prior grant is reused without another dialog.
+Duplicate event/prompt, unsafe prompt, revoked or exhausted grant, and
+uncertain execution all fail closed. Never auto-retry an ambiguous job.
+
+Both the legacy manifest and project-grant paths remain supported.
+The manifest flow below uses a per-task digest seal and its own interactive
+`APPROVE` prompt; do not use it when the product goal is project-level consent.
+Existing remote V2 mail/diagnostic allowlists, production systems, and
+other worktrees must not be modified to install this feature.
+
+### Validation required before real-project activation
+
+- Fix platform CI failures first; all macOS, Windows, and Ubuntu suites must
+  pass for the exact PR head being deployed.
+- Test the native approval click, two different owner prompts and **real**
+  Codex handoffs in one disposable Mac Git worktree with no new approval
+  between tasks. Verify task receipts, uncommitted files and single-writer
+  behavior, plus revoke/expire/duplicate handling.
+- Confirm the actual Claude Code session can load the project-local hooks.
+  A synthetic `StopFailure` is not evidence of a real usage-limit event.
+- Only then consider deploying to the named real development worktree,
+  showing an owner-friendly scope preview once. No production deployment,
+  forced restarts, or changes to other running apps are implied.
+
+---
+
+## P2 manifest-bound per-task handoff (legacy; retains original behavior)
+
+
 
 **Source only.** These hooks are examples and are not installed. P1 manual
 handoff remains available. No real Claude rate limit was observed during P2
