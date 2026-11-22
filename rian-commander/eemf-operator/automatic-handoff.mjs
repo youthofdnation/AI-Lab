@@ -1,5 +1,6 @@
 /** P2 local hook receiver. No hook installation, daemon, remote API, or credential export. */
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawn,spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {createHash,randomUUID} from 'node:crypto';
 import {chmodSync,closeSync,existsSync,lstatSync,mkdirSync,openSync,readFileSync,realpathSync,
   renameSync,rmSync,unlinkSync,writeFileSync} from 'node:fs';
@@ -74,7 +75,8 @@ export function readActivationManifest(manifestPath){
   assert(typeof m.permissions.workspaceWrite==='boolean'&&m.permissions.exclusiveWorktree===true&&
     JSON.stringify(m.permissions.allowedProviders)==='["claude","codex"]','INVALID_PERMISSIONS');
   assert(m.budget&&Object.keys(m.budget).every(k=>['timeoutMs','checkpointMaxAgeMs'].includes(k)),'INVALID_BUDGET');
-  assert(Number.isInteger(m.budget.timeoutMs)&&m.budget.timeoutMs>=1000&&m.budget.timeoutMs<=120_000,'INVALID_BUDGET');
+  // Up to 30 minutes: the Codex run is detached from the Claude hook, so it is not bound by the hook timeout.
+  assert(Number.isInteger(m.budget.timeoutMs)&&m.budget.timeoutMs>=1000&&m.budget.timeoutMs<=1_800_000,'INVALID_BUDGET');
   assert(Number.isInteger(m.budget.checkpointMaxAgeMs)&&m.budget.checkpointMaxAgeMs>=1000&&m.budget.checkpointMaxAgeMs<=1_800_000,'INVALID_BUDGET');
   return {manifest:m,path,worktree,approvedRoot,digest:hash(readFileSync(path))};
 }
@@ -92,7 +94,9 @@ export function authorizeActivation({manifestPath,storeDir=defaultStore(),ownerA
 }
 function approved(manifestPath,storeDir){
   const a=readActivationManifest(manifestPath),store=storeAt(storeDir,a.worktree);
-  const seal=readPrivate(join(store,'activation-seals',hash(a.worktree)+'.json'));
+  const sealPath=join(store,'activation-seals',hash(a.worktree)+'.json');
+  assert(existsSync(sealPath),'ACTIVATION_NOT_APPROVED');
+  const seal=readPrivate(sealPath);
   assert(seal.schema==='rian-activation-seal/v1'&&seal.worktree===a.worktree&&seal.manifestPath===a.path&&
     seal.digest===a.digest&&seal.workspaceWrite===a.manifest.permissions.workspaceWrite&&
     seal.timeoutMs===a.manifest.budget.timeoutMs,'ACTIVATION_SEAL_MISMATCH');
@@ -125,9 +129,124 @@ export const codexReceiver={
   }
 };
 
+/** Every blocked hook gets a category the owner can act on. */
+export function categorizeHandoffError(code){
+  const c=String(code||'');
+  if(/^(ACTIVATION_|OWNER_APPROVAL)/.test(c))return 'APPROVAL';
+  if(/^(CHECKPOINT_|WORKTREE_CHANGED|GIT_WORKTREE_CHANGED|SENSITIVE_WORKTREE|UNTRACKED_FILE_LIMIT|UNSAFE_UNTRACKED|CHANGED_FILE_LIMIT)/.test(c))return 'CHECKPOINT';
+  if(/^(CODEX_|PROVIDER_|NETWORK_|USAGE_LIMIT|TIMEOUT|UNKNOWN_DO_NOT_RETRY|AUTOMATIC_DISPATCH|PROJECT_TASK|HANDOFF_ALREADY|WORKTREE_ALREADY_LEASED|INVALID_RUNTIME)/.test(c))return 'EXECUTION';
+  return 'CONFIGURATION';
+}
+const HOOK_EVENTS=['SessionStart','UserPromptSubmit','PostToolUse','PostToolUseFailure','StopFailure'];
+const DUPLICATE=/^(AUTOMATIC_DISPATCH_ALREADY_ATTEMPTED|PROJECT_TASK_ALREADY_ATTEMPTED|DISPATCH_NOT_PENDING|DISPATCH_RUNNER_ALREADY_STARTED)$/;
+function manifestWorktree(manifestPath){
+  try{return readActivationManifest(manifestPath).worktree;}catch{}
+  try{return realpathSync(dirname(dirname(manifestPath)));}catch{return null;}
+}
+/** Claude ignores StopFailure output, so the last outcome is kept in the private store for `status`. */
+function recordHookStatus({manifestPath,storeDir,event,result,error}){
+  try{
+    const worktree=manifestWorktree(manifestPath);
+    if(!worktree)return;
+    const store=storeAt(storeDir,worktree),file=join(privateDir(store,'hook-status'),hash(worktree)+'.json');
+    let previous={};try{if(existsSync(file))previous=readPrivate(file);}catch{}
+    const kind=HOOK_EVENTS.includes(event?.hook_event_name)?event.hook_event_name:'UNKNOWN_EVENT';
+    const entry={at:new Date().toISOString(),event:kind,sessionId:validSession(event?.session_id)?event.session_id:null,
+      state:error?'BLOCKED':result?.state,error:error?String(error.message||'HANDOFF_ERROR').slice(0,80):null,
+      category:error?categorizeHandoffError(error.message):null,
+      ...(result?.sequence?{sequence:result.sequence}:{}),...(result?.handoffId?{handoffId:result.handoffId,threadId:result.threadId??null,lockRetained:!!result.lockRetained}:{}),
+      ...(result?.runnerPid?{runnerPid:result.runnerPid}:{}),
+      ...(result?.reason?{reason:result.reason}:{})};
+    const record={schema:'rian-hook-status/v1',worktree,lastEvent:entry,
+      lastCheckpoint:!error&&result?.state==='CHECKPOINTED'?entry:previous.lastCheckpoint||null,
+      lastTrigger:kind==='StopFailure'?entry:previous.lastTrigger||null,
+      // Neither an ignored StopFailure (server_error, billing...) nor a rejected duplicate may hide
+      // the last real dispatch outcome; both stay visible in lastTrigger and history.
+      lastDispatch:kind==='StopFailure'&&entry.state!=='IGNORED'&&!DUPLICATE.test(entry.error||'')?entry:previous.lastDispatch||null,
+      history:[...(Array.isArray(previous.history)?previous.history:[]).slice(-19),entry]};
+    atomic(file,record);
+  }catch{/* status is best effort and never changes the hook outcome */}
+}
+
 /** Called with official hook stdin. Test seams are only available to direct module callers. */
-export async function handleClaudeHook({event,manifestPath,storeDir=defaultStore(),receiver=codexReceiver,
-  codexCommand='codex',codexPrefixArgs=[]}){
+export async function handleClaudeHook(options){
+  try{
+    const result=await handleClaudeHookChecked(options);
+    recordHookStatus({...options,storeDir:options.storeDir??defaultStore(),result});
+    return result;
+  }catch(error){
+    recordHookStatus({...options,storeDir:options.storeDir??defaultStore(),error});
+    throw error;
+  }
+}
+
+/** Read-only readiness report: manifest, owner approval, checkpoints, last trigger, lease, Codex login. */
+export function automaticHandoffStatus({manifestPath,storeDir=defaultStore(),codexCommand='codex',codexPrefixArgs=[],probeCodex=true,now=Date.now()}){
+  const out={manifest:null,approval:null,lastCheckpoint:null,lastTrigger:null,lease:null,taskAttempted:false,codex:null,blockers:[],warnings:[]};
+  let a;
+  try{a=readActivationManifest(manifestPath);}
+  catch(e){out.manifest={state:'INVALID',error:e.message,category:'CONFIGURATION'};out.blockers.push(e.message);out.ready=false;return out;}
+  const m=a.manifest;
+  out.manifest={state:'VALID',worktree:a.worktree,approvedRoot:a.approvedRoot,taskId:m.task.taskId,goal:m.task.goal,
+    workspaceWrite:m.permissions.workspaceWrite,timeoutMs:m.budget.timeoutMs,checkpointMaxAgeMs:m.budget.checkpointMaxAgeMs,digest:a.digest.slice(0,12)};
+  const store=isAbsolute(storeDir)&&existsSync(storeDir)?realpathSync(storeDir):null;
+  const key=hash(a.worktree);
+  try{
+    const seal=approved(manifestPath,storeDir);
+    out.approval={state:'APPROVED',approvedAt:readPrivate(join(seal.store,'activation-seals',key+'.json')).approvedAt};
+  }catch(e){
+    out.approval={state:e.message==='ACTIVATION_SEAL_MISMATCH'?'CHANGED_REAPPROVAL_REQUIRED':e.message==='ACTIVATION_NOT_APPROVED'?'NOT_APPROVED':'ERROR',error:e.message};
+    out.blockers.push(e.message);
+  }
+  if(store){
+    const statusFile=join(store,'hook-status',key+'.json');
+    if(existsSync(statusFile)){
+      try{
+        const s=readPrivate(statusFile);
+        if(s.lastCheckpoint){const age=now-Date.parse(s.lastCheckpoint.at);out.lastCheckpoint={...s.lastCheckpoint,ageMs:age,fresh:age<=m.budget.checkpointMaxAgeMs};}
+        out.lastTrigger=s.lastTrigger||null;out.lastDispatch=s.lastDispatch||null;out.lastEvent=s.lastEvent||null;
+        if(s.lastTrigger?.reason==='OWNER_ATTENTION_REQUIRED')out.warnings.push('OWNER_ATTENTION_REQUIRED: the last Claude stop was an auth/billing/account error, not a rate limit');
+        if(s.lastDispatch?.sessionId){
+          // The dispatch marker is authoritative (the hook and the detached runner both write status).
+          const markerPath=join(store,'automatic-dispatch',sessionKey(a.worktree,s.lastDispatch.sessionId)+'.json');
+          let marker=null;try{if(existsSync(markerPath))marker=readPrivate(markerPath);}catch{}
+          if(marker)out.lastDispatch={...out.lastDispatch,markerState:marker.state,threadId:marker.threadId??out.lastDispatch.threadId??null};
+          if(marker?.state==='DETACHED'||marker?.state==='RUNNING'){
+            const pid=marker.runnerPid??s.lastDispatch.runnerPid;let alive=false;
+            if(Number.isInteger(pid)){try{process.kill(pid,0);alive=true;}catch{}}
+            out.lastDispatch.runnerAlive=alive;
+            if(!alive)out.warnings.push('DETACHED_RUNNER_EXITED_WITHOUT_RESULT: inspect receipts/leases, then use recover');
+          }
+        }
+      }catch(e){out.warnings.push('HOOK_STATUS_UNREADABLE');}
+    }
+    const lockPath=join(store,'leases',key+'.lock');
+    if(existsSync(lockPath)){
+      try{const lock=readPrivate(lockPath);let alive=false;
+        if(Number.isInteger(lock.childPid)){try{process.kill(lock.childPid,0);alive=true;}catch{}}
+        out.lease={state:'HELD',handoffId:lock.handoffId,childAlive:alive};}catch{out.lease={state:'HELD_UNREADABLE'};}
+      out.blockers.push('WORKTREE_ALREADY_LEASED');
+    }
+    if(existsSync(join(store,'task-dispatch',hash(a.worktree+'\0'+m.task.taskId+'\0'+a.digest)+'.json'))){
+      out.taskAttempted=true;out.blockers.push('PROJECT_TASK_ALREADY_ATTEMPTED');
+    }
+  }
+  if(!out.lastCheckpoint)out.warnings.push('NO_CHECKPOINT_YET: hooks have not run for this worktree (check hook install, folder trust, exact worktree root)');
+  else if(!out.lastCheckpoint.fresh)out.warnings.push('CHECKPOINT_STALE: a rate limit now would be refused until the next hook event');
+  if(probeCodex){
+    const run=args=>spawnSync(codexCommand,[...codexPrefixArgs,...args],{timeout:10000,encoding:'utf8',maxBuffer:8192,windowsHide:true});
+    const v=run(['--version']),l=v.status===0?run(['login','status']):null;
+    out.codex={available:v.status===0,version:v.status===0?String(v.stdout).trim().slice(0,60):null,loggedIn:l?.status===0};
+    if(!out.codex.available)out.blockers.push('CODEX_EXECUTABLE_UNAVAILABLE');
+    else if(!out.codex.loggedIn)out.blockers.push('CODEX_NOT_AUTHENTICATED');
+  }
+  out.blockers=out.blockers.map(code=>({code,category:categorizeHandoffError(code)}));
+  out.ready=out.blockers.length===0;
+  return out;
+}
+
+async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore(),receiver=codexReceiver,
+  codexCommand='codex',codexPrefixArgs=[],detach=false,spawnRunner=spawnDetachedRunner}){
   assert(event&&typeof event==='object'&&validSession(event.session_id),'INVALID_HOOK_EVENT');
   const a=approved(manifestPath,storeDir);
   assert(typeof event.cwd==='string'&&realpathSync(event.cwd)===a.worktree,'HOOK_WORKTREE_MISMATCH');
@@ -146,6 +265,9 @@ export async function handleClaudeHook({event,manifestPath,storeDir=defaultStore
   }
   if(kind!=='StopFailure'||classifyClaudeStop(event)!=='CLAUDE_RATE_LIMIT')
     return {state:'IGNORED',reason:classifyClaudeStop(event)};
+  // No checkpoint from this Claude session: hooks did not run (not installed, untrusted folder,
+  // other worktree) or a different session hit the limit. Never dispatch without one.
+  assert(existsSync(cpPath),'CHECKPOINT_MISSING');
   const cp=readPrivate(cpPath);
   assert(cp.schema==='rian-incremental/v1'&&cp.sessionId===event.session_id&&cp.manifestDigest===a.digest,'CHECKPOINT_SCOPE_MISMATCH');
   const dispatchMarker=join(privateDir(a.store,'automatic-dispatch'),key+'.json');
@@ -170,28 +292,80 @@ export async function handleClaudeHook({event,manifestPath,storeDir=defaultStore
   try{writeFileSync(fd,JSON.stringify({dispatchId,sessionId:event.session_id,state:'CLAIMED',at:new Date().toISOString()}));}
   finally{closeSync(fd);}
   const update=(state,extra={})=>atomic(dispatchMarker,{dispatchId,sessionId:event.session_id,state,at:new Date().toISOString(),...extra});
+  let handoff,checkpointPath;
   try{
-    const handoff=buildHandoff({taskId:a.manifest.task.taskId,goal:a.manifest.task.goal,repo,
+    handoff=buildHandoff({taskId:a.manifest.task.taskId,goal:a.manifest.task.goal,repo,
       pendingSteps:a.manifest.task.pendingSteps,testSummary:a.manifest.task.testSummary,event,
       ownerScope:{allowedProviders:a.manifest.permissions.allowedProviders,workspaceWrite:a.manifest.permissions.workspaceWrite},activeJobs:[]});
-    const checkpointPath=saveLocalHandoff(handoff,{directory:a.store});
-    update('READY',{handoffId:handoff.handoffId});
+    checkpointPath=saveLocalHandoff(handoff,{directory:a.store});
+  }catch(e){update('BLOCKED_REVIEW',{reason:String(e?.message||'UNKNOWN').slice(0,120)});throw e;}
+  // Reference state the runner re-verifies right before Codex starts (metadata + digest only).
+  const ref={head:repo.head,branch:repo.branch,changed:repo.changed,fingerprint:cp.contentFingerprint};
+  if(detach){
+    // The hook only validates and claims; a detached runner does the long Codex run, so Claude's
+    // hook timeout no longer caps the work. The claim markers above still make it single-shot.
+    update('DETACHED',{handoffId:handoff.handoffId,checkpointPath,ref});
+    let runnerPid;
+    try{runnerPid=spawnRunner(['dispatch-run','--manifest',manifestPath,'--store',a.store,'--handoff-id',handoff.handoffId,'--session',event.session_id]);}
+    catch(e){update('BLOCKED_REVIEW',{handoffId:handoff.handoffId,reason:'RUNNER_SPAWN_FAILED'});throw Error('RUNNER_SPAWN_FAILED');}
+    update('DETACHED',{handoffId:handoff.handoffId,checkpointPath,ref,runnerPid});
+    return {state:'DISPATCHED_DETACHED',handoffId:handoff.handoffId,runnerPid};
+  }
+  update('READY',{handoffId:handoff.handoffId});
+  return runDispatch({a,manifestPath,storeDir,sessionId:event.session_id,dispatchId,dispatchMarker,checkpointPath,
+    handoffId:handoff.handoffId,ref,receiver,codexCommand,codexPrefixArgs});
+}
+
+const RUNNER_CLI=fileURLToPath(new URL('./automatic-handoff-cli.mjs',import.meta.url));
+function spawnDetachedRunner(args){
+  const child=spawn(process.execPath,[RUNNER_CLI,...args],{detached:true,stdio:'ignore',windowsHide:true});
+  child.unref();
+  assert(Number.isInteger(child.pid),'RUNNER_SPAWN_FAILED');
+  return child.pid;
+}
+
+async function runDispatch({a,manifestPath,storeDir,sessionId,dispatchId,dispatchMarker,checkpointPath,handoffId,ref,receiver,codexCommand,codexPrefixArgs}){
+  const update=(state,extra={})=>atomic(dispatchMarker,{dispatchId,sessionId,state,at:new Date().toISOString(),handoffId,...extra});
+  try{
     const result=await receiver.dispatch({checkpointPath,approvedRoot:a.approvedRoot,store:a.store,
       timeoutMs:a.manifest.budget.timeoutMs,codexCommand,codexPrefixArgs,
       beforeDispatch:()=>{
         assert(approved(manifestPath,storeDir).digest===a.digest,'ACTIVATION_CHANGED_BEFORE_DISPATCH');
         const latest=inspectWorktree({approvedRoot:a.approvedRoot,worktree:a.worktree});
-        assert(latest.head===repo.head&&latest.branch===repo.branch&&
-          JSON.stringify(latest.changed)===JSON.stringify(repo.changed)&&fingerprint(latest)===cp.contentFingerprint,
+        assert(latest.head===ref.head&&latest.branch===ref.branch&&
+          JSON.stringify(latest.changed)===JSON.stringify(ref.changed)&&fingerprint(latest)===ref.fingerprint,
           'WORKTREE_CHANGED_BEFORE_DISPATCH');
       },
-      onProgress:p=>update('RUNNING',{handoffId:handoff.handoffId,events:p.events,threadId:p.threadId,failureKind:p.failureKind})});
-    update(result.state,{handoffId:handoff.handoffId,events:result.events,threadId:result.threadId,
-      failureKind:result.failureKind||null,lockRetained:result.lockRetained});
-    return {state:result.state,handoffId:handoff.handoffId,threadId:result.threadId,lockRetained:result.lockRetained};
+      onProgress:p=>update('RUNNING',{events:p.events,threadId:p.threadId,failureKind:p.failureKind})});
+    update(result.state,{events:result.events,threadId:result.threadId,failureKind:result.failureKind||null,lockRetained:result.lockRetained});
+    return {state:result.state,handoffId,threadId:result.threadId,lockRetained:result.lockRetained};
   }catch(e){
     update('BLOCKED_REVIEW',{reason:String(e?.message||'UNKNOWN').slice(0,120)});
     throw e;
+  }
+}
+
+/** Detached runner entry (spawned by the StopFailure hook). Runs a DETACHED claim exactly once. */
+export async function runDetachedDispatch({manifestPath,storeDir=defaultStore(),sessionId,handoffId,receiver=codexReceiver,codexCommand='codex',codexPrefixArgs=[]}){
+  const event={hook_event_name:'StopFailure',session_id:sessionId};
+  try{
+    assert(validSession(sessionId)&&typeof handoffId==='string'&&uuid.test(handoffId),'INVALID_DISPATCH_REQUEST');
+    const a=approved(manifestPath,storeDir);
+    const dispatchMarker=join(a.store,'automatic-dispatch',sessionKey(a.worktree,sessionId)+'.json');
+    assert(existsSync(dispatchMarker),'DISPATCH_NOT_PENDING');
+    const marker=readPrivate(dispatchMarker);
+    assert(marker.state==='DETACHED'&&marker.handoffId===handoffId&&marker.sessionId===sessionId&&marker.ref&&marker.checkpointPath,'DISPATCH_NOT_PENDING');
+    let fd;
+    try{fd=openSync(join(privateDir(a.store,'runner-claims'),handoffId+'.json'),'wx',0o600);}
+    catch(e){if(e?.code==='EEXIST')throw Error('DISPATCH_RUNNER_ALREADY_STARTED');throw e;}
+    try{writeFileSync(fd,JSON.stringify({pid:process.pid,at:new Date().toISOString()}));}finally{closeSync(fd);}
+    const result=await runDispatch({a,manifestPath,storeDir,sessionId,dispatchId:marker.dispatchId,dispatchMarker,
+      checkpointPath:marker.checkpointPath,handoffId,ref:marker.ref,receiver,codexCommand,codexPrefixArgs});
+    recordHookStatus({manifestPath,storeDir,event,result});
+    return result;
+  }catch(error){
+    recordHookStatus({manifestPath,storeDir,event,error});
+    throw error;
   }
 }
 

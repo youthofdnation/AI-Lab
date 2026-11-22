@@ -5,7 +5,8 @@ import {existsSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,readdirSync,r
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {authorizeActivation,handleClaudeHook,readActivationManifest,reconcileAutomaticLease} from './automatic-handoff.mjs';
+import {authorizeActivation,automaticHandoffStatus,categorizeHandoffError,handleClaudeHook,readActivationManifest,reconcileAutomaticLease,runDetachedDispatch} from './automatic-handoff.mjs';
+import {spawnSync} from 'node:child_process';
 
 function fixture(t,{mode='success',workspaceWrite=true}={}){
   const root=mkdtempSync(join(tmpdir(),'rian-p2-'));
@@ -76,10 +77,10 @@ test('incremental official hooks preserve staged, unstaged and untracked work th
 test('only official rate limit with same fresh checkpoint and unchanged content can dispatch',async t=>{
   const f=fixture(t);
   assert.equal((await f.run(f.event('StopFailure','server_error'))).state,'IGNORED');
-  await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit')),/UNSAFE_PRIVATE_RECORD/);
+  await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit')),/CHECKPOINT_MISSING/);
   await f.run(f.event('UserPromptSubmit'));
   assert.equal((await f.run(f.event('StopFailure','billing_error'))).state,'IGNORED');
-  await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit','different-session')),/UNSAFE_PRIVATE_RECORD/);
+  await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit','different-session')),/CHECKPOINT_MISSING/);
   writeFileSync(join(f.repo,'CLAUDE-PARTIAL.md'),'same path with changed contents\n');
   await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit')),/WORKTREE_CHANGED_AFTER_CHECKPOINT/);
   assert.equal(existsSync(join(f.repo,'CODEX-RESULT.md')),false);
@@ -189,4 +190,97 @@ test('worktree content drift during Codex preflight blocks launch',async t=>{
   await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit')),/WORKTREE_CHANGED_BEFORE_DISPATCH/);
   assert.equal(existsSync(join(f.repo,'CODEX-RESULT.md')),false);
   assert.equal(readdirSync(join(f.store,'receipts')).length,0);
+});
+
+test('status explains why automatic handoff would not run: approval, checkpoint, execution',async t=>{
+  const f=fixture(t);
+  const fakeCodex={codexCommand:process.execPath,codexPrefixArgs:[join(f.root,'fake-codex.mjs')]};
+  const unapproved=automaticHandoffStatus({manifestPath:f.activation,storeDir:join(f.root,'other-store'),...fakeCodex});
+  assert.equal(unapproved.ready,false);
+  assert.equal(unapproved.approval.state,'NOT_APPROVED');
+  assert.deepEqual(unapproved.blockers,[{code:'ACTIVATION_NOT_APPROVED',category:'APPROVAL'}]);
+  await assert.rejects(()=>handleClaudeHook({event:f.event('SessionStart'),manifestPath:f.activation,storeDir:join(f.root,'other-store')}),/ACTIVATION_NOT_APPROVED/);
+  const fresh=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,...fakeCodex});
+  assert.equal(fresh.ready,true);
+  assert.equal(fresh.codex.loggedIn,true);
+  assert.match(fresh.warnings[0],/NO_CHECKPOINT_YET/);
+  await f.run(f.event('PostToolUse'));
+  const cp=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,...fakeCodex});
+  assert.equal(cp.lastCheckpoint.fresh,true);assert.equal(cp.lastCheckpoint.sequence,1);
+  writeFileSync(join(f.repo,'CLAUDE-PARTIAL.md'),'changed after checkpoint\n');
+  await assert.rejects(()=>f.run(f.event('StopFailure','rate_limit')),/WORKTREE_CHANGED_AFTER_CHECKPOINT/);
+  const blocked=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,...fakeCodex});
+  assert.equal(blocked.lastTrigger.state,'BLOCKED');
+  assert.equal(blocked.lastTrigger.error,'WORKTREE_CHANGED_AFTER_CHECKPOINT');
+  assert.equal(blocked.lastTrigger.category,'CHECKPOINT');
+  await f.run(f.event('PostToolUse'));
+  assert.equal((await f.run(f.event('StopFailure','rate_limit'))).state,'COMPLETED');
+  assert.equal((await f.run(f.event('StopFailure','billing_error'))).state,'IGNORED');
+  const done=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,...fakeCodex});
+  assert.equal(done.lastTrigger.state,'IGNORED');
+  assert.equal(done.lastDispatch.state,'COMPLETED','an ignored stop does not hide the dispatch outcome');assert.ok(done.lastDispatch.handoffId);
+  assert.ok(done.warnings.some(w=>/OWNER_ATTENTION_REQUIRED/.test(w)));
+  assert.deepEqual(done.blockers,[{code:'PROJECT_TASK_ALREADY_ATTEMPTED',category:'EXECUTION'}]);
+  f.manifest.budget.timeoutMs=60_000;writeFileSync(f.activation,JSON.stringify(f.manifest));
+  assert.equal(automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,probeCodex:false}).approval.state,'CHANGED_REAPPROVAL_REQUIRED');
+  assert.equal(categorizeHandoffError('CODEX_NOT_AUTHENTICATED'),'EXECUTION');
+  assert.equal(categorizeHandoffError('CHECKPOINT_MISSING'),'CHECKPOINT');
+});
+
+test('CLI: status exit code and categorized hook errors without a TTY',async t=>{
+  const f=fixture(t);
+  const cli=join(import.meta.dirname,'automatic-handoff-cli.mjs');
+  const st=spawnSync(process.execPath,[cli,'status','--manifest',f.activation,'--store',join(f.root,'other-store')],{encoding:'utf8'});
+  assert.equal(st.status,2);
+  assert.equal(JSON.parse(st.stdout).approval.state,'NOT_APPROVED');
+  const hook=spawnSync(process.execPath,[cli,'hook','--manifest',f.activation,'--store',f.store],
+    {input:JSON.stringify(f.event('StopFailure','rate_limit')),encoding:'utf8'});
+  assert.equal(hook.status,1);
+  assert.deepEqual((({state,error,category})=>({state,error,category}))(JSON.parse(hook.stderr)),{state:'BLOCKED',error:'CHECKPOINT_MISSING',category:'CHECKPOINT'});
+  const approve=spawnSync(process.execPath,[cli,'approve','--manifest',f.activation,'--store',f.store],{input:'APPROVE x\n',encoding:'utf8'});
+  assert.equal(JSON.parse(approve.stderr).error,'INTERACTIVE_OWNER_TERMINAL_REQUIRED','approval cannot be scripted');
+});
+
+test('detached dispatch: hook returns at once, the runner executes the claim exactly once',async t=>{
+  const f=fixture(t);
+  const fake={codexCommand:process.execPath,codexPrefixArgs:[join(f.root,'fake-codex.mjs')]};
+  await f.run(f.event('PostToolUse'));
+  let spawned=null;
+  const r=await handleClaudeHook({event:f.event('StopFailure','rate_limit'),manifestPath:f.activation,storeDir:f.store,detach:true,
+    spawnRunner:args=>{spawned=args;return 424242;}});
+  assert.equal(r.state,'DISPATCHED_DETACHED');assert.equal(r.runnerPid,424242);
+  assert.equal(existsSync(join(f.repo,'CODEX-RESULT.md')),false,'nothing ran inside the hook');
+  assert.deepEqual(spawned.slice(0,1),['dispatch-run']);
+  assert.equal(spawned[spawned.indexOf('--handoff-id')+1],r.handoffId);
+  const pending=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,probeCodex:false});
+  assert.equal(pending.lastDispatch.markerState,'DETACHED');
+  assert.ok(pending.warnings.some(w=>/DETACHED_RUNNER_EXITED_WITHOUT_RESULT/.test(w)),'a dead runner pid is reported');
+  const done=await runDetachedDispatch({manifestPath:f.activation,storeDir:f.store,sessionId:'session-test-123',handoffId:r.handoffId,...fake});
+  assert.equal(done.state,'COMPLETED');
+  assert.equal(readFileSync(join(f.repo,'CODEX-RESULT.md'),'utf8'),'Codex continued\n');
+  await assert.rejects(()=>runDetachedDispatch({manifestPath:f.activation,storeDir:f.store,sessionId:'session-test-123',handoffId:r.handoffId,...fake}),/DISPATCH_NOT_PENDING/);
+  const after=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,probeCodex:false});
+  assert.equal(after.lastDispatch.state,'COMPLETED');assert.equal(after.lastDispatch.markerState,'COMPLETED');
+  assert.equal(after.lease,null);
+});
+
+test('detached runner re-verifies the worktree and the owner seal before Codex starts',async t=>{
+  const f=fixture(t);
+  const fake={codexCommand:process.execPath,codexPrefixArgs:[join(f.root,'fake-codex.mjs')]};
+  await f.run(f.event('PostToolUse'));
+  const r=await handleClaudeHook({event:f.event('StopFailure','rate_limit'),manifestPath:f.activation,storeDir:f.store,detach:true,spawnRunner:()=>1});
+  writeFileSync(join(f.repo,'CLAUDE-PARTIAL.md'),'Claude kept writing after the limit\n');
+  await assert.rejects(()=>runDetachedDispatch({manifestPath:f.activation,storeDir:f.store,sessionId:'session-test-123',handoffId:r.handoffId,...fake}),/WORKTREE_CHANGED_BEFORE_DISPATCH/);
+  assert.equal(existsSync(join(f.repo,'CODEX-RESULT.md')),false);
+  const s=automaticHandoffStatus({manifestPath:f.activation,storeDir:f.store,probeCodex:false});
+  assert.equal(s.lastDispatch.state,'BLOCKED');assert.equal(s.lastDispatch.category,'CHECKPOINT');
+  await assert.rejects(()=>runDetachedDispatch({manifestPath:f.activation,storeDir:f.store,sessionId:'session-test-123',handoffId:r.handoffId,...fake}),/DISPATCH_NOT_PENDING/,'no second attempt');
+});
+
+test('budget: up to 30 minutes for the detached Codex run, never more',async t=>{
+  const f=fixture(t);
+  f.manifest.budget.timeoutMs=1_800_000;writeFileSync(f.activation,JSON.stringify(f.manifest));
+  assert.equal(readActivationManifest(f.activation).manifest.budget.timeoutMs,1_800_000);
+  f.manifest.budget.timeoutMs=1_800_001;writeFileSync(f.activation,JSON.stringify(f.manifest));
+  assert.throws(()=>readActivationManifest(f.activation),/INVALID_BUDGET/);
 });

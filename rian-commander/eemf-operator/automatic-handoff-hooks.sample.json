@@ -4,6 +4,6 @@
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "node", "args": ["/ABSOLUTE/PATH/automatic-handoff-cli.mjs", "hook", "--manifest", "/ABSOLUTE/WORKTREE/.rian-handoff/activation.json"], "timeout": 20}]}],
     "PostToolUse": [{"hooks": [{"type": "command", "command": "node", "args": ["/ABSOLUTE/PATH/automatic-handoff-cli.mjs", "hook", "--manifest", "/ABSOLUTE/WORKTREE/.rian-handoff/activation.json"], "timeout": 20}]}],
     "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "node", "args": ["/ABSOLUTE/PATH/automatic-handoff-cli.mjs", "hook", "--manifest", "/ABSOLUTE/WORKTREE/.rian-handoff/activation.json"], "timeout": 20}]}],
-    "StopFailure": [{"matcher": "rate_limit", "hooks": [{"type": "command", "command": "node", "args": ["/ABSOLUTE/PATH/automatic-handoff-cli.mjs", "hook", "--manifest", "/ABSOLUTE/WORKTREE/.rian-handoff/activation.json"], "timeout": 180}]}]
+    "StopFailure": [{"matcher": "rate_limit", "hooks": [{"type": "command", "command": "node", "args": ["/ABSOLUTE/PATH/automatic-handoff-cli.mjs", "hook", "--manifest", "/ABSOLUTE/WORKTREE/.rian-handoff/activation.json"], "timeout": 30}]}]
   }
 }

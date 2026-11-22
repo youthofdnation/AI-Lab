@@ -15,7 +15,7 @@ task text, then review the complete file):
   "project": {"approvedRoot": "/absolute/owner/scope", "worktree": "/absolute/owner/scope/project"},
   "task": {"taskId": "task_12345678", "goal": "Finish the approved development task", "pendingSteps": ["Review Git status"], "testSummary": []},
   "permissions": {"workspaceWrite": true, "exclusiveWorktree": true, "allowedProviders": ["claude", "codex"]},
-  "budget": {"timeoutMs": 120000, "checkpointMaxAgeMs": 900000}
+  "budget": {"timeoutMs": 1200000, "checkpointMaxAgeMs": 900000}
 }
 ```
 
@@ -62,6 +62,31 @@ same-user processes: Claude hook JSON has no signature, and an unrelated
 same-user process could forge it. Use a dedicated worktree and host-level
 process isolation where that threat matters. A real Claude/Codex integration
 and a live rate-limit event remain unverified.
+
+## Detached run, status and errors (P2.1)
+
+The `StopFailure` hook no longer runs Codex inside Claude's hook process. It validates the
+approval seal, the session's fresh checkpoint, the unchanged worktree and the single-shot
+markers, writes a `DETACHED` claim and starts `automatic-handoff-cli.mjs dispatch-run` as a
+detached process, then returns (about 0.2 s on the Mac Studio). The runner re-checks the seal
+and the worktree fingerprint immediately before Codex starts and runs the claim exactly once
+(`DISPATCH_NOT_PENDING` / `DISPATCH_RUNNER_ALREADY_STARTED` otherwise). `budget.timeoutMs` may
+therefore be up to 30 minutes; the `StopFailure` hook timeout only covers validation (30 s).
+
+Claude ignores `StopFailure` output, so every hook call records its outcome in the private store
+(`hook-status/`). Ask why a handoff did or did not run with the read-only command:
+
+    node automatic-handoff-cli.mjs status --manifest /ABS/WORKTREE/.rian-handoff/activation.json
+
+It reports the manifest, owner approval (`APPROVED`, `NOT_APPROVED`, `CHANGED_REAPPROVAL_REQUIRED`),
+the last checkpoint and its freshness, the last trigger and the last real dispatch (with the
+authoritative marker state and whether a detached runner is alive), a held lease, an already
+attempted task and the Codex CLI login. Exit code 0 means ready, 2 means blocked. Every blocker
+and every hook error carries a category: `APPROVAL`, `CHECKPOINT`, `EXECUTION` or `CONFIGURATION`.
+New explicit codes: `ACTIVATION_NOT_APPROVED`, `CHECKPOINT_MISSING`, `RUNNER_SPAWN_FAILED`.
+
+Keep `.claude/settings.local.json` and `.rian-handoff/` git-ignored in the activated worktree;
+otherwise they appear as changed sensitive paths and the handoff is refused.
 
 The `codexReceiver` adapter is isolated so a future Codex → Claude path can
 have its own trigger, grant, preflight, and process runner. No V2 mail or

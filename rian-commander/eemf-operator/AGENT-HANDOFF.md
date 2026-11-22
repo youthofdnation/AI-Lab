@@ -78,6 +78,10 @@ P2 source and synthetic Mac tests are in `automatic-handoff.mjs`,
 Claude rate-limit observation or a deployed integration. The project-local
 activation manifest requires a private owner seal before any hook is accepted.
 
+P2.1 (detached Codex runner, `status` diagnostics) and the Mac Studio run with real Claude
+Code hooks and real Codex on a disposable repository are in `AGENT-HANDOFF-MAC-EVIDENCE.md`.
+The rate-limit trigger there was synthetic; no real usage exhaustion has been observed.
+
 References:
 https://code.claude.com/docs/en/hooks
 https://code.claude.com/docs/en/headless
