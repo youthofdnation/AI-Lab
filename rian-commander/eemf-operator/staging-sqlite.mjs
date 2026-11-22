@@ -39,7 +39,10 @@ export class StagingSqlite {
         'CREATE INDEX IF NOT EXISTS idx_long_jobs_device ON long_jobs(tenant,device,state,created)',
         'CREATE TABLE IF NOT EXISTS long_job_grants (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, kind TEXT NOT NULL, spec_sha TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, runs_left INTEGER NOT NULL, state TEXT NOT NULL)',
         'CREATE INDEX IF NOT EXISTS idx_long_job_grants ON long_job_grants(tenant,owner,device,kind,spec_sha)',
-        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
+        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))',
+        // Fleet scheduling facts per long job (no params, no results): priority, reserved resources,
+        // whether it needs a GPU slot, and the GPU memory hand-back verdict after it finished.
+        'CREATE TABLE IF NOT EXISTS fleet_jobs (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, needs_gpu INTEGER NOT NULL DEFAULT 0, cpu INTEGER NOT NULL DEFAULT 1, ram_mib INTEGER NOT NULL DEFAULT 0, vram_mib INTEGER NOT NULL DEFAULT 0, data_class TEXT NOT NULL, gpu_release TEXT)'
       ];
       this.#db.exec(ddl.join(';')+';');
       if (version!==2) this.#db.exec('PRAGMA user_version=2;');

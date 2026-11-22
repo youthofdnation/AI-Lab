@@ -12,6 +12,7 @@ import {createStagingArtifactHandler} from './tenant-artifact-http.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
 import {createLongJobHandler} from './long-job-http.mjs';
+import {FleetPolicy} from './fleet-policy.mjs';
 
 const LIMIT=110000;
 function parseJson(text,label){
@@ -31,6 +32,8 @@ export function stagingConfigFromEnv(env){
     cfg.approvers=parseJson(env.RIAN_STAGE_APPROVERS_JSON,'APPROVER_CONFIGURATION');
     cfg.publicOrigin=(env.RIAN_STAGE_PUBLIC_URL||'').replace(/\/+$/,'');
     cfg.formSecret=env.RIAN_STAGE_FORM_SECRET||'';
+    // RIAN AI Fleet: the roster, roles, denylist and quarantine come only from this variable.
+    if(env.RIAN_STAGE_ALLOW_FLEET==='1')cfg.fleetPolicy=parseJson(env.RIAN_STAGE_FLEET_POLICY_JSON,'FLEET_POLICY');
   }
   return cfg;
 }
@@ -47,7 +50,16 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
   if(config.jobsEnabled){
     // Optional per-device allowlist: RIAN_STAGE_DEVICES_JSON [{id,tenantId,allowedKinds:["diag.wait"]}]
     const deviceKinds=new Map((config.devices||[]).filter(d=>d&&d.allowedKinds!==undefined).map(d=>[d.id,d.allowedKinds]));
-    jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true}),clock,deviceKinds});
+    const allowFleet=config.fleetPolicy!==undefined;
+    const kinds=new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true,allowFleet});
+    let fleet=null;
+    if(allowFleet){
+      fleet=new FleetPolicy(config.fleetPolicy,{knownKinds:new Set(kinds.names())});
+      // A denylisted PC must not even hold a device token on the central node.
+      if((config.devices||[]).some(d=>fleet.isDenied(d.id)))throw Error('FLEET_DENIED_DEVICE_REGISTERED');
+      if(deviceKinds.size)throw Error('FLEET_POLICY_OWNS_DEVICE_KINDS');
+    }
+    jobs=new LongJobQueue({directory,store,kinds,clock,deviceKinds:fleet?null:deviceKinds,fleet});
     recovery=jobs.recoverAfterRestart();
     jobHandler=createLongJobHandler({directory,queue:jobs,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
   }

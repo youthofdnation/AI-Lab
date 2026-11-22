@@ -21,7 +21,7 @@ $ErrorActionPreference='Stop'
 $taskName='RIAN Commander V2 Agent'
 $base=Join-Path $env:LOCALAPPDATA 'RIAN-Commander-V2'
 $agentDir=Join-Path $base 'agent'
-$files=@('rian-v2-agent.py','rian_mail_index.py','tenant-artifact-agent.py')
+$files=@('rian-v2-agent.py','rian_mail_index.py','tenant-artifact-agent.py','rian_fleet_tasks.py','youngmin_qlora_measure.py')
 $who="$env:USERDOMAIN\$env:USERNAME"
 
 function Get-RianStatus {

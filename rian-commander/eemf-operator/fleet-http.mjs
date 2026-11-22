@@ -1,0 +1,66 @@
+/**
+ * Fleet tools on the V2 MCP endpoint (only when the queue has a FleetPolicy).
+ *
+ *  rian_v2_fleet_status     roster, online state, latest read-only inventory, active reservations
+ *  rian_v2_fleet_recommend  where a job would go now, and why every other PC was skipped
+ *  rian_v2_start_job        + device "auto" (placed by recommendation) and an optional `fleet`
+ *                           {priority, cpu, ramMiB, vramMiB, dataClass}
+ * There is still no approve tool: placing a job never skips the owner approval it needs.
+ */
+import {recommend} from './fleet-policy.mjs';
+
+export function fleetToolDefs(queue) {
+  if (!queue.fleet) return [];
+  const req = {type: 'object', properties: {kind: {type: 'string'}, cpu: {type: 'integer', minimum: 1, maximum: 256},
+    ramMiB: {type: 'integer', minimum: 0}, vramMiB: {type: 'integer', minimum: 0}, dataClass: {type: 'string', enum: ['public', 'synthetic', 'private']}},
+  required: ['kind'], additionalProperties: false};
+  return [
+    {name: 'rian_v2_fleet_status', description: 'RIAN AI Fleet: every pool PC with its status (ACTIVE / QUARANTINED), online state, the latest read-only inventory (CPU, RAM, GPU, disk, encryption, runtimes) and the jobs currently reserving it. Denylisted PCs never appear. Read only.',
+      inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
+    {name: 'rian_v2_fleet_recommend', description: 'RIAN AI Fleet: rank the PCs that could take a job of this kind and size right now (fresh inventory minus reservations, concurrency, GPU slots, protected GPU processes, data class), with the reason each other PC was skipped. Starts nothing.',
+      inputSchema: req},
+  ];
+}
+
+function inventories(queue, actor) {
+  const out = new Map();
+  for (const id of queue.fleet.ids()) {
+    const r = queue.latestSucceeded({actor, deviceId: id, kind: 'fleet.inventory'});
+    if (r && r.result && r.result.ok) out.set(id, {captured: r.finished, snapshot: r.result.snapshot, job_id: r.job_id});
+  }
+  return out;
+}
+
+export function fleetRecommend(queue, actor, args, now) {
+  const spec = queue.kinds.get(args.kind);
+  return recommend(queue.fleet, {...args, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now);
+}
+
+export function fleetStatus(queue, actor, now) {
+  const inv = inventories(queue, actor), online = new Map(queue.devices(actor).map((d) => [d.device, d]));
+  const active = queue.fleetActive(actor);
+  const p = queue.fleet.summary();
+  return {denylist_entries: p.denylistEntries, devices: p.devices.map((d) => {
+    const i = inv.get(d.id), s = i && i.snapshot;
+    return {...d, online: online.get(d.id)?.online === true, last_seen: online.get(d.id)?.last_seen || null,
+      inventory: s ? {captured: i.captured, age_seconds: now - i.captured, host: s.host, os: s.os, cpu: s.cpu, ram: s.ram,
+        gpus: s.gpus, disks: s.disks, encryption: s.encryption, runtimes: s.runtimes, ai_processes: s.ai_processes} : null,
+      reservations: active.filter((a) => a.device === d.id)};
+  })};
+}
+
+/** Returns undefined when `name` is not a fleet tool. */
+export function callFleetTool(queue, actor, name, args, now, exact) {
+  if (!queue.fleet) return undefined;
+  if (name === 'rian_v2_fleet_status') { exact(args, []); return fleetStatus(queue, actor, now); }
+  if (name === 'rian_v2_fleet_recommend') { exact(args, ['kind', 'cpu', 'ramMiB', 'vramMiB', 'dataClass'], ['kind']); return fleetRecommend(queue, actor, args, now); }
+  return undefined;
+}
+
+/** device "auto": the best-ranked PC, or a FLEET_NO_ELIGIBLE_DEVICE error carrying the reasons. */
+export function placeAuto(queue, actor, kind, fleet, now) {
+  const f = fleet || {};
+  const r = fleetRecommend(queue, actor, {kind, cpu: f.cpu, ramMiB: f.ramMiB, vramMiB: f.vramMiB, dataClass: f.dataClass}, now);
+  if (!r.candidates.length) throw Error('FLEET_NO_ELIGIBLE_DEVICE:' + r.excluded.map((e) => e.device + '=' + e.reason).join(',').slice(0, 300));
+  return {device: r.candidates[0].device, placement: {chosen: r.candidates[0], alternatives: r.candidates.slice(1).map((c) => c.device), excluded: r.excluded}};
+}

@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -41,7 +42,8 @@ _spec.loader.exec_module(_artifact)
 Client, TransferError = _artifact.Client, _artifact.TransferError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"}
+FLEET_KINDS = {"fleet.inventory", "fleet.cpu_bench", "fleet.gpu_probe", "youngmin.qlora_probe"}
+KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"} | FLEET_KINDS
 MAX_OUTPUT = 96 * 1024
 # The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
 # request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
@@ -73,7 +75,25 @@ def load_config(path):
             raise SystemExit("CONFIG_MISSING_" + key.upper())
     if not set(cfg["allowed_kinds"]) <= KNOWN_KINDS:
         raise SystemExit("CONFIG_UNKNOWN_KIND")
+    if set(cfg["allowed_kinds"]) & FLEET_KINDS:
+        f = cfg.get("fleet")
+        # Fleet work needs this PC's own copy of the denylist: fail closed without one.
+        if not isinstance(f, dict) or not isinstance(f.get("denied_hosts"), list) or not f["denied_hosts"]:
+            raise SystemExit("CONFIG_FLEET_DENYLIST_REQUIRED")
+    assert_host_allowed(cfg)
     return cfg
+
+
+def _norm_host(name):
+    name = str(name).strip().lower()
+    return name[:-6] if name.endswith(".local") else name
+
+
+def assert_host_allowed(cfg):
+    """A denylisted PC never runs this agent, whatever the server says (defence in depth)."""
+    denied = {_norm_host(h) for h in ((cfg.get("fleet") or {}).get("denied_hosts") or [])}
+    if denied & {_norm_host(socket.gethostname()), _norm_host(cfg.get("device_id", ""))}:
+        raise SystemExit("HOST_DENIED")
 
 
 def device_token(cfg):
@@ -104,6 +124,17 @@ def validate_local(kind, params, cfg):
     elif kind == "mail.read":
         if keys != {"messageId"} or not mail.MESSAGE_ID.fullmatch(str(params["messageId"])):
             raise mail.MailError("INVALID_MESSAGE_ID")
+    elif kind in FLEET_KINDS:
+        bounds = {"fleet.inventory": {}, "fleet.cpu_bench": {"chunk": (0, 9999), "units": (1, 200)},
+                  "fleet.gpu_probe": {"mib": (16, 2048)},
+                  "youngmin.qlora_probe": {"seqLen": (64, 2048), "batch": (1, 8), "steps": (1, 20), "rank": (4, 64), "gradCheckpointing": None}}[kind]
+        if keys != set(bounds):
+            raise mail.MailError("INVALID_PARAMS")
+        for k, b in bounds.items():
+            v = params[k]
+            ok = isinstance(v, bool) if b is None else (isinstance(v, int) and not isinstance(v, bool) and b[0] <= v <= b[1])
+            if not ok:
+                raise mail.MailError("INVALID_PARAMS")
 
 
 # ------------------------------------------------------------------ runner
@@ -134,7 +165,30 @@ def run_job(job_dir, cfg):
     try:
         validate_local(job["kind"], job["params"], cfg)
         params = job["params"]
-        if job["kind"] == "diag.wait":
+        if job["kind"] in FLEET_KINDS:
+            import rian_fleet_tasks as fleet  # only fleet installs ship it
+            f = cfg.get("fleet") or {}
+            try:
+                if job["kind"] == "fleet.inventory":
+                    output = fleet.inventory(progress)
+                elif job["kind"] == "fleet.cpu_bench":
+                    output = fleet.cpu_bench(params["chunk"], params["units"], progress, cancelled)
+                elif job["kind"] == "fleet.gpu_probe":
+                    output = fleet.gpu_probe(params["mib"], f, progress, cancelled)
+                else:
+                    output = fleet.qlora_probe(params, f, progress, cancelled)
+            except fleet.FleetCancelled:
+                raise mail.MailCancelled("CANCELLED")
+            except fleet.FleetError as err:
+                raise mail.MailError(str(err))
+            if not output.get("ok", False):
+                # A refused or failed probe still carries its gpu_release measurement.
+                outcome, code = "FAILED", 2
+                text = json.dumps(output, ensure_ascii=False)
+                write_json(job_dir / "result.json", {"outcome": outcome, "exitCode": code, "output": text})
+                stop.set()
+                return 0
+        elif job["kind"] == "diag.wait":
             total = params["seconds"]
             start = time.time()
             for i in range(total):
@@ -237,7 +291,8 @@ def single_instance(state_dir):
 
 class Supervisor:
     def __init__(self, cfg, config_path, client):
-        self.cfg, self.config_path, self.client = cfg, str(config_path), client
+        # Absolute: the detached runner starts in the job directory, where a relative path breaks.
+        self.cfg, self.config_path, self.client = cfg, str(Path(config_path).resolve()), client
         self.state = Path(cfg["state_dir"])
         self.jobs = self.state / "jobs"
         private_dir(self.state)
@@ -356,6 +411,11 @@ class Supervisor:
     def active(self):
         return sorted(p for p in self.jobs.iterdir() if p.is_dir())
 
+    @property
+    def max_parallel(self):
+        n = self.cfg.get("max_parallel", 1)
+        return n if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 16 else 1
+
     def loop(self, poll_seconds=5, max_seconds=None):
         started = time.time()
         log("AGENT_STARTED", device=self.cfg["device_id"], recovered=len(self.active()))
@@ -364,7 +424,8 @@ class Supervisor:
                 self.reap()
                 for job_dir in self.active():
                     self.supervise(job_dir)
-                if not self.active():
+                # One job at a time unless this PC's own config allows more (the server limits it too).
+                if len(self.active()) < self.max_parallel:
                     if self.claim():
                         continue
                 self.backoff = 1
