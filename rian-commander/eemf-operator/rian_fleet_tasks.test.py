@@ -81,6 +81,7 @@ class AgentConfig(unittest.TestCase):
         self.assertEqual(str(e.exception), "HOST_DENIED")
         with self.assertRaises(SystemExit):
             A.load_config(self.cfg(device_id="BLOCKED-PC", fleet={"denied_hosts": ["blocked-pc"]}))
+        self.assertEqual(A._norm_host("Mac-1.local"), A._norm_host("mac-1.LOCAL.local"))   # macOS names end in .local
         self.assertEqual(A.load_config(self.cfg(fleet={"denied_hosts": ["SOME-OTHER-PC"]}))["device_id"], "pc1")
 
     def test_runner_gets_an_absolute_config_path(self):

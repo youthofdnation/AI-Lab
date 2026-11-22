@@ -85,8 +85,11 @@ def load_config(path):
 
 
 def _norm_host(name):
-    name = str(name).strip().lower()
-    return name[:-6] if name.endswith(".local") else name
+    # macOS reports "name.local" already; a denylist entry may carry ".local" too - strip every one.
+    name = str(name).strip().lower().rstrip(".")
+    while name.endswith(".local"):
+        name = name[:-6]
+    return name
 
 
 def assert_host_allowed(cfg):

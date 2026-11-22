@@ -18,7 +18,7 @@ export const DATA_CLASSES = Object.freeze(['public', 'synthetic', 'private']);
 const STATUS = new Set(['ACTIVE', 'QUARANTINED']);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const HOST = /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/;
-const norm = (s) => String(s).trim().toLowerCase().replace(/\.local$/, '');
+const norm = (s) => String(s).trim().toLowerCase().replace(/\.+$/, '').replace(/(\.local)+$/, '');   // "x.local.local" == "x"
 
 function int(v, lo, hi, code) {
   if (!Number.isInteger(v) || v < lo || v > hi) throw Error(code);

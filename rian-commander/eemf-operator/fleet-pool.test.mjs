@@ -46,7 +46,7 @@ test('policy fails closed: a denylist is mandatory and a denied host can never b
  const priv=structuredClone(POLICY);priv.devices[1].dataClasses.push('private');
  assert.throws(()=>new FleetPolicy(priv),/PRIVATE_NOT_APPROVED/,'private data needs an explicit approval flag');
  const p=policy();
- for(const n of ['DENIED-PC','denied-pc','Denied-PC.local'])assert.equal(p.isDenied(n),true,n);
+ for(const n of ['DENIED-PC','denied-pc','Denied-PC.local','denied-pc.local.local','DENIED-PC.'])assert.equal(p.isDenied(n),true,n);
  assert.throws(()=>p.device('DENIED-PC'),/DEVICE_DENIED/);
  assert.deepEqual(p.deviceKinds().get('quar'),['fleet.inventory'],'a quarantined PC can only be inspected');
  assert.throws(()=>p.assertDispatchable('gpu1','fleet.cpu_bench',{dataClass:'private'}),/DATA_CLASS_NOT_ALLOWED/);
