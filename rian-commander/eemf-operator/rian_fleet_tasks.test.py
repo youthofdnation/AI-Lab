@@ -222,7 +222,7 @@ class Memory(unittest.TestCase):
         probe = ("import os,sys,ctypes; sys.path.insert(0, sys.argv[1]); import rian_fleet_tasks as F; ok = F.lower_priority()\n"
                  "if F.WIN:\n k = ctypes.WinDLL('kernel32'); k.GetCurrentProcess.restype = ctypes.c_void_p\n"
                  " k.GetPriorityClass.argtypes = [ctypes.c_void_p]; print(ok, k.GetPriorityClass(k.GetCurrentProcess()) == 0x4000)\n"
-                 "else:\n print(ok, os.nice(0) >= 10)\n")
+                 "else:\n print(ok, os.getpriority(os.PRIO_PROCESS, 0) >= 10)\n")
         out = subprocess.run([sys.executable, "-c", probe, str(HERE)], capture_output=True, text=True, timeout=60).stdout.split()
         self.assertEqual(out, ["True", "True"])
 

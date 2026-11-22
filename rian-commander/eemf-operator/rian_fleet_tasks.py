@@ -313,8 +313,10 @@ def lower_priority():
             k.GetCurrentProcess.restype = ctypes.c_void_p
             k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
             return bool(k.SetPriorityClass(k.GetCurrentProcess(), 0x00004000))   # BELOW_NORMAL_PRIORITY_CLASS
-        os.nice(10)
-        return True
+        # setpriority/getpriority, not os.nice(): nice()'s return value differed on a CI macOS runner.
+        if os.getpriority(os.PRIO_PROCESS, 0) < 10:
+            os.setpriority(os.PRIO_PROCESS, 0, 10)
+        return os.getpriority(os.PRIO_PROCESS, 0) >= 10
     except (OSError, AttributeError):
         return False
 
