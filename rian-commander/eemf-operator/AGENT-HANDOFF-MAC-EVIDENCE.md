@@ -51,3 +51,25 @@ Tests: `node --test agent-handoff.test.mjs manual-handoff.test.mjs automatic-han
 - Hooks in Claude **desktop app** sessions (the CLI was used; the docs state the same events fire).
 - Windows and Linux real-device runs (CI matrix only).
 - Activation on a real project; the Codex → Claude return path (P3).
+
+## P2.2 project grant on the Mac Studio (2026-11-22, runtime pinned at 0c78a58 / b086c48)
+
+Disposable repository again; the owner was shown only the native approval dialog (no terminal
+command, no typed phrase). Trigger caveat unchanged: `StopFailure(rate_limit)` was synthetic, carrying
+the real session id of each real Claude Code session; no real usage exhaustion was observed.
+
+| Step | Observed |
+|---|---|
+| Grant | macOS dialog, owner clicked 승인 once → `GRANTED`, `approvedVia: macos-dialog`, 3 runs, 1 day, 10 min/run |
+| Task 1 (real Claude session, Claude limited to `git status`) | hook-grant captured the prompt locally; trigger → `DISPATCHED_DETACHED` (run 1); real Codex `COMPLETED` in 31 s; `TASK_ONE.md` exactly as requested |
+| Task 2 (different request, new real session) | no new approval; run 2; real Codex `COMPLETED` in 50 s; `TASK_TWO.md` = `git ls-files` + final line |
+| Uncommitted work | Claude's untracked `CLAUDE-PARTIAL.md` unchanged after both runs |
+| Duplicates | same session re-trigger → `AUTOMATIC_DISPATCH_ALREADY_ATTEMPTED`; task 1 request from a NEW real session → `PROJECT_TASK_ALREADY_ATTEMPTED`; neither consumed a run (2 used, 1 left), still 2 Codex receipts |
+| Other stops | `server_error` → `IGNORED` |
+| Revoke | `revoke` → status `REVOKED`; the next hook → `GRANT_REVOKED (APPROVAL)` |
+
+`status --worktree` now also reports whether the five grant hooks are installed
+(`hooks.installed`, `missing`; StopFailure only counts with a `rate_limit` matcher).
+
+Real PR #5 worktree: the owner did **not** approve the second dialog (declined, closed or no click
+within 3 minutes → `OWNER_APPROVAL_NOT_GIVEN`). No grant and no hooks were installed there.
