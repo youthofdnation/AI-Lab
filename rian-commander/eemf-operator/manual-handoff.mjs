@@ -83,18 +83,19 @@ function verifyGitUnchanged(handoff,approvedRoot){
   assert(current.dirty===before.dirty&&current.omittedSensitivePaths===before.omittedSensitivePaths&&canon(current.changed)===canon(before.changed),'GIT_WORKTREE_CHANGED_AFTER_CHECKPOINT');
   return current;
 }
-function minimalEnv(){
+function minimalEnv(strictAuto=false){
   // Do not accidentally forward ANTHROPIC_ / CLAUDE_ / GitHub / cloud credentials.
   const allow=['PATH','Path','HOME','USER','LOGNAME','USERNAME','USERPROFILE','HOMEDRIVE','HOMEPATH','PROGRAMDATA','ComSpec','PATHEXT','SystemRoot','WINDIR','TMP','TEMP','TMPDIR','APPDATA','LOCALAPPDATA','XDG_CONFIG_HOME','XDG_CACHE_HOME','CODEX_HOME','OPENAI_API_KEY','OPENAI_BASE_URL','LANG','LC_ALL','TERM'];
-  return Object.fromEntries(allow.filter(k=>typeof process.env[k]==='string').map(k=>[k,process.env[k]]));
+  return Object.fromEntries(allow.filter(k=>typeof process.env[k]==='string'&&
+    (!strictAuto||!['OPENAI_API_KEY','OPENAI_BASE_URL'].includes(k))).map(k=>[k,process.env[k]]));
 }
 function binaryArgs(prefix,args){
   assert(Array.isArray(prefix)&&prefix.every(x=>typeof x==='string'&&x.length<=500),'INVALID_TEST_EXECUTABLE_PREFIX');
   return [...prefix,...args];
 }
-function codexPreflight(command,prefix,repo){
+function codexPreflight(command,prefix,repo,strictAuto=false){
   for(const args of [['--version'],['login','status']]){
-    const result=spawnSync(command,binaryArgs(prefix,args),{cwd:repo,env:minimalEnv(),windowsHide:true,timeout:10000,encoding:'utf8',maxBuffer:4096});
+    const result=spawnSync(command,binaryArgs(prefix,args),{cwd:repo,env:minimalEnv(strictAuto),windowsHide:true,timeout:10000,encoding:'utf8',maxBuffer:4096});
     assert(!result.error&&result.status===0,args[0]==='login'?'CODEX_NOT_AUTHENTICATED':'CODEX_EXECUTABLE_UNAVAILABLE');
   }
 }
@@ -107,8 +108,14 @@ function validateExecutable(command){
 /** Execute one Codex session, only on explicit P1 manual approval.
  * codexPrefixArgs is a test seam, never exposed in the user CLI.
  */
-export async function executeManualHandoff({checkpointPath,approvedRoot,storeDir=defaultStore(),ownerApproved=false,claudeStopped=false,codexCommand='codex',codexPrefixArgs=[],timeoutMs=180_000}={}){
-  assert(ownerApproved===true&&claudeStopped===true,'OWNER_AND_QUIESCENCE_CONFIRMATION_REQUIRED');
+export async function executeManualHandoff(options={}){
+  assert(options.ownerApproved===true&&options.claudeStopped===true,'OWNER_AND_QUIESCENCE_CONFIRMATION_REQUIRED');
+  return executeApprovedHandoff(options);
+}
+
+/** Shared P1/P2 subprocess path. Callers must validate their own owner grant. */
+export async function executeApprovedHandoff({checkpointPath,approvedRoot,storeDir=defaultStore(),ownerApproved=false,codexCommand='codex',codexPrefixArgs=[],timeoutMs=180_000,onProgress=()=>{},beforeDispatch=()=>{},strictAuto=false}={}){
+  assert(ownerApproved===true,'OWNER_HANDOFF_APPROVAL_REQUIRED');
   assert(Number.isInteger(timeoutMs)&&timeoutMs>=1000&&timeoutMs<=1_800_000,'INVALID_RUNTIME_BUDGET');
   validateExecutable(codexCommand);
   const dir=ensureStore(storeDir);
@@ -129,13 +136,32 @@ export async function executeManualHandoff({checkpointPath,approvedRoot,storeDir
     closeSync(fd);fd=null;
     // Avoid launching after a checkpoint invalidation or login failure.
     verifyGitUnchanged(handoff,approvedRoot);
-    codexPreflight(codexCommand,codexPrefixArgs,current.worktree);
+    codexPreflight(codexCommand,codexPrefixArgs,current.worktree,strictAuto);
+    beforeDispatch();
     atomicJSON(receipt,{handoffId:handoff.handoffId,attemptId,state:'DISPATCHING',startedAt:now(),provider:'codex',worktree:current.worktree});
-    const summary={handoffId:handoff.handoffId,attemptId,state:'UNKNOWN_DO_NOT_RETRY',events:0,malformed:0,threadId:null,exitCode:null,startedAt:now(),finishedAt:null};
-    const proc=spawn(codexCommand,binaryArgs(codexPrefixArgs,plan.args),{
-      cwd:current.worktree,env:minimalEnv(),stdio:['pipe','pipe','pipe'],windowsHide:true,shell:false
+    const summary={handoffId:handoff.handoffId,attemptId,state:'UNKNOWN_DO_NOT_RETRY',events:0,malformed:0,threadId:null,exitCode:null,startedAt:now(),finishedAt:null,
+      gitBefore:current.head,changedBefore:current.changed,testChecks:{passed:0,failed:0},commandChecks:{passed:0,failed:0}};
+    const args=strictAuto?[
+      // The approval policy is a top-level Codex flag, before `exec`.
+      '-a','never',...plan.args.slice(0,-1),
+      '--config','sandbox_workspace_write.network_access=false',
+      '--config','sandbox_workspace_write.writable_roots=[]',
+      '--config','sandbox_workspace_write.exclude_slash_tmp=true',
+      '--config','sandbox_workspace_write.exclude_tmpdir_env_var=true',
+      '--config','web_search="disabled"',
+      '--config','apps._default.enabled=false',
+      '--config','plugins._default.enabled=false',
+      '--config','forced_login_method="chatgpt"','-'
+    ]:plan.args;
+    const proc=spawn(codexCommand,binaryArgs(codexPrefixArgs,args),{
+      cwd:current.worktree,env:minimalEnv(strictAuto),stdio:['pipe','pipe','pipe'],windowsHide:true,shell:false
     });
     spawned=true;
+    if(Number.isInteger(proc.pid)){
+      atomicJSON(lock,{attemptId,handoffId:handoff.handoffId,worktree:current.worktree,createdAt:now(),childPid:proc.pid});
+      atomicJSON(receipt,{handoffId:handoff.handoffId,attemptId,state:'RUNNING',startedAt:summary.startedAt,
+        provider:'codex',worktree:current.worktree,childPid:proc.pid});
+    }
     proc.stdin.on('error',()=>{});
     proc.stdin.end(plan.stdin);
     let buffer='',byteCount=0;
@@ -145,8 +171,23 @@ export async function executeManualHandoff({checkpointPath,approvedRoot,storeDir
       try{
         const event=JSON.parse(line);
         if(event.type==='thread.started'&&typeof event.thread_id==='string'&&uuid.test(event.thread_id))summary.threadId=event.thread_id;
-        if(event.type==='turn.failed')summary.turnFailed=true;
+        if(event.type==='turn.completed')summary.turnCompleted=true;
+        if(event.type==='item.completed'&&event.item?.type==='command_execution'){
+          const ok=event.item.exit_code===0;
+          summary.commandChecks[ok?'passed':'failed']++;
+          const command=String(event.item.command||'');
+          if(/(?:^|[\s'";])(?:node(?:\.exe)?\s+--test|npm\s+test|pytest|python(?:3)?(?:\.exe)?\s+-m\s+unittest)\b/i.test(command))
+            summary.testChecks[ok?'passed':'failed']++;
+        }
+        if(event.type==='turn.failed'){
+          summary.turnFailed=true;
+          const reason=String(event.error?.message||event.error?.code||'').slice(0,500);
+          summary.failureKind=/usage.limit|quota|insufficient.quota|rate.limit/i.test(reason)?'USAGE_LIMIT':
+            /network|connect|timeout|socket|dns|econn/i.test(reason)?'NETWORK_UNCERTAIN':'PROVIDER_FAILED';
+        }
       }catch{summary.malformed++;}
+      try{onProgress({handoffId:summary.handoffId,attemptId:summary.attemptId,state:'RUNNING',events:summary.events,
+        threadId:summary.threadId,failureKind:summary.failureKind||null});}catch{}
     };
     proc.stdout.on('data',part=>{
       byteCount+=part.byteLength;
@@ -160,14 +201,32 @@ export async function executeManualHandoff({checkpointPath,approvedRoot,storeDir
     // Never store raw stderr or JSON events: tool results may contain credentials.
     proc.stderr.on('data',()=>{});
     const outcome=await new Promise(resolve=>{
-      const timeout=setTimeout(()=>{uncertain=true;proc.kill();},timeoutMs);
-      proc.once('error',err=>{clearTimeout(timeout);resolve({error:err,code:null,signal:null});});
-      proc.once('close',(code,signal)=>{clearTimeout(timeout);resolve({code,signal});});
+      let settled=false,killTimer,forceTimer;
+      const finish=value=>{
+        if(settled)return;
+        settled=true;clearTimeout(timeout);clearTimeout(killTimer);clearTimeout(forceTimer);resolve(value);
+      };
+      const timeout=setTimeout(()=>{
+        uncertain=true;proc.kill();
+        killTimer=setTimeout(()=>{
+          proc.kill('SIGKILL');
+          forceTimer=setTimeout(()=>{
+            proc.stdout.destroy();proc.stderr.destroy();proc.unref();
+            finish({code:null,signal:'TIMEOUT_UNCONFIRMED'});
+          },2000);
+        },1000);
+      },timeoutMs);
+      proc.once('error',err=>finish({error:err,code:null,signal:null}));
+      proc.once('close',(code,signal)=>finish({code,signal}));
     });
     if(buffer)parse(buffer.slice(0,120000));
     summary.finishedAt=now();summary.exitCode=outcome.code;
-    summary.state=uncertain||outcome.signal?'UNKNOWN_DO_NOT_RETRY':outcome.code===0&&!summary.turnFailed?'COMPLETED':'FAILED';
-    try{summary.gitAfter=inspectWorktree({approvedRoot,worktree:current.worktree}).head;}catch{summary.gitAfter='UNVERIFIED';}
+    summary.state=uncertain||outcome.signal||summary.failureKind==='NETWORK_UNCERTAIN'?'UNKNOWN_DO_NOT_RETRY':
+      outcome.code===0&&summary.turnCompleted&&!summary.turnFailed?'COMPLETED':'FAILED';
+    try{
+      const after=inspectWorktree({approvedRoot,worktree:current.worktree});
+      summary.gitAfter=after.head;summary.changedAfter=after.changed;
+    }catch{summary.gitAfter='UNVERIFIED';summary.changedAfter=[];}
     atomicJSON(receipt,summary);recordedFinal=true;
     // Unknown state deliberately retains lock: a reviewer must check the process
     // before starting another provider on this worktree.

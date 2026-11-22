@@ -1,6 +1,6 @@
 # RIAN Agent Handoff — Claude Code ⇄ Codex
 
-**State:** source-only P0 foundation, NOT installed, NOT enabled on any PC.
+**State:** source-only P0/P1/P2 implementation, NOT installed, NOT enabled on any PC.
 **Branch:** feature/rian-commander-agent-handoff-mvp
 **Scope:** cross-provider dev task handoff; separate from V2 mail/diagnostic actions.
 
@@ -72,6 +72,11 @@ P3: Codex → Claude return, Mac/Windows packaging, tenant isolation E2E.
 P4: separate privileged remote development surface and UI.
 
 Do NOT deploy or enable automatic execution in production from this branch.
+
+P2 source and synthetic Mac tests are in `automatic-handoff.mjs`,
+`automatic-handoff-cli.mjs`, and `AUTOMATIC-HANDOFF.md`. P2 is not a real
+Claude rate-limit observation or a deployed integration. The project-local
+activation manifest requires a private owner seal before any hook is accepted.
 
 References:
 https://code.claude.com/docs/en/hooks
