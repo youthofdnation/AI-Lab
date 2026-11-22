@@ -47,6 +47,7 @@ MAX_OUTPUT = 96 * 1024
 # request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
 MAX_WIRE = 90_000
 ALIVE_STALE_SECONDS = 20
+ALREADY_RUNNING_EXIT = 75  # EX_TEMPFAIL: another supervisor already owns this state directory
 
 
 def log(event, **fields):
@@ -200,14 +201,58 @@ def pid_running(pid):
         return False
 
 
+def private_dir(path):
+    """Create the directory (or tighten one left by an older agent) as owner-only on POSIX."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+    return path
+
+
+def single_instance(state_dir):
+    """Exclusive, non-blocking lock so two supervisors never share one journal.
+
+    The OS releases it when the process exits, including SIGKILL/TerminateProcess.
+    Python descriptors are non-inheritable and the runner is spawned with
+    close_fds=True, so a detached runner never keeps the lock across a restart.
+    Returns the open lock file (keep a reference) or None if another supervisor holds it.
+    """
+    state = private_dir(state_dir)
+    fd = os.open(state / "supervisor.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    handle = os.fdopen(fd, "r+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 class Supervisor:
     def __init__(self, cfg, config_path, client):
         self.cfg, self.config_path, self.client = cfg, str(config_path), client
         self.state = Path(cfg["state_dir"])
         self.jobs = self.state / "jobs"
-        self.jobs.mkdir(parents=True, exist_ok=True)
+        private_dir(self.state)
+        private_dir(self.jobs)
         self.seen_file = self.state / "executed-job-ids.json"
         self.backoff = 1
+        # Runners started by THIS supervisor are its children: they must be reaped, or a runner that
+        # died without a result stays a zombie that pid_running() reports as alive forever.
+        self.children, self.exited = {}, set()
+
+    def reap(self):
+        for job_id, proc in list(self.children.items()):
+            if proc.poll() is not None:
+                del self.children[job_id]
+                self.exited.add(job_id)
 
     def executed(self):
         return set(read_json(self.seen_file) or [])
@@ -224,6 +269,7 @@ class Supervisor:
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen(args, **kwargs)
+        self.children[job_dir.name] = proc
         meta = read_json(job_dir / "job.json")
         meta["runnerPid"] = proc.pid
         write_json(job_dir / "job.json", meta)
@@ -240,7 +286,7 @@ class Supervisor:
             log("JOB_REFUSED_DUPLICATE", job=job_id)
             return None
         job_dir = self.jobs / job_id
-        job_dir.mkdir(parents=True, exist_ok=False)
+        job_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         record = {"jobId": job_id, "kind": job["kind"], "params": job["params"], "leaseToken": job["leaseToken"],
                   "leaseSeconds": job["leaseSeconds"], "runDeadline": time.time() + job["maxRuntimeSeconds"], "claimedAt": time.time()}
         try:
@@ -267,7 +313,9 @@ class Supervisor:
         if result is None:
             alive = job_dir / "alive"
             fresh = alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_STALE_SECONDS
-            if not fresh and not pid_running(job.get("runnerPid")) and time.time() - job.get("claimedAt", 0) > 10:
+            self.reap()
+            gone = job["jobId"] in self.exited or not pid_running(job.get("runnerPid"))
+            if not fresh and gone and time.time() - job.get("claimedAt", 0) > 10:
                 result = {"outcome": "INTERRUPTED", "exitCode": -1, "output": json.dumps({"ok": False, "error": "RUNNER_LOST_DURING_AGENT_RESTART"})}
                 write_json(job_dir / "result.json", result)
                 log("JOB_INTERRUPTED", job=job["jobId"])
@@ -313,6 +361,7 @@ class Supervisor:
         log("AGENT_STARTED", device=self.cfg["device_id"], recovered=len(self.active()))
         while max_seconds is None or time.time() - started < max_seconds:
             try:
+                self.reap()
                 for job_dir in self.active():
                     self.supervise(job_dir)
                 if not self.active():
@@ -351,8 +400,16 @@ def main(argv=None):
         return run_job(a.job_dir, cfg)
     if a.command == "status":
         return status(cfg)
-    client = Client(cfg["relay_url"], device_token(cfg), allow_test_loopback=cfg.get("allow_test_loopback") is True, timeout=25)
-    Supervisor(cfg, a.config, client).loop(cfg.get("poll_seconds", 5), a.max_seconds)
+    lock = single_instance(cfg["state_dir"])
+    if lock is None:
+        # e.g. a manual start while launchd/the logon task already runs the agent
+        log("AGENT_ALREADY_RUNNING", device=cfg["device_id"])
+        return ALREADY_RUNNING_EXIT
+    try:
+        client = Client(cfg["relay_url"], device_token(cfg), allow_test_loopback=cfg.get("allow_test_loopback") is True, timeout=25)
+        Supervisor(cfg, a.config, client).loop(cfg.get("poll_seconds", 5), a.max_seconds)
+    finally:
+        lock.close()
     return 0
 
 

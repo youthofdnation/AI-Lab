@@ -58,12 +58,24 @@ export function longJobGuidance(state){
 }
 
 export class LongJobQueue {
-  #store;#directory;#kinds;#clock;#limits;
-  constructor({directory,store,kinds=new LongJobKinds(),clock=()=>Date.now(),limits={}}){
+  #store;#directory;#kinds;#clock;#limits;#deviceKinds;
+  /**
+   * deviceKinds (optional): Map/entries of deviceId -> allowed kind names. A listed device can
+   * only be asked for those kinds (server-side, before any approval page); unlisted devices keep
+   * every configured kind. The PC agent still enforces its own local allowlist independently.
+   */
+  constructor({directory,store,kinds=new LongJobKinds(),clock=()=>Date.now(),limits={},deviceKinds=null}){
     if(!(directory instanceof TenantDirectory)||!(store instanceof StagingSqlite)||!(kinds instanceof LongJobKinds)||typeof clock!=='function')throw Error('INVALID_LONG_JOB_QUEUE');
     this.#store=store;this.#directory=directory;this.#kinds=kinds;this.#clock=clock;
     this.#limits=Object.freeze({...LONG_JOB_LIMITS,...limits});
+    this.#deviceKinds=new Map();
+    const known=new Set(kinds.names());
+    for(const [device,list] of deviceKinds instanceof Map?deviceKinds:Object.entries(deviceKinds||{})){
+      if(typeof device!=='string'||!Array.isArray(list)||!list.length||!list.every(k=>typeof k==='string'&&known.has(k)))throw Error('INVALID_DEVICE_KINDS');
+      this.#deviceKinds.set(device,new Set(list));
+    }
   }
+  #kindAllowed(deviceId,kind){const allowed=this.#deviceKinds.get(deviceId);return !allowed||allowed.has(kind);}
   get kinds(){return this.#kinds;}
   get limits(){return this.#limits;}
   #now(){return Math.floor(this.#clock()/1000);}
@@ -137,12 +149,14 @@ export class LongJobQueue {
   devices(actor){
     const own=this.#directory.listOwnDevices(actor),now=this.#now();
     const seen=new Map(this.#db().prepare('SELECT device,seen FROM agent_seen WHERE tenant=?').all(actor.tenantId).map(x=>[x.device,x.seen]));
-    return own.map(d=>({device:d.id,online:(seen.get(d.id)||0)>now-this.#limits.onlineSeconds,last_seen:seen.get(d.id)||null}));
+    return own.map(d=>({device:d.id,online:(seen.get(d.id)||0)>now-this.#limits.onlineSeconds,last_seen:seen.get(d.id)||null,
+      ...(this.#deviceKinds.has(d.id)?{allowed_kinds:[...this.#deviceKinds.get(d.id)]}:{})}));
   }
   /** Owner request. Returns immediately with a job id; never waits for execution. */
   request({actor,deviceId,kind,params,requestKey,clientRef=null}){
     this.#directory.assertOwner(actor);
     this.#directory.assertDevice(actor.tenantId,deviceId);
+    if(!this.#kindAllowed(deviceId,kind))throw Error('KIND_NOT_ALLOWED_FOR_DEVICE');
     if(requestKey!==undefined&&requestKey!==null&&(typeof requestKey!=='string'||!KEY.test(requestKey)))throw Error('INVALID_REQUEST_KEY');
     if(clientRef!==null&&(typeof clientRef!=='string'||!/^[a-f0-9]{16,64}$/.test(clientRef)))throw Error('INVALID_CLIENT_REF');
     const {kind:spec,params:safe,specSha}=this.#kinds.canonical(deviceId,kind,params);
@@ -272,6 +286,12 @@ export class LongJobQueue {
       this.#reapLocked(now,' AND tenant=? AND device=?',[actor.tenantId,deviceId]);
       const j=db.prepare("SELECT * FROM long_jobs WHERE tenant=? AND device=? AND state='QUEUED' AND queue_deadline>? ORDER BY approved_at ASC,created ASC LIMIT 1").get(actor.tenantId,deviceId,now);
       if(!j)return {job:null};
+      if(!this.#kindAllowed(deviceId,j.kind)){
+        // Queued before the device allowlist was tightened: never dispatch, close it explicitly.
+        db.prepare("UPDATE long_jobs SET state='CANCELLED',finished=? WHERE id=? AND state='QUEUED'").run(now,j.id);
+        this.#audit(j,'system','LONG_JOB_KIND_NOT_ALLOWED_FOR_DEVICE');
+        return {job:null};
+      }
       const kind=this.#kinds.get(j.kind),token=randomBytes(32).toString('base64url');
       const changed=db.prepare("UPDATE long_jobs SET state='RUNNING',started=?,run_deadline=?,lease_sha=?,lease_until=?,heartbeat_at=? WHERE id=? AND state='QUEUED'")
         .run(now,now+kind.maxRuntimeSeconds,sha(token),now+kind.leaseSeconds,now,j.id);
