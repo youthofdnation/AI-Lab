@@ -105,6 +105,20 @@ const FLEET_KINDS={
     describe:p=>['이 PC 설정에 등록된 저장소 "'+p.store+'"의 '+(p.shard+1)+'/'+p.shards+' 조각만 읽어 SHA-256을 파일 이름과 대조',
       '저장소 위치는 PC가 자기 설정에서 정함(서버는 이름만 보냄), 결과는 개수·바이트·불일치 파일 이름뿐','아무것도 쓰거나 옮기지 않음']
   },
+  'dev.test_shard':{
+    label:'코드 테스트 1조각 실행 (PC 설정의 고정 명령, 지정 커밋의 깨끗한 체크아웃에서만)',
+    lockGroup:null,maxRuntimeSeconds:1800,leaseSeconds:60,grantable:true,gpu:false,dataClass:'public',
+    validate(p){
+      exactKeys(p,['suite','commit','shard','shards']);
+      if(typeof p.suite!=='string'||!/^[a-z][a-z0-9-]{1,31}$/.test(p.suite))throw Error('INVALID_PARAMS');
+      if(typeof p.commit!=='string'||!/^[0-9a-f]{40}$/.test(p.commit))throw Error('INVALID_PARAMS');
+      const shards=intIn(p.shards,1,64),shard=intIn(p.shard,0,63);if(shard>=shards)throw Error('INVALID_PARAMS');
+      return {suite:p.suite,commit:p.commit,shard,shards};
+    },
+    describe:p=>['테스트 묶음 "'+p.suite+'"의 '+(p.shard+1)+'/'+p.shards+' 조각을 커밋 '+p.commit.slice(0,12)+'에서 실행',
+      '명령과 체크아웃 위치는 PC 자기 설정이 정함, 체크아웃이 그 커밋이 아니거나 변경된 파일이 있으면 실행하지 않음',
+      '결과는 통과/실패와 마지막 출력 일부(2KB)만']
+  },
   'fleet.gpu_probe':{
     label:'GPU 할당·반환 확인 (합성 텐서 할당 후 하위 프로세스 종료, 메모리 반환 측정)',
     lockGroup:'gpu',maxRuntimeSeconds:300,leaseSeconds:45,grantable:true,gpu:true,dataClass:'synthetic',

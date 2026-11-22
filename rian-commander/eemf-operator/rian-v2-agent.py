@@ -42,7 +42,7 @@ _spec.loader.exec_module(_artifact)
 Client, TransferError = _artifact.Client, _artifact.TransferError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-FLEET_KINDS = {"fleet.inventory", "fleet.cpu_bench", "fleet.blob_verify", "fleet.gpu_probe", "youngmin.qlora_probe"}
+FLEET_KINDS = {"fleet.inventory", "fleet.cpu_bench", "fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"}
 KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"} | FLEET_KINDS
 MAX_OUTPUT = 96 * 1024
 # The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
@@ -130,6 +130,7 @@ def validate_local(kind, params, cfg):
     elif kind in FLEET_KINDS:
         bounds = {"fleet.inventory": {}, "fleet.cpu_bench": {"chunk": (0, 9999), "units": (1, 200)},
                   "fleet.blob_verify": {"store": "STORE", "shard": (0, 63), "shards": (1, 64)},
+                  "dev.test_shard": {"suite": "STORE", "commit": "COMMIT", "shard": (0, 63), "shards": (1, 64)},
                   "fleet.gpu_probe": {"mib": (16, 2048)},
                   "youngmin.qlora_probe": {"seqLen": (64, 2048), "batch": (1, 8), "steps": (1, 20), "rank": (4, 64), "gradCheckpointing": None}}[kind]
         if keys != set(bounds):
@@ -138,6 +139,8 @@ def validate_local(kind, params, cfg):
             v = params[k]
             if b is None:
                 ok = isinstance(v, bool)
+            elif b == "COMMIT":
+                ok = isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) is not None
             elif b == "STORE":
                 ok = isinstance(v, str) and re.fullmatch(r"[a-z][a-z0-9-]{1,31}", v) is not None
             else:
@@ -186,6 +189,10 @@ def run_job(job_dir, cfg):
                     if params["shard"] >= params["shards"]:
                         raise fleet.FleetError("INVALID_PARAMS")
                     output = fleet.blob_verify(params["store"], params["shard"], params["shards"], f, progress, cancelled)
+                elif job["kind"] == "dev.test_shard":
+                    if params["shard"] >= params["shards"]:
+                        raise fleet.FleetError("INVALID_PARAMS")
+                    output = fleet.test_shard(params["suite"], params["commit"], params["shard"], params["shards"], f, progress, cancelled)
                 elif job["kind"] == "fleet.gpu_probe":
                     output = fleet.gpu_probe(params["mib"], f, progress, cancelled)
                 else:

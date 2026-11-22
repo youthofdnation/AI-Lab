@@ -396,6 +396,53 @@ def blob_verify(store, shard, shards, cfg_fleet, progress, cancelled):
             "mb_per_s": round(total / 2**20 / max(secs, 1e-6), 1), "mismatched": bad, "host": socket.gethostname()}
 
 
+
+# ------------------------------------------------------------------ distributed code tests
+def _git(repo, *args):
+    out = _run(["git", "-C", str(repo), *args], timeout=30)
+    return None if out is None else out.strip()
+
+
+def test_shard(suite, commit, shard, shards, cfg_fleet, progress, cancelled):
+    """Run one shard of a test suite this PC's config defines, only on a clean checkout at `commit`."""
+    spec = (cfg_fleet.get("test_suites") or {}).get(suite)
+    if not spec:
+        raise FleetError("SUITE_NOT_CONFIGURED_ON_THIS_PC")
+    repo, cwd = Path(spec["repo"]), Path(spec["repo"]) / spec.get("cwd", ".")
+    head = _git(repo, "rev-parse", "HEAD")
+    if head != commit:
+        return {"ok": False, "error": "CHECKOUT_NOT_AT_COMMIT", "head": (head or "")[:12]}
+    if _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        return {"ok": False, "error": "CHECKOUT_HAS_LOCAL_CHANGES"}
+    files = sorted(str(p.relative_to(cwd)).replace("\\", "/") for p in cwd.glob(spec["glob"]) if p.is_file())
+    files = [f for f in files if f not in set(spec.get("exclude") or [])]
+    mine = [f for i, f in enumerate(files) if i % shards == shard]
+    if not mine:
+        return {"ok": True, "files": 0, "seconds": 0.0, "exit": 0, "suite": suite, "shard": shard, "shards": shards}
+    argv = [str(x) for x in spec["command"]]
+    exe = shutil.which(argv[0]) or argv[0]
+    progress(stage="testing", percent=5, done=0, total=len(mine))
+    start = time.perf_counter()
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    results = []
+    if spec.get("per_file"):
+        for i, f in enumerate(mine):
+            if cancelled():
+                raise FleetCancelled()
+            p = subprocess.run([exe, *argv[1:], f], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=int(spec.get("timeout", 900)), env=env)
+            results.append((f, p.returncode, (p.stdout + p.stderr)[-600:]))
+            progress(stage="testing", percent=int(100 * (i + 1) / len(mine)), done=i + 1, total=len(mine))
+    else:
+        p = subprocess.run([exe, *argv[1:], *mine], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=int(spec.get("timeout", 900)), env=env)
+        results.append(("*", p.returncode, (p.stdout + p.stderr)[-2000:]))
+    failed = [f for f, rc, _ in results if rc != 0]
+    tail = chr(10).join(t for _, rc, t in results if rc != 0)[-2000:]
+    return {"ok": not failed, **({"error": "TESTS_FAILED"} if failed else {}), "suite": suite, "shard": shard, "shards": shards,
+            "files": len(mine), "failed_files": failed[:20], "seconds": round(time.perf_counter() - start, 2),
+            "failure_tail": tail, "host": socket.gethostname(), "commit": commit[:12]}
+
 # ------------------------------------------------------------------ owner-run read-only CLI
 SECURITY_PS = r"""
 $o = [ordered]@{}

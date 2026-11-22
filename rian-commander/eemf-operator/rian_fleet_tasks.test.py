@@ -152,5 +152,40 @@ class OwnerCli(unittest.TestCase):
             self.assertIn(k, r["security"])
 
 
+class TestShard(unittest.TestCase):
+    def repo(self):
+        import subprocess
+        d = Path(tempfile.mkdtemp())
+        (d / "t").mkdir()
+        (d / "t" / "a_ok.test.py").write_text("print('ok')" + chr(10), "utf-8")
+        (d / "t" / "b_ok.test.py").write_text("print('ok')" + chr(10), "utf-8")
+        (d / "t" / "c_fail.test.py").write_text("raise SystemExit(3)" + chr(10), "utf-8")
+        g = ["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(g + ["add", "."], check=True)
+        subprocess.run(g + ["commit", "-q", "-m", "t"], check=True)
+        head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        cfg = {"test_suites": {"demo": {"repo": str(d), "cwd": "t", "glob": "*.test.py", "command": [sys.executable], "per_file": True}}}
+        return d, head, cfg
+
+    def test_runs_only_on_the_named_clean_commit_and_shards_partition(self):
+        d, head, cfg = self.repo()
+        r = [F.test_shard("demo", head, i, 2, cfg, nop, lambda: False) for i in (0, 1)]
+        self.assertEqual(sum(x["files"] for x in r), 3)
+        self.assertEqual([x["failed_files"] for x in r if not x["ok"]], [["c_fail.test.py"]])
+        self.assertEqual(F.test_shard("demo", "0" * 40, 0, 1, cfg, nop, lambda: False)["error"], "CHECKOUT_NOT_AT_COMMIT")
+        (d / "t" / "a_ok.test.py").write_text("print('changed')" + chr(10), "utf-8")
+        self.assertEqual(F.test_shard("demo", head, 0, 1, cfg, nop, lambda: False)["error"], "CHECKOUT_HAS_LOCAL_CHANGES")
+        with self.assertRaises(F.FleetError):
+            F.test_shard("other", head, 0, 1, cfg, nop, lambda: False)
+
+    def test_agent_bounds_for_the_commit(self):
+        c = {"allowed_kinds": ["dev.test_shard"]}
+        A.validate_local("dev.test_shard", {"suite": "demo", "commit": "a" * 40, "shard": 0, "shards": 2}, c)
+        for bad in ({"suite": "demo", "commit": "HEAD", "shard": 0, "shards": 2}, {"suite": "demo", "commit": "a" * 40, "shard": 0}):
+            with self.assertRaises(A.mail.MailError):
+                A.validate_local("dev.test_shard", bad, c)
+
+
 if __name__ == "__main__":
     unittest.main()

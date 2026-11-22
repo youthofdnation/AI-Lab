@@ -101,3 +101,10 @@ test('integrity kind: store is a name only, the shard must exist',()=>{
  for(const bad of [{store:'C:\\RIAN',shard:0,shards:1},{store:'../x',shard:0,shards:1},{store:'ok',shard:4,shards:4},{store:'ok',shard:0}])
   assert.throws(()=>k.canonical('fast','fleet.blob_verify',bad),/INVALID_PARAMS/);
 });
+
+test('test-shard kind: suite name and full commit only, the shard must exist',()=>{
+ const k=new LongJobKinds({allowFleet:true}),c='a'.repeat(40);
+ assert.deepEqual(k.canonical('fast','dev.test_shard',{suite:'commander-node',commit:c,shard:1,shards:3}).params,{commit:c,shard:1,shards:3,suite:'commander-node'});
+ for(const bad of [{suite:'x;rm',commit:c,shard:0,shards:1},{suite:'ok',commit:'HEAD',shard:0,shards:1},{suite:'ok',commit:c,shard:3,shards:3}])
+  assert.throws(()=>k.canonical('fast','dev.test_shard',bad),/INVALID_PARAMS/);
+});
