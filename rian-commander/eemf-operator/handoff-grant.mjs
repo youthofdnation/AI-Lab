@@ -35,17 +35,22 @@ function atomic(file,obj){
 }
 const grantFile=(store,worktree)=>join(store,'grants',hash(worktree)+'.json');
 
-function gitRoot(dir){
-  const r=spawnSync('git',['-C',dir,'rev-parse','--show-toplevel'],{encoding:'utf8',timeout:10000});
-  assert(r.status===0,'GRANT_WORKTREE_NOT_GIT');
-  return realpathSync(r.stdout.trim());
+/** Check the Git root without comparing Git's POSIX-formatted Windows paths to OS realpaths.
+ * Git's --show-prefix is empty exactly at the worktree root on all three OSes.
+ */
+function isGitRoot(dir){
+  const r=spawnSync('git',['-C',dir,'rev-parse','--is-inside-work-tree','--show-prefix'],
+    {encoding:'utf8',timeout:10000});
+  assert(!r.error&&r.status===0,'GRANT_WORKTREE_NOT_GIT');
+  const lines=r.stdout.replace(/\r/g,'').split('\n');
+  return lines[0]==='true'&&lines[1]==='';
 }
 
 /** Builds (does not store) the grant the owner is asked to approve. */
 export function planGrant({worktree,approvedRoot,runs=5,days=7,runMinutes=20,workspaceWrite=true,device=hostname(),now=Date.now()}){
   assert(typeof worktree==='string'&&isAbsolute(worktree),'GRANT_WORKTREE_REQUIRED');
   const real=realpathSync(worktree);
-  assert(gitRoot(real)===real,'GRANT_WORKTREE_MUST_BE_GIT_ROOT');
+  assert(isGitRoot(real),'GRANT_WORKTREE_MUST_BE_GIT_ROOT');
   const root=approvedRoot?realpathSync(approvedRoot):real,rel=relative(root,real);
   assert(rel===''||(rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel)),'GRANT_WORKTREE_OUTSIDE_ROOT');
   for(const [v,max] of [[runs,GRANT_LIMITS.maxRuns],[days,GRANT_LIMITS.maxDays],[runMinutes,GRANT_LIMITS.maxRunMinutes]])
