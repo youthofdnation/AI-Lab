@@ -103,5 +103,47 @@ class AgentConfig(unittest.TestCase):
             A.validate_local("youngmin.qlora_probe", {"seqLen": 256, "batch": 1, "steps": 1, "rank": 16, "gradCheckpointing": 1}, c)
 
 
+class BlobVerify(unittest.TestCase):
+    def test_hashes_its_own_store_and_names_a_tampered_file(self):
+        import hashlib
+        d = Path(tempfile.mkdtemp())
+        good = b"public model bytes" * 1000
+        (d / ("sha256-" + hashlib.sha256(good).hexdigest())).write_bytes(good)
+        bad = b"tampered"
+        (d / ("sha256-" + hashlib.sha256(b"original").hexdigest())).write_bytes(bad)
+        (d / "README.txt").write_text("not a blob", "utf-8")              # ignored: not content-addressed
+        cfg = {"blob_stores": {"models": str(d)}}
+        r = F.blob_verify("models", 0, 1, cfg, nop, lambda: False)
+        self.assertFalse(r["ok"])
+        self.assertEqual((r["files"], r["error"], len(r["mismatched"])), (2, "HASH_MISMATCH", 1))
+        halves = [F.blob_verify("models", i, 2, cfg, nop, lambda: False)["files"] for i in (0, 1)]
+        self.assertEqual(sum(halves), 2)                                   # shards partition the store
+        with self.assertRaises(F.FleetError):
+            F.blob_verify("elsewhere", 0, 1, cfg, nop, lambda: False)      # a store this PC did not configure
+
+    def test_agent_bounds_for_the_store_name(self):
+        c = {"allowed_kinds": ["fleet.blob_verify"]}
+        A.validate_local("fleet.blob_verify", {"store": "ollama-c", "shard": 0, "shards": 2}, c)
+        for bad in ({"store": "C:\RIAN", "shard": 0, "shards": 1}, {"store": "ok", "shard": 0, "shards": 99}, {"store": "ok", "shard": 0}):
+            with self.assertRaises(A.mail.MailError):
+                A.validate_local("fleet.blob_verify", bad, c)
+
+
+class OwnerCli(unittest.TestCase):
+    def test_inventory_cli_writes_one_json_and_reads_nothing_secret(self):
+        out = Path(tempfile.mkdtemp()) / "inv.json"
+        self.assertEqual(F._cli(["inventory", "--out", str(out)]), 0)
+        d = json.loads(out.read_text("utf-8"))
+        self.assertTrue(d["ok"]) and self.assertIn("snapshot", d)
+        self.assertNotIn("token", out.read_text("utf-8").lower())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows scheduled tasks")
+    def test_security_inventory_is_read_only_metadata(self):
+        r = F.security_inventory()
+        self.assertTrue(r["ok"])
+        for k in ("tasks", "gpu_engine_top", "defender", "listening"):
+            self.assertIn(k, r["security"])
+
+
 if __name__ == "__main__":
     unittest.main()

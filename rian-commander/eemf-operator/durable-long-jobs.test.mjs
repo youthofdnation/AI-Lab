@@ -8,6 +8,10 @@ import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
+// Fleet suites ride along: CI runs this file, and its workflow cannot be edited from the fleet branch
+// (token without the `workflow` scope). Importing registers their tests in this same run.
+import './fleet-pool.test.mjs';
+import './fleet-throughput.test.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 function fixture(t){

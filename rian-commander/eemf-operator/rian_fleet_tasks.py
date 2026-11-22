@@ -45,9 +45,9 @@ class FleetCancelled(Exception):
 
 def _run(argv, timeout=20):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return None
     return p.stdout if p.returncode == 0 else None
 
@@ -55,7 +55,7 @@ def _run(argv, timeout=20):
 def _ps(script, timeout=30):
     """A fixed PowerShell snippet (never built from server input); returns parsed JSON or None."""
     out = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                "$ErrorActionPreference='SilentlyContinue';" + script + " | ConvertTo-Json -Compress -Depth 4"], timeout)
+                "$ErrorActionPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;& {" + script + "} | ConvertTo-Json -Compress -Depth 4"], timeout)
     try:
         return json.loads(out) if out and out.strip() else None
     except ValueError:
@@ -350,3 +350,86 @@ def qlora_probe(params, cfg_fleet, progress, cancelled):
     except (subprocess.TimeoutExpired, ValueError):
         measured = {"error": "MEASURE_TIMEOUT_OR_BAD_OUTPUT"}
     return {"ok": "error" not in measured, "measurement": measured, **base, "gpu_release": _measure_release(before, before_pids)}
+
+
+# ------------------------------------------------------------------ store integrity (real research ops)
+BLOB = re.compile(r"^sha256[-:]([0-9a-f]{64})$")
+
+
+def blob_verify(store, shard, shards, cfg_fleet, progress, cancelled):
+    """Hash every content-addressed file (name = its sha256) in this PC's own store; report only counts."""
+    stores = cfg_fleet.get("blob_stores") or {}
+    root = stores.get(store)
+    if not root:
+        raise FleetError("STORE_NOT_CONFIGURED_ON_THIS_PC")
+    base = Path(root)
+    if not base.is_dir():
+        raise FleetError("STORE_MISSING")
+    files = sorted(p for p in base.iterdir() if p.is_file() and BLOB.match(p.name))
+    mine = [p for i, p in enumerate(files) if i % shards == shard]
+    total = sum(p.stat().st_size for p in mine)
+    done_bytes, bad, start = 0, [], time.perf_counter()
+    for i, p in enumerate(mine):
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for block in iter(lambda: f.read(8 << 20), b""):
+                if cancelled():
+                    raise FleetCancelled()
+                h.update(block)
+                done_bytes += len(block)
+        if h.hexdigest() != BLOB.match(p.name).group(1):
+            bad.append(p.name[:20])
+        progress(stage="hashing", percent=int(100 * done_bytes / max(1, total)), done=i + 1, total=len(mine))
+    secs = time.perf_counter() - start
+    return {"ok": not bad, **({"error": "HASH_MISMATCH"} if bad else {}), "store": store, "shard": shard, "shards": shards,
+            "files": len(mine), "files_in_store": len(files), "bytes": total, "seconds": round(secs, 2),
+            "mb_per_s": round(total / 2**20 / max(secs, 1e-6), 1), "mismatched": bad, "host": socket.gethostname()}
+
+
+# ------------------------------------------------------------------ owner-run read-only CLI
+SECURITY_PS = r"""
+$o = [ordered]@{}
+$o.tasks = @(Get-ScheduledTask | Where-Object { $_.TaskName -like 'GoogleUpdate*' -or $_.TaskPath -like '*Google*' } | ForEach-Object {
+  $a = $_.Actions | Select-Object -First 1
+  $exe = if ($a.Execute) { [Environment]::ExpandEnvironmentVariables($a.Execute.Trim('"')) } else { $null }
+  $sig = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AuthenticodeSignature -LiteralPath $exe } else { $null }
+  $info = Get-ScheduledTaskInfo -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue
+  [ordered]@{ name = $_.TaskName; path = $_.TaskPath; state = [string]$_.State; principal = $_.Principal.UserId; run_level = [string]$_.Principal.RunLevel
+    exe = $exe; exe_exists = [bool]($exe -and (Test-Path -LiteralPath $exe)); signature = if ($sig) { [string]$sig.Status } else { $null }
+    signer = if ($sig -and $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
+    sha256 = if ($exe -and (Test-Path -LiteralPath $exe)) { (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash } else { $null }
+    arguments_present = [bool]$a.Arguments; last_run = if ($info) { [string]$info.LastRunTime } else { $null }; last_result = if ($info) { $info.LastTaskResult } else { $null } } })
+$o.gpu_engine_top = @(Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction SilentlyContinue | ForEach-Object { $_.CounterSamples } |
+  Where-Object { $_.CookedValue -gt 1 } | Sort-Object CookedValue -Descending | Select-Object -First 10 |
+  ForEach-Object { $pid_ = if ($_.InstanceName -match 'pid_(\d+)') { [int]$Matches[1] } else { $null }
+    [ordered]@{ pid = $pid_; process = if ($pid_) { (Get-Process -Id $pid_ -ErrorAction SilentlyContinue).ProcessName } else { $null }; util_pct = [math]::Round($_.CookedValue, 1) } })
+$o.defender = try { $m = Get-MpComputerStatus -ErrorAction Stop; [ordered]@{ realtime = $m.RealTimeProtectionEnabled; antivirus = $m.AntivirusEnabled; signature_age_days = $m.AntivirusSignatureAge; last_quick_scan = [string]$m.QuickScanEndTime } } catch { 'UNREADABLE' }
+$o.listening = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ port = $_.LocalPort; address = $_.LocalAddress; process = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName } } | Sort-Object port -Unique)
+$o
+"""
+
+
+def security_inventory():
+    if not WIN:
+        return {"ok": False, "error": "WINDOWS_ONLY"}
+    data = _ps(SECURITY_PS, timeout=120)
+    return {"ok": data is not None, "host": socket.gethostname(), "security": data,
+            "note": "read-only: names, paths, signatures and hashes only; nothing stopped or changed"}
+
+
+def _cli(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description="RIAN fleet read-only inventory (owner-run; no network, nothing changed)")
+    ap.add_argument("what", choices=["inventory", "security"])
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    res = inventory(lambda **k: None) if a.what == "inventory" else security_inventory()
+    res["collected_at"] = int(time.time())
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text(json.dumps(res, ensure_ascii=False, indent=1), "utf-8")
+    print(json.dumps({"written": a.out, "ok": res.get("ok")}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

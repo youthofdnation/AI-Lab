@@ -105,13 +105,26 @@ export class FleetPolicy {
 
 /**
  * Rank devices for one job. `inventories`: Map deviceId -> {captured (unix s), snapshot}; `active`:
- * [{device, needsGpu, cpu, ramMiB, vramMiB}] reserved by not-yet-terminal jobs. Every excluded
- * device carries the first reason it failed, so the owner can see why work did not go there.
+ * [{device, state, needsGpu, cpu, ramMiB, vramMiB, workUnits}] reserved by not-yet-terminal jobs.
+ * Every excluded device carries the first reason it failed, so the owner can see why work did not go there.
+ *
+ * placement 'throughput' (default when `throughput` has samples): each device's measured seconds per
+ * work unit for this kind (median of its finished jobs) gives an expected finish time
+ *   (work already reserved on the device / maxConcurrent + this job's units) x seconds-per-unit,
+ * and the earliest finish wins - so a fast PC may take a queued job rather than a slow PC an idle one.
+ * A device without samples is explored with one job at a time until it has a measurement.
+ * placement 'cores' keeps the first version (free cores, RAM, VRAM headroom) for comparison.
+ * A device may hold up to `queueDepth` (default 2 x maxConcurrent, capped by the queue's per-device
+ * limit) open jobs; the claim side still runs only maxConcurrent at once.
  */
-export function recommend(policy, req, inventories, active, now, {maxAgeSeconds = 900} = {}) {
+export function recommend(policy, req, inventories, active, now, {maxAgeSeconds = 900, throughput = null, placement = null, maxOpenPerDevice = 5} = {}) {
   const r = {kind: req.kind, needsGpu: req.needsGpu === true, cpu: req.cpu ?? 1, ramMiB: req.ramMiB ?? 256,
-    vramMiB: req.vramMiB ?? 0, dataClass: req.dataClass ?? 'synthetic'};
+    vramMiB: req.vramMiB ?? 0, dataClass: req.dataClass ?? 'synthetic', workUnits: req.workUnits ?? 1};
   int(r.cpu, 1, 256, 'INVALID_REQUIREMENTS'); int(r.ramMiB, 0, 1 << 20, 'INVALID_REQUIREMENTS'); int(r.vramMiB, 0, 1 << 18, 'INVALID_REQUIREMENTS');
+  int(r.workUnits, 1, 1_000_000, 'INVALID_REQUIREMENTS');
+  const tp = throughput instanceof Map ? throughput : new Map();
+  const mode = placement || (tp.size ? 'throughput' : 'cores');
+  if (!['throughput', 'cores'].includes(mode)) throw Error('INVALID_PLACEMENT');
   const candidates = [], excluded = [];
   for (const id of policy.ids()) {
     let d;
@@ -120,11 +133,17 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
     if (!inv || !inv.snapshot) { excluded.push({device: id, reason: 'NO_INVENTORY'}); continue; }
     if (now - inv.captured > maxAgeSeconds) { excluded.push({device: id, reason: 'INVENTORY_STALE'}); continue; }
     const s = inv.snapshot, mine = active.filter((a) => a.device === id);
-    if (mine.length >= d.maxConcurrent) { excluded.push({device: id, reason: 'CONCURRENCY_FULL'}); continue; }
+    const depth = mode === 'cores' ? d.maxConcurrent : Math.min(maxOpenPerDevice, 2 * d.maxConcurrent);
+    if (mine.length >= depth) { excluded.push({device: id, reason: 'CONCURRENCY_FULL'}); continue; }
+    const sample = tp.get(id);
+    if (mode === 'throughput' && !sample && mine.length >= 1) { excluded.push({device: id, reason: 'MEASURING_THROUGHPUT'}); continue; }
+    // Only what can run at once occupies cores; queued work waits for a slot.
+    const occupying = mine.slice(0, d.maxConcurrent);
     const cores = s.cpu?.logical || 0, load = Math.min(100, Math.max(0, s.cpu?.load_pct ?? 100));
-    const freeCores = cores * (1 - load / 100) - mine.reduce((a, x) => a + (x.cpu || 1), 0);
-    const freeRam = (s.ram?.available_mib || 0) - mine.reduce((a, x) => a + (x.ramMiB || 0), 0);
-    if (freeCores < r.cpu - 0.25) { excluded.push({device: id, reason: 'INSUFFICIENT_CPU'}); continue; }
+    const freeCores = cores * (1 - load / 100) - occupying.reduce((a, x) => a + (x.cpu || 1), 0);
+    const freeRam = (s.ram?.available_mib || 0) - occupying.reduce((a, x) => a + (x.ramMiB || 0), 0);
+    const idleSlot = mine.length < d.maxConcurrent;
+    if (idleSlot && freeCores < r.cpu - 0.25) { excluded.push({device: id, reason: 'INSUFFICIENT_CPU'}); continue; }
     if (freeRam < r.ramMiB) { excluded.push({device: id, reason: 'INSUFFICIENT_RAM'}); continue; }
     let freeVram = null;
     if (r.needsGpu) {
@@ -137,13 +156,26 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
       freeVram = (g.vram_total_mib || 0) - (g.vram_used_mib || 0) - mine.reduce((a, x) => a + (x.vramMiB || 0), 0);
       if (freeVram < r.vramMiB) { excluded.push({device: id, reason: 'INSUFFICIENT_VRAM'}); continue; }
     }
-    // Headroom score: free cores weigh most for CPU work, free VRAM for GPU work.
-    const score = Math.round((r.needsGpu ? freeVram / 1024 : 0) * 10 + freeCores * 5 + freeRam / 4096);
-    candidates.push({device: id, score, free: {cores: Math.round(freeCores * 10) / 10, ram_mib: Math.round(freeRam), vram_mib: freeVram},
-      running: mine.length, maxConcurrent: d.maxConcurrent});
+    const base = {device: id, free: {cores: Math.round(freeCores * 10) / 10, ram_mib: Math.round(freeRam), vram_mib: freeVram},
+      open: mine.length, maxConcurrent: d.maxConcurrent};
+    if (mode === 'throughput') {
+      const backlog = mine.reduce((a, x) => a + (x.workUnits || 1), 0);
+      const unitS = sample ? sample.unitSeconds : null;
+      candidates.push({...base, basis: sample ? 'measured' : 'exploring', unit_seconds: unitS, samples: sample ? sample.samples : 0,
+        finish_estimate_s: sample ? Math.round((backlog / d.maxConcurrent + r.workUnits) * unitS * 10) / 10 : null});
+    } else {
+      // Headroom score: free cores weigh most for CPU work, free VRAM for GPU work.
+      candidates.push({...base, basis: 'cores', score: Math.round((r.needsGpu ? freeVram / 1024 : 0) * 10 + freeCores * 5 + freeRam / 4096)});
+    }
   }
-  candidates.sort((a, b) => b.score - a.score || a.device.localeCompare(b.device));
-  return {requirements: r, candidates, excluded};
+  if (mode === 'throughput') {
+    // Measured earliest finish first; an unmeasured idle device goes first once, so it gets measured.
+    candidates.sort((a, b) => (a.basis === 'exploring') !== (b.basis === 'exploring') ? (a.basis === 'exploring' ? -1 : 1)
+      : (a.finish_estimate_s ?? 0) - (b.finish_estimate_s ?? 0) || a.device.localeCompare(b.device));
+  } else {
+    candidates.sort((a, b) => b.score - a.score || a.device.localeCompare(b.device));
+  }
+  return {requirements: r, placement: mode, candidates, excluded};
 }
 
 /**

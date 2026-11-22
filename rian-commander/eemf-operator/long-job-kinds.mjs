@@ -89,9 +89,21 @@ const FLEET_KINDS={
   },
   'fleet.cpu_bench':{
     label:'합성 CPU 작업 1조각 (SHA-256 연쇄 계산, 파일·네트워크 접근 없음)',
-    lockGroup:null,maxRuntimeSeconds:900,leaseSeconds:45,grantable:true,gpu:false,dataClass:'synthetic',
+    lockGroup:null,maxRuntimeSeconds:900,leaseSeconds:45,grantable:true,gpu:false,dataClass:'synthetic',workUnits:p=>p.units,
     validate(p){exactKeys(p,['chunk','units']);return {chunk:intIn(p.chunk,0,9999),units:intIn(p.units,1,200)};},
     describe:p=>['조각 '+p.chunk+': SHA-256 연쇄 '+p.units+'단위 계산 후 결과 해시와 걸린 시간만 보고','파일·네트워크·GPU 접근 없음']
+  },
+  'fleet.blob_verify':{
+    label:'모델·백업 저장소 무결성 검사 (파일 이름=SHA-256인 저장소를 PC 안에서 해시 대조, 내용 반출 없음)',
+    lockGroup:null,maxRuntimeSeconds:3600,leaseSeconds:60,grantable:true,gpu:false,dataClass:'public',
+    validate(p){
+      exactKeys(p,['store','shard','shards']);
+      if(typeof p.store!=='string'||!/^[a-z][a-z0-9-]{1,31}$/.test(p.store))throw Error('INVALID_PARAMS');
+      const shards=intIn(p.shards,1,64),shard=intIn(p.shard,0,63);if(shard>=shards)throw Error('INVALID_PARAMS');
+      return {store:p.store,shard,shards};
+    },
+    describe:p=>['이 PC 설정에 등록된 저장소 "'+p.store+'"의 '+(p.shard+1)+'/'+p.shards+' 조각만 읽어 SHA-256을 파일 이름과 대조',
+      '저장소 위치는 PC가 자기 설정에서 정함(서버는 이름만 보냄), 결과는 개수·바이트·불일치 파일 이름뿐','아무것도 쓰거나 옮기지 않음']
   },
   'fleet.gpu_probe':{
     label:'GPU 할당·반환 확인 (합성 텐서 할당 후 하위 프로세스 종료, 메모리 반환 측정)',

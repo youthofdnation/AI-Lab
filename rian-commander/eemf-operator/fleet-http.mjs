@@ -11,7 +11,7 @@ import {recommend} from './fleet-policy.mjs';
 
 export function fleetToolDefs(queue) {
   if (!queue.fleet) return [];
-  const req = {type: 'object', properties: {kind: {type: 'string'}, cpu: {type: 'integer', minimum: 1, maximum: 256},
+  const req = {type: 'object', properties: {kind: {type: 'string'}, workUnits: {type: 'integer', minimum: 1}, placement: {type: 'string', enum: ['throughput', 'cores']}, cpu: {type: 'integer', minimum: 1, maximum: 256},
     ramMiB: {type: 'integer', minimum: 0}, vramMiB: {type: 'integer', minimum: 0}, dataClass: {type: 'string', enum: ['public', 'synthetic', 'private']}},
   required: ['kind'], additionalProperties: false};
   return [
@@ -33,7 +33,9 @@ function inventories(queue, actor) {
 
 export function fleetRecommend(queue, actor, args, now) {
   const spec = queue.kinds.get(args.kind);
-  return recommend(queue.fleet, {...args, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now);
+  const {placement, ...req} = args;
+  return recommend(queue.fleet, {...req, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now,
+    {throughput: queue.fleetThroughput({actor, kind: args.kind}), placement: placement || null, maxOpenPerDevice: queue.limits.maxOpenPerDevice});
 }
 
 export function fleetStatus(queue, actor, now) {
@@ -53,14 +55,16 @@ export function fleetStatus(queue, actor, now) {
 export function callFleetTool(queue, actor, name, args, now, exact) {
   if (!queue.fleet) return undefined;
   if (name === 'rian_v2_fleet_status') { exact(args, []); return fleetStatus(queue, actor, now); }
-  if (name === 'rian_v2_fleet_recommend') { exact(args, ['kind', 'cpu', 'ramMiB', 'vramMiB', 'dataClass'], ['kind']); return fleetRecommend(queue, actor, args, now); }
+  if (name === 'rian_v2_fleet_recommend') { exact(args, ['kind', 'cpu', 'ramMiB', 'vramMiB', 'dataClass', 'workUnits', 'placement'], ['kind']); return fleetRecommend(queue, actor, args, now); }
   return undefined;
 }
 
 /** device "auto": the best-ranked PC, or a FLEET_NO_ELIGIBLE_DEVICE error carrying the reasons. */
-export function placeAuto(queue, actor, kind, fleet, now) {
+export function placeAuto(queue, actor, kind, fleet, now, params = null) {
   const f = fleet || {};
-  const r = fleetRecommend(queue, actor, {kind, cpu: f.cpu, ramMiB: f.ramMiB, vramMiB: f.vramMiB, dataClass: f.dataClass}, now);
+  const spec = queue.kinds.get(kind);
+  const workUnits = typeof spec.workUnits === 'function' && params ? spec.workUnits(spec.validate(params)) : f.workUnits;
+  const r = fleetRecommend(queue, actor, {kind, cpu: f.cpu, ramMiB: f.ramMiB, vramMiB: f.vramMiB, dataClass: f.dataClass, workUnits, placement: f.placement}, now);
   if (!r.candidates.length) throw Error('FLEET_NO_ELIGIBLE_DEVICE:' + r.excluded.map((e) => e.device + '=' + e.reason).join(',').slice(0, 300));
-  return {device: r.candidates[0].device, placement: {chosen: r.candidates[0], alternatives: r.candidates.slice(1).map((c) => c.device), excluded: r.excluded}};
+  return {device: r.candidates[0].device, placement: {mode: r.placement, chosen: r.candidates[0], alternatives: r.candidates.slice(1).map((c) => c.device), excluded: r.excluded}};
 }

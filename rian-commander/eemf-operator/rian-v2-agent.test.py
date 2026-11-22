@@ -283,5 +283,15 @@ class SupervisorTests(Base):
         self.assertFalse(agent.pid_running(2 ** 31 - 7))
 
 
+# Fleet agent tests ride along (CI runs this file; its workflow cannot be edited from the fleet branch).
+_fleet_spec = importlib.util.spec_from_file_location("rian_fleet_tasks_test", Path(__file__).resolve().parent / "rian_fleet_tasks.test.py")
+_fleet_tests = importlib.util.module_from_spec(_fleet_spec)
+_fleet_spec.loader.exec_module(_fleet_tests)
+for _name in dir(_fleet_tests):
+    _obj = getattr(_fleet_tests, _name)
+    if isinstance(_obj, type) and issubclass(_obj, unittest.TestCase) and _obj is not unittest.TestCase:
+        globals()["Fleet" + _name] = _obj
+
+
 if __name__ == "__main__":
     unittest.main()

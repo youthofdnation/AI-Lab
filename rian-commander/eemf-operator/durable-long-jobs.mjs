@@ -133,23 +133,34 @@ export class LongJobQueue {
       retry_automatically:false,guidance:longJobGuidance(j.state),...this.#fleetSummary(j)};
   }
   /** Validated fleet facts for a new job, or null without a fleet policy. Never trusts caller-owned flags. */
-  #fleetRequest(deviceId,kind,spec,req){
+  #fleetRequest(deviceId,kind,spec,req,params){
     if(!this.#fleet){if(req!==null&&req!==undefined)throw Error('FLEET_NOT_ENABLED');return null;}
     const r=req===null||req===undefined?{}:req;
-    if(typeof r!=='object'||Array.isArray(r)||Object.keys(r).some(k=>!['priority','cpu','ramMiB','vramMiB','dataClass'].includes(k)))throw Error('INVALID_FLEET_REQUEST');
+    if(typeof r!=='object'||Array.isArray(r)||Object.keys(r).some(k=>!['priority','cpu','ramMiB','vramMiB','dataClass','workUnits','placement'].includes(k)))throw Error('INVALID_FLEET_REQUEST');
     const n=(v,d,lo,hi)=>{const x=v===undefined?d:v;if(!Number.isInteger(x)||x<lo||x>hi)throw Error('INVALID_FLEET_REQUEST');return x;};
     const needsGpu=spec.gpu===true;
     // A kind's own data class is the floor: a caller cannot relabel private work as synthetic.
     const dataClass=r.dataClass===undefined?spec.dataClass||'private':r.dataClass;
     if(spec.dataClass==='private'&&dataClass!=='private')throw Error('INVALID_FLEET_REQUEST');
     this.#fleet.assertDispatchable(deviceId,kind,{needsGpu,dataClass});
-    return {priority:n(r.priority,0,-100,100),needsGpu,cpu:n(r.cpu,1,1,256),ramMiB:n(r.ramMiB,0,0,1<<20),vramMiB:n(r.vramMiB,needsGpu?512:0,0,1<<18),dataClass};
+    // Work units: the kind knows its size (e.g. hash units); the caller may only state it for kinds that do not.
+    const units=typeof spec.workUnits==='function'?spec.workUnits(params):n(r.workUnits,1,1,1_000_000);
+    return {priority:n(r.priority,0,-100,100),needsGpu,cpu:n(r.cpu,1,1,256),ramMiB:n(r.ramMiB,0,0,1<<20),vramMiB:n(r.vramMiB,needsGpu?512:0,0,1<<18),dataClass,workUnits:units};
   }
   /** Not-yet-terminal fleet jobs with what they reserve (for placement). */
   fleetActive(actor){
     this.#directory.assertOwner(actor);
-    return this.#db().prepare(`SELECT lj.id,lj.device,lj.kind,lj.state,fj.priority,fj.needs_gpu,fj.cpu,fj.ram_mib,fj.vram_mib FROM long_jobs lj JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.state IN (${placeholder(ACTIVE.length)}) ORDER BY lj.created`)
-      .all(actor.tenantId,...ACTIVE).map(x=>({job_id:x.id,device:x.device,kind:x.kind,state:x.state,priority:x.priority,needsGpu:!!x.needs_gpu,cpu:x.cpu,ramMiB:x.ram_mib,vramMiB:x.vram_mib}));
+    // Running jobs first: placement treats the first maxConcurrent entries per device as occupying it.
+    return this.#db().prepare(`SELECT lj.id,lj.device,lj.kind,lj.state,fj.priority,fj.needs_gpu,fj.cpu,fj.ram_mib,fj.vram_mib,fj.work_units FROM long_jobs lj JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.state IN (${placeholder(ACTIVE.length)}) ORDER BY CASE WHEN lj.state IN ('RUNNING','CANCEL_REQUESTED') THEN 0 ELSE 1 END,lj.created`)
+      .all(actor.tenantId,...ACTIVE).map(x=>({job_id:x.id,device:x.device,kind:x.kind,state:x.state,priority:x.priority,needsGpu:!!x.needs_gpu,cpu:x.cpu,ramMiB:x.ram_mib,vramMiB:x.vram_mib,workUnits:x.work_units}));
+  }
+  /** Measured seconds per work unit for one kind, per device: median of its last `window` SUCCEEDED jobs. */
+  fleetThroughput({actor,kind,window=20}){
+    this.#directory.assertOwner(actor);
+    const rows=this.#db().prepare("SELECT lj.device,lj.started,lj.finished,fj.work_units FROM long_jobs lj JOIN fleet_jobs fj ON fj.job_id=lj.id WHERE lj.tenant=? AND lj.kind=? AND lj.state='SUCCEEDED' AND lj.started IS NOT NULL AND lj.finished IS NOT NULL ORDER BY lj.finished DESC").all(actor.tenantId,kind);
+    const by=new Map();
+    for(const x of rows){const l=by.get(x.device)||[];if(l.length<window){l.push(Math.max(1,x.finished-x.started)/Math.max(1,x.work_units));by.set(x.device,l);}}
+    return new Map([...by].map(([d,l])=>{const s=[...l].sort((a,b)=>a-b);return [d,{unitSeconds:Math.round(s[Math.floor(s.length/2)]*1000)/1000,samples:s.length}];}));
   }
   /** The newest SUCCEEDED result of one kind on one device (e.g. its last inventory). */
   latestSucceeded({actor,deviceId,kind}){
@@ -205,7 +216,7 @@ export class LongJobQueue {
     if(requestKey!==undefined&&requestKey!==null&&(typeof requestKey!=='string'||!KEY.test(requestKey)))throw Error('INVALID_REQUEST_KEY');
     if(clientRef!==null&&(typeof clientRef!=='string'||!/^[a-f0-9]{16,64}$/.test(clientRef)))throw Error('INVALID_CLIENT_REF');
     const {kind:spec,params:safe,specSha}=this.#kinds.canonical(deviceId,kind,params);
-    const fl=this.#fleetRequest(deviceId,kind,spec,fleet);
+    const fl=this.#fleetRequest(deviceId,kind,spec,fleet,safe);
     const now=this.#now(),db=this.#db();
     return this.#store.transaction(()=>{
       this.#reapLocked(now,' AND tenant=? AND device=?',[actor.tenantId,deviceId]);
@@ -234,8 +245,8 @@ export class LongJobQueue {
       db.prepare('INSERT INTO long_jobs(id,tenant,owner,client_ref,request_key,spec_sha,device,kind,lock_group,params_cipher,params_iv,params_tag,state,grant_id,created,approval_expires,queue_deadline,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id,actor.tenantId,actor.id,clientRef,requestKey||null,specSha,deviceId,kind,spec.lockGroup,enc.cipher,enc.iv,enc.tag,state,grant?grant.id:null,now,
           grant?null:now+this.#limits.approvalTtlSeconds,grant?now+this.#limits.queueTtlSeconds:null,grant?now:null);
-      if(fl)db.prepare('INSERT INTO fleet_jobs(job_id,priority,needs_gpu,cpu,ram_mib,vram_mib,data_class) VALUES(?,?,?,?,?,?,?)')
-        .run(id,fl.priority,fl.needsGpu?1:0,fl.cpu,fl.ramMiB,fl.vramMiB,fl.dataClass);
+      if(fl)db.prepare('INSERT INTO fleet_jobs(job_id,priority,needs_gpu,cpu,ram_mib,vram_mib,data_class,work_units) VALUES(?,?,?,?,?,?,?,?)')
+        .run(id,fl.priority,fl.needsGpu?1:0,fl.cpu,fl.ramMiB,fl.vramMiB,fl.dataClass,fl.workUnits);
       if(grant){
         const left=grant.runs_left-1;
         db.prepare("UPDATE long_job_grants SET runs_left=?,state=? WHERE id=?").run(left,left>0?'ACTIVE':'EXHAUSTED',grant.id);
