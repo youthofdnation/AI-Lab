@@ -5,6 +5,7 @@ ENV NODE_ENV=production
 COPY tenant-artifact-core.mjs tenant-artifact-http.mjs tenant-job-policy.mjs ./
 COPY staging-sqlite.mjs durable-tenant-artifacts.mjs durable-tenant-jobs.mjs ./
 COPY outlook-ops-scope.mjs long-job-kinds.mjs durable-long-jobs.mjs long-job-http.mjs staging-server.mjs ./
+COPY fleet-policy.mjs fleet-http.mjs ./
 COPY staging-entry.mjs ./
 EXPOSE 3000
 CMD ["node","staging-entry.mjs"]
