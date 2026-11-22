@@ -8,6 +8,23 @@ import {homedir} from 'node:os';
 import {basename,dirname,isAbsolute,join,relative,sep} from 'node:path';
 import {buildHandoff,classifyClaudeStop,inspectWorktree,saveLocalHandoff} from './agent-handoff.mjs';
 import {executeApprovedHandoff} from './manual-handoff.mjs';
+import {capturePrompt,consumeGrantRun,grantRunsUsed,planGrant,readGrant,revokeGrant,saveGrant,taskFromPrompt} from './handoff-grant.mjs';
+
+/**
+ * One owner approval per device + worktree (Issue #9). `confirm(plan)` must obtain the owner's own
+ * decision (native dialog click or terminal) and return the method; it throws when declined.
+ */
+export async function createProjectGrant({worktree,storeDir=defaultStore(),runs,days,runMinutes,workspaceWrite=true,confirm}){
+  const plan=planGrant({worktree,runs,days,runMinutes,workspaceWrite});
+  const store=storeAt(storeDir,plan.worktree);
+  assert(typeof confirm==='function','OWNER_APPROVAL_REQUIRED');
+  const approvedVia=await confirm(plan);
+  return saveGrant({grant:plan,store,approvedVia});
+}
+export function revokeProjectGrant({worktree,storeDir=defaultStore(),reason}){
+  const real=realpathSync(worktree);
+  return revokeGrant({worktree:real,store:storeAt(storeDir,real),reason});
+}
 
 const assert=(v,c)=>{if(!v)throw Error(c);};
 const hash=x=>createHash('sha256').update(x).digest('hex');
@@ -102,6 +119,16 @@ function approved(manifestPath,storeDir){
     seal.timeoutMs===a.manifest.budget.timeoutMs,'ACTIVATION_SEAL_MISMATCH');
   return {...a,store};
 }
+/** P2 manifest seal or P2.2 project grant (Issue #9), normalized to one authority shape. */
+function authorityFor({manifestPath,grantWorktree},storeDir){
+  if(manifestPath)return {...approved(manifestPath,storeDir),mode:'manifest'};
+  assert(typeof grantWorktree==='string'&&isAbsolute(grantWorktree),'GRANT_NOT_FOUND');
+  let worktree;try{worktree=realpathSync(grantWorktree);}catch{throw Error('GRANT_NOT_FOUND');}
+  const store=storeAt(storeDir,worktree),{grant,digest}=readGrant({worktree,store});
+  return {mode:'grant',grant,digest,worktree,approvedRoot:grant.approvedRoot,store,path:null,
+    manifest:{task:null,permissions:{workspaceWrite:grant.permissions.workspaceWrite,exclusiveWorktree:true,allowedProviders:['claude','codex']},
+      budget:{timeoutMs:grant.runTimeoutMs,checkpointMaxAgeMs:grant.checkpointMaxAgeMs}}};
+}
 
 /** Fingerprint dirty content in memory. No diffs or file contents are stored. */
 function fingerprint(repo){
@@ -132,7 +159,7 @@ export const codexReceiver={
 /** Every blocked hook gets a category the owner can act on. */
 export function categorizeHandoffError(code){
   const c=String(code||'');
-  if(/^(ACTIVATION_|OWNER_APPROVAL)/.test(c))return 'APPROVAL';
+  if(/^(ACTIVATION_|OWNER_APPROVAL|GRANT_|OWNER_DIALOG)/.test(c))return 'APPROVAL';
   if(/^(CHECKPOINT_|WORKTREE_CHANGED|GIT_WORKTREE_CHANGED|SENSITIVE_WORKTREE|UNTRACKED_FILE_LIMIT|UNSAFE_UNTRACKED|CHANGED_FILE_LIMIT)/.test(c))return 'CHECKPOINT';
   if(/^(CODEX_|PROVIDER_|NETWORK_|USAGE_LIMIT|TIMEOUT|UNKNOWN_DO_NOT_RETRY|AUTOMATIC_DISPATCH|PROJECT_TASK|HANDOFF_ALREADY|WORKTREE_ALREADY_LEASED|INVALID_RUNTIME)/.test(c))return 'EXECUTION';
   return 'CONFIGURATION';
@@ -144,9 +171,11 @@ function manifestWorktree(manifestPath){
   try{return realpathSync(dirname(dirname(manifestPath)));}catch{return null;}
 }
 /** Claude ignores StopFailure output, so the last outcome is kept in the private store for `status`. */
-function recordHookStatus({manifestPath,storeDir,event,result,error}){
+function recordHookStatus({manifestPath,grantWorktree,storeDir,event,result,error}){
   try{
-    const worktree=manifestWorktree(manifestPath);
+    let worktree=null;
+    if(manifestPath)worktree=manifestWorktree(manifestPath);
+    else if(typeof grantWorktree==='string'&&isAbsolute(grantWorktree)){try{worktree=realpathSync(grantWorktree);}catch{}}
     if(!worktree)return;
     const store=storeAt(storeDir,worktree),file=join(privateDir(store,'hook-status'),hash(worktree)+'.json');
     let previous={};try{if(existsSync(file))previous=readPrivate(file);}catch{}
@@ -170,12 +199,13 @@ function recordHookStatus({manifestPath,storeDir,event,result,error}){
 
 /** Called with official hook stdin. Test seams are only available to direct module callers. */
 export async function handleClaudeHook(options){
+  const where={...options,storeDir:options.storeDir??defaultStore(),grantWorktree:options.grant?options.event?.cwd:undefined};
   try{
     const result=await handleClaudeHookChecked(options);
-    recordHookStatus({...options,storeDir:options.storeDir??defaultStore(),result});
+    recordHookStatus({...where,result});
     return result;
   }catch(error){
-    recordHookStatus({...options,storeDir:options.storeDir??defaultStore(),error});
+    recordHookStatus({...where,error});
     throw error;
   }
 }
@@ -245,10 +275,12 @@ export function automaticHandoffStatus({manifestPath,storeDir=defaultStore(),cod
   return out;
 }
 
-async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore(),receiver=codexReceiver,
+async function handleClaudeHookChecked({event,manifestPath,grant=false,storeDir=defaultStore(),receiver=codexReceiver,
   codexCommand='codex',codexPrefixArgs=[],detach=false,spawnRunner=spawnDetachedRunner}){
   assert(event&&typeof event==='object'&&validSession(event.session_id),'INVALID_HOOK_EVENT');
-  const a=approved(manifestPath,storeDir);
+  // Grant mode: the project grant is looked up from the session's own worktree (event.cwd).
+  const desc=grant?{grantWorktree:event.cwd}:{manifestPath};
+  const a=authorityFor(desc,storeDir);
   assert(typeof event.cwd==='string'&&realpathSync(event.cwd)===a.worktree,'HOOK_WORKTREE_MISMATCH');
   const key=sessionKey(a.worktree,event.session_id),cpDir=privateDir(a.store,'incremental');
   const cpPath=join(cpDir,key+'.json');
@@ -257,11 +289,15 @@ async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore
     const repo=inspectWorktree({approvedRoot:a.approvedRoot,worktree:a.worktree});
     assert(repo.omittedSensitivePaths===0,'SENSITIVE_WORKTREE_PATHS_DENIED');
     const previous=existsSync(cpPath)?readPrivate(cpPath):null;
+    // Grant mode only: the owner's latest prompt is the task Codex would continue (kept local, 0600).
+    const captured=a.mode==='grant'&&kind==='UserPromptSubmit'?capturePrompt(event.prompt):null;
     const record={schema:'rian-incremental/v1',sessionId:event.session_id,manifestDigest:a.digest,
       repository:repo,contentFingerprint:fingerprint(repo),sequence:(previous?.sequence||0)+1,
-      savedAt:new Date().toISOString(),event:kind};
+      savedAt:new Date().toISOString(),event:kind,
+      ...(a.mode==='grant'?{lastPrompt:captured?captured.prompt:previous?.lastPrompt??null,
+        promptRejected:captured?captured.rejected:previous?.promptRejected??null}:{})};
     atomic(cpPath,record);
-    return {state:'CHECKPOINTED',sequence:record.sequence};
+    return {state:'CHECKPOINTED',sequence:record.sequence,...(a.mode==='grant'?{taskCaptured:!!record.lastPrompt}:{})};
   }
   if(kind!=='StopFailure'||classifyClaudeStop(event)!=='CLAUDE_RATE_LIMIT')
     return {state:'IGNORED',reason:classifyClaudeStop(event)};
@@ -270,6 +306,10 @@ async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore
   assert(existsSync(cpPath),'CHECKPOINT_MISSING');
   const cp=readPrivate(cpPath);
   assert(cp.schema==='rian-incremental/v1'&&cp.sessionId===event.session_id&&cp.manifestDigest===a.digest,'CHECKPOINT_SCOPE_MISMATCH');
+  if(a.mode==='grant'){
+    assert(!cp.promptRejected,cp.promptRejected||'CHECKPOINT_PROMPT_SENSITIVE');
+    a.manifest.task=taskFromPrompt(cp.lastPrompt);   // CHECKPOINT_NO_TASK_PROMPT when none was captured
+  }
   const dispatchMarker=join(privateDir(a.store,'automatic-dispatch'),key+'.json');
   assert(!existsSync(dispatchMarker),'AUTOMATIC_DISPATCH_ALREADY_ATTEMPTED');
   const taskMarker=join(privateDir(a.store,'task-dispatch'),hash(a.worktree+'\0'+a.manifest.task.taskId+'\0'+a.digest)+'.json');
@@ -292,6 +332,12 @@ async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore
   try{writeFileSync(fd,JSON.stringify({dispatchId,sessionId:event.session_id,state:'CLAIMED',at:new Date().toISOString()}));}
   finally{closeSync(fd);}
   const update=(state,extra={})=>atomic(dispatchMarker,{dispatchId,sessionId:event.session_id,state,at:new Date().toISOString(),...extra});
+  let grantRun=null;
+  if(a.mode==='grant'){
+    // Counted only after the single-shot markers succeed, so duplicates never consume a run.
+    try{grantRun=consumeGrantRun({grant:a.grant,store:a.store,handoffId:dispatchId});}
+    catch(e){update('BLOCKED_REVIEW',{reason:String(e?.message||'UNKNOWN').slice(0,120)});throw e;}
+  }
   let handoff,checkpointPath;
   try{
     handoff=buildHandoff({taskId:a.manifest.task.taskId,goal:a.manifest.task.goal,repo,
@@ -306,14 +352,16 @@ async function handleClaudeHookChecked({event,manifestPath,storeDir=defaultStore
     // hook timeout no longer caps the work. The claim markers above still make it single-shot.
     update('DETACHED',{handoffId:handoff.handoffId,checkpointPath,ref});
     let runnerPid;
-    try{runnerPid=spawnRunner(['dispatch-run','--manifest',manifestPath,'--store',a.store,'--handoff-id',handoff.handoffId,'--session',event.session_id]);}
+    const target=a.mode==='grant'?['--worktree',a.worktree]:['--manifest',manifestPath];
+    try{runnerPid=spawnRunner(['dispatch-run',...target,'--store',a.store,'--handoff-id',handoff.handoffId,'--session',event.session_id]);}
     catch(e){update('BLOCKED_REVIEW',{handoffId:handoff.handoffId,reason:'RUNNER_SPAWN_FAILED'});throw Error('RUNNER_SPAWN_FAILED');}
     update('DETACHED',{handoffId:handoff.handoffId,checkpointPath,ref,runnerPid});
-    return {state:'DISPATCHED_DETACHED',handoffId:handoff.handoffId,runnerPid};
+    return {state:'DISPATCHED_DETACHED',handoffId:handoff.handoffId,runnerPid,...(grantRun?{grantRun}:{})};
   }
   update('READY',{handoffId:handoff.handoffId});
-  return runDispatch({a,manifestPath,storeDir,sessionId:event.session_id,dispatchId,dispatchMarker,checkpointPath,
+  const result=await runDispatch({a,desc,storeDir,sessionId:event.session_id,dispatchId,dispatchMarker,checkpointPath,
     handoffId:handoff.handoffId,ref,receiver,codexCommand,codexPrefixArgs});
+  return grantRun?{...result,grantRun}:result;
 }
 
 const RUNNER_CLI=fileURLToPath(new URL('./automatic-handoff-cli.mjs',import.meta.url));
@@ -324,13 +372,14 @@ function spawnDetachedRunner(args){
   return child.pid;
 }
 
-async function runDispatch({a,manifestPath,storeDir,sessionId,dispatchId,dispatchMarker,checkpointPath,handoffId,ref,receiver,codexCommand,codexPrefixArgs}){
+async function runDispatch({a,desc,storeDir,sessionId,dispatchId,dispatchMarker,checkpointPath,handoffId,ref,receiver,codexCommand,codexPrefixArgs}){
   const update=(state,extra={})=>atomic(dispatchMarker,{dispatchId,sessionId,state,at:new Date().toISOString(),handoffId,...extra});
   try{
     const result=await receiver.dispatch({checkpointPath,approvedRoot:a.approvedRoot,store:a.store,
       timeoutMs:a.manifest.budget.timeoutMs,codexCommand,codexPrefixArgs,
       beforeDispatch:()=>{
-        assert(approved(manifestPath,storeDir).digest===a.digest,'ACTIVATION_CHANGED_BEFORE_DISPATCH');
+        // Re-reads the seal or grant: a revoked/expired grant stops the run before Codex starts.
+        assert(authorityFor(desc,storeDir).digest===a.digest,'ACTIVATION_CHANGED_BEFORE_DISPATCH');
         const latest=inspectWorktree({approvedRoot:a.approvedRoot,worktree:a.worktree});
         assert(latest.head===ref.head&&latest.branch===ref.branch&&
           JSON.stringify(latest.changed)===JSON.stringify(ref.changed)&&fingerprint(latest)===ref.fingerprint,
@@ -346,11 +395,12 @@ async function runDispatch({a,manifestPath,storeDir,sessionId,dispatchId,dispatc
 }
 
 /** Detached runner entry (spawned by the StopFailure hook). Runs a DETACHED claim exactly once. */
-export async function runDetachedDispatch({manifestPath,storeDir=defaultStore(),sessionId,handoffId,receiver=codexReceiver,codexCommand='codex',codexPrefixArgs=[]}){
+export async function runDetachedDispatch({manifestPath,grantWorktree,storeDir=defaultStore(),sessionId,handoffId,receiver=codexReceiver,codexCommand='codex',codexPrefixArgs=[]}){
   const event={hook_event_name:'StopFailure',session_id:sessionId};
+  const desc=manifestPath?{manifestPath}:{grantWorktree};
   try{
     assert(validSession(sessionId)&&typeof handoffId==='string'&&uuid.test(handoffId),'INVALID_DISPATCH_REQUEST');
-    const a=approved(manifestPath,storeDir);
+    const a=authorityFor(desc,storeDir);
     const dispatchMarker=join(a.store,'automatic-dispatch',sessionKey(a.worktree,sessionId)+'.json');
     assert(existsSync(dispatchMarker),'DISPATCH_NOT_PENDING');
     const marker=readPrivate(dispatchMarker);
@@ -359,14 +409,66 @@ export async function runDetachedDispatch({manifestPath,storeDir=defaultStore(),
     try{fd=openSync(join(privateDir(a.store,'runner-claims'),handoffId+'.json'),'wx',0o600);}
     catch(e){if(e?.code==='EEXIST')throw Error('DISPATCH_RUNNER_ALREADY_STARTED');throw e;}
     try{writeFileSync(fd,JSON.stringify({pid:process.pid,at:new Date().toISOString()}));}finally{closeSync(fd);}
-    const result=await runDispatch({a,manifestPath,storeDir,sessionId,dispatchId:marker.dispatchId,dispatchMarker,
+    const result=await runDispatch({a,desc,storeDir,sessionId,dispatchId:marker.dispatchId,dispatchMarker,
       checkpointPath:marker.checkpointPath,handoffId,ref:marker.ref,receiver,codexCommand,codexPrefixArgs});
-    recordHookStatus({manifestPath,storeDir,event,result});
+    recordHookStatus({...desc,storeDir,event,result});
     return result;
   }catch(error){
-    recordHookStatus({manifestPath,storeDir,event,error});
+    recordHookStatus({...desc,storeDir,event,error});
     throw error;
   }
+}
+
+/** Read-only status of a project grant: scope, expiry, runs left, checkpoints, last handoff, Codex login. */
+export function grantHandoffStatus({worktree,storeDir=defaultStore(),codexCommand='codex',codexPrefixArgs=[],probeCodex=true,now=Date.now()}){
+  const out={grant:null,lastCheckpoint:null,lastTrigger:null,lease:null,codex:null,blockers:[],warnings:[]};
+  let real;try{real=realpathSync(worktree);}catch{out.blockers.push('GRANT_NOT_FOUND');}
+  const store=real&&isAbsolute(storeDir)&&existsSync(storeDir)?realpathSync(storeDir):null;
+  let maxAge=900_000;
+  if(real&&store){
+    try{
+      const {grant}=readGrant({worktree:real,store,now});
+      const used=grantRunsUsed({grant,store});
+      out.grant={state:'ACTIVE',grantId:grant.grantId,device:grant.device,worktree:grant.worktree,approvedVia:grant.approvedVia,approvedAt:grant.approvedAt,
+        expiresAt:grant.expiresAt,workspaceWrite:grant.permissions.workspaceWrite,runTimeoutMinutes:Math.round(grant.runTimeoutMs/60000),
+        runsUsed:used,runsLeft:Math.max(0,grant.maxRuns-used)};
+      maxAge=grant.checkpointMaxAgeMs;
+      if(used>=grant.maxRuns)out.blockers.push('GRANT_RUNS_EXHAUSTED');
+    }catch(e){out.grant={state:e.message.replace(/^GRANT_/,''),error:e.message};out.blockers.push(e.message);}
+  }else if(real)out.blockers.push('GRANT_NOT_FOUND');
+  if(real&&store){
+    const key=hash(real),statusFile=join(store,'hook-status',key+'.json');
+    if(existsSync(statusFile)){
+      try{
+        const s=readPrivate(statusFile);
+        if(s.lastCheckpoint){const age=now-Date.parse(s.lastCheckpoint.at);out.lastCheckpoint={...s.lastCheckpoint,ageMs:age,fresh:age<=maxAge};}
+        out.lastTrigger=s.lastTrigger||null;out.lastDispatch=s.lastDispatch||null;
+        if(s.lastDispatch?.sessionId){
+          const markerPath=join(store,'automatic-dispatch',sessionKey(real,s.lastDispatch.sessionId)+'.json');
+          let marker=null;try{if(existsSync(markerPath))marker=readPrivate(markerPath);}catch{}
+          if(marker)out.lastDispatch={...out.lastDispatch,markerState:marker.state,threadId:marker.threadId??out.lastDispatch.threadId??null};
+          if(marker?.state==='DETACHED'||marker?.state==='RUNNING'){
+            let alive=false;if(Number.isInteger(marker.runnerPid)){try{process.kill(marker.runnerPid,0);alive=true;}catch{}}
+            out.lastDispatch.runnerAlive=alive;
+            if(!alive)out.warnings.push('DETACHED_RUNNER_EXITED_WITHOUT_RESULT: inspect receipts/leases, then use recover');
+          }
+        }
+      }catch{out.warnings.push('HOOK_STATUS_UNREADABLE');}
+    }
+    if(existsSync(join(store,'leases',key+'.lock'))){out.lease={state:'HELD'};out.blockers.push('WORKTREE_ALREADY_LEASED');}
+  }
+  if(!out.lastCheckpoint)out.warnings.push('NO_CHECKPOINT_YET: no Claude Code hook has run in this worktree yet');
+  else if(!out.lastCheckpoint.fresh)out.warnings.push('CHECKPOINT_STALE: a rate limit now would be refused until the next hook event');
+  if(probeCodex){
+    const run=args=>spawnSync(codexCommand,[...codexPrefixArgs,...args],{timeout:10000,encoding:'utf8',maxBuffer:8192,windowsHide:true});
+    const v=run(['--version']),l=v.status===0?run(['login','status']):null;
+    out.codex={available:v.status===0,version:v.status===0?String(v.stdout).trim().slice(0,60):null,loggedIn:l?.status===0};
+    if(!out.codex.available)out.blockers.push('CODEX_EXECUTABLE_UNAVAILABLE');
+    else if(!out.codex.loggedIn)out.blockers.push('CODEX_NOT_AUTHENTICATED');
+  }
+  out.blockers=out.blockers.map(code=>({code,category:categorizeHandoffError(code)}));
+  out.ready=out.blockers.length===0;
+  return out;
 }
 
 /** Audited unlock only. It never replays the same session's dispatch marker. */

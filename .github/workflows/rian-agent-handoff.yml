@@ -47,4 +47,5 @@ jobs:
           node --check manual-handoff-cli.mjs
           node --check automatic-handoff.mjs
           node --check automatic-handoff-cli.mjs
-          node --test agent-handoff.test.mjs manual-handoff.test.mjs automatic-handoff.test.mjs
+          node --check handoff-grant.mjs
+          node --test agent-handoff.test.mjs manual-handoff.test.mjs automatic-handoff.test.mjs handoff-grant.test.mjs
