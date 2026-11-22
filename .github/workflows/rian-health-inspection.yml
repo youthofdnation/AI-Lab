@@ -1,0 +1,64 @@
+name: RIAN Commander Health & Inspection
+on:
+  push:
+    branches: ['feature/rian-commander-health-**']
+  pull_request:
+    paths:
+      - 'rian-commander/monitoring/**'
+      - '.github/workflows/rian-health-inspection.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collector:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read-only collector on this OS (parsers, config, live sample, transport, bounded retry)
+        working-directory: rian-commander/monitoring
+        run: |
+          python -m py_compile collector/rian_health_collector.py
+          python tests/test_rian_health_collector.py -v
+
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Isolation, encryption, rules, e-mail, 30-day synthetic report, AI guard, PDF
+        working-directory: rian-commander/monitoring
+        run: |
+          for f in server/*.mjs tools/*.mjs; do node --check "$f"; done
+          node --test tests/health.test.mjs
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Real collector process -> real health service process (loopback)
+        working-directory: rian-commander/monitoring
+        env:
+          PYTHON: python
+        run: node --test tests/health-e2e.test.mjs
