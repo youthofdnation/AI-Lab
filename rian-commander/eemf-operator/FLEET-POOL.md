@@ -88,11 +88,11 @@ paging. The fleet therefore treats memory as the PC's first, not the fleet's:
   max(1 GiB, 5 %) on every OS, plus committed memory >= 90 % of the limit (Windows), the kernel pressure
   level (macOS) or memory stall time (Linux PSI).
 - **Placement** (`ramReserveMiB` per PC in the policy, default 2048): `INSUFFICIENT_RAM` when the job does
-  not fit at all, `MEMORY_PRESSURE` when the PC reports pressure and the job is heavier than 128 MiB,
-  `MEMORY_RESERVE` when the job would eat into the memory the PC keeps for its own services. Jobs already
-  running on the PC count against what is left.
+  not fit at all, `MEMORY_PRESSURE` when the PC reports pressure (it is held: read-only inventory only,
+  until a later inventory shows the pressure is gone), `MEMORY_RESERVE` when the job would eat into the
+  memory the PC keeps for its own services. Jobs already running on the PC count against what is left.
 - **The PC checks again at start** (`fleet.min_available_mib`, default 1024; inventory always runs): below
-  the floor nothing else starts (`LOCAL_MEMORY_HOLD`), under pressure only inventory and cpu_bench start
+  the floor nothing else starts (`LOCAL_MEMORY_HOLD`), under pressure only inventory starts
   (`LOCAL_MEMORY_PRESSURE`). The refusal happens before any work and reports the measurement, so the job
   is FAILED-not-started and can be requested again.
 - **Fleet work runs below normal priority** (`fleet.low_priority`, default true; Windows

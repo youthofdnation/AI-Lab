@@ -12,13 +12,12 @@
  *  - A GPU job is not recommended to a device whose GPU runs a protected process (e.g. a production
  *    llama-server or another project's runner) - the existing occupant keeps its GPU.
  *  - A device keeps `ramReserveMiB` (default 2048) of available memory for its own services; work is
- *    placed only into what is left. A device whose inventory reports memory pressure gets only light
- *    work (at most LIGHT_RAM_MIB), so a PC that is already paging is not pushed further.
+ *    placed only into what is left. A device whose inventory reports memory pressure is held: it gets
+ *    read-only inventory only until a later inventory shows the pressure is gone (owner, 2026-11-22).
  * Recommendation uses the latest read-only inventory result per device, minus the resources
  * reserved by that device's active jobs. Stale or missing inventory means "do not place here".
  */
 export const DATA_CLASSES = Object.freeze(['public', 'synthetic', 'private']);
-export const LIGHT_RAM_MIB = 128;
 export const DEFAULT_RAM_RESERVE_MIB = 2048;
 const STATUS = new Set(['ACTIVE', 'QUARANTINED']);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -114,8 +113,8 @@ export class FleetPolicy {
  * [{device, state, needsGpu, cpu, ramMiB, vramMiB, workUnits}] reserved by not-yet-terminal jobs.
  * Every excluded device carries the first reason it failed, so the owner can see why work did not go there.
  * Memory: INSUFFICIENT_RAM when the job does not fit in available memory at all, MEMORY_PRESSURE when the
- * device reports pressure and the job is heavier than LIGHT_RAM_MIB, MEMORY_RESERVE when the job would
- * eat into the memory the device keeps for its own services.
+ * device reports pressure (only inventory is placed there), MEMORY_RESERVE when the job would eat into
+ * the memory the device keeps for its own services.
  *
  * placement 'throughput' (default when `throughput` has samples): each device's measured seconds per
  * work unit for this kind (median of its finished jobs) gives an expected finish time
@@ -155,7 +154,7 @@ export function recommend(policy, req, inventories, active, now, {maxAgeSeconds 
     const idleSlot = mine.length < d.maxConcurrent;
     if (idleSlot && freeCores < r.cpu - 0.25) { excluded.push({device: id, reason: 'INSUFFICIENT_CPU'}); continue; }
     if (freeRam < r.ramMiB) { excluded.push({device: id, reason: 'INSUFFICIENT_RAM'}); continue; }
-    if (s.ram?.pressure === 'high' && r.ramMiB > LIGHT_RAM_MIB) { excluded.push({device: id, reason: 'MEMORY_PRESSURE'}); continue; }
+    if (s.ram?.pressure === 'high' && r.kind !== 'fleet.inventory') { excluded.push({device: id, reason: 'MEMORY_PRESSURE'}); continue; }
     if (spareRam < r.ramMiB) { excluded.push({device: id, reason: 'MEMORY_RESERVE'}); continue; }
     let freeVram = null;
     if (r.needsGpu) {

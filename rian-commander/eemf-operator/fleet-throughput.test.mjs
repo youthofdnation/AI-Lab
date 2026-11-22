@@ -9,7 +9,7 @@ import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds,FLEET_KIND_NAMES} from './long-job-kinds.mjs';
-import {FleetPolicy,recommend,LIGHT_RAM_MIB} from './fleet-policy.mjs';
+import {FleetPolicy,recommend} from './fleet-policy.mjs';
 import {fleetRecommend} from './fleet-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
@@ -110,7 +110,7 @@ test('test-shard kind: suite name and full commit only, the shard must exist',()
   assert.throws(()=>k.canonical('fast','dev.test_shard',bad),/INVALID_PARAMS/);
 });
 
-test('a PC short of memory gets only light work and keeps its reserve (numbers measured 2026-11-22)',()=>{
+test('a PC under memory pressure gets inventory only, others keep their reserve (numbers measured 2026-11-22)',()=>{
  const K=['fleet.inventory','fleet.cpu_bench','fleet.blob_verify','dev.test_shard'];
  const p=new FleetPolicy({version:1,denylist:{hostnames:['DENIED-PC']},devices:[
   {id:'tight',hostname:'TIGHT',status:'ACTIVE',maxConcurrent:2,ramReserveMiB:512,allowedKinds:K,dataClasses:['public','synthetic']},
@@ -120,12 +120,14 @@ test('a PC short of memory gets only light work and keeps its reserve (numbers m
  const inventories=new Map([['tight',at(962,32133,'high')],['roomy',at(8110,32108,'normal')],['small',at(2200,8192,'normal')]]);
  const why=(kind,ramMiB)=>{const r=recommend(p,{kind,ramMiB},inventories,[],1000,{placement:'cores'});
   return {to:r.candidates.map(c=>c.device),...Object.fromEntries(r.excluded.map(e=>[e.device,e.reason]))};};
- assert.deepEqual(why('fleet.cpu_bench',64),{to:['roomy','small','tight']});              // light: 962-512 left >= 64
+ assert.deepEqual(why('fleet.inventory',128),{to:['roomy','small','tight']});             // read-only inventory still goes
+ assert.deepEqual(why('fleet.cpu_bench',64),{to:['roomy','small'],tight:'MEMORY_PRESSURE'});
  assert.deepEqual(why('fleet.blob_verify',256),{to:['roomy'],tight:'MEMORY_PRESSURE',small:'MEMORY_RESERVE'});
  assert.deepEqual(why('dev.test_shard',2048),{to:['roomy'],tight:'INSUFFICIENT_RAM',small:'MEMORY_RESERVE'});
- assert.equal(LIGHT_RAM_MIB,128);
- // a job already running on the tight PC counts against what is left
- const r=recommend(p,{kind:'fleet.cpu_bench',ramMiB:64},inventories,[{device:'tight',state:'RUNNING',cpu:1,ramMiB:420}],1000,{placement:'cores'});
+ // once a later inventory shows no pressure, CPU work goes there again - and running jobs count against what is left
+ inventories.set('tight',at(2400,32133,'normal'));
+ assert.ok(why('fleet.cpu_bench',64).to.includes('tight'));
+ const r=recommend(p,{kind:'fleet.cpu_bench',ramMiB:64},inventories,[{device:'tight',state:'RUNNING',cpu:1,ramMiB:1850}],1000,{placement:'cores'});
  assert.equal(r.excluded.find(e=>e.device==='tight').reason,'MEMORY_RESERVE');
  assert.equal(p.summary().devices.find(d=>d.id==='roomy').ramReserveMiB,2048);
  assert.throws(()=>new FleetPolicy({version:1,denylist:{hostnames:['DENIED-PC']},devices:[{id:'x',hostname:'X',status:'ACTIVE',maxConcurrent:1,

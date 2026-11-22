@@ -206,14 +206,17 @@ class Memory(unittest.TestCase):
         self.assertGreater(st["total_mib"], 0)
         self.assertTrue(0 < st["available_mib"] <= st["total_mib"])
 
-    def test_short_of_memory_only_light_work_starts_and_inventory_always_runs(self):
+    def test_under_pressure_only_inventory_runs(self):
+        # owner, 2026-11-22: with 0.94 GiB available, hold real work and allow read-only inventory only
         st = dict(self.TIGHT)
         st["pressure"], st["pressure_reasons"] = F.classify_pressure(st["total_mib"], st["available_mib"])
         self.assertIsNone(F.memory_hold("fleet.inventory", 4096, st))
         self.assertEqual(F.memory_hold("fleet.cpu_bench", 1024, st)["error"], "LOCAL_MEMORY_HOLD")
-        self.assertIsNone(F.memory_hold("fleet.cpu_bench", 512, st))                               # light work, owner's floor
-        for kind in ("fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"):
+        for kind in ("fleet.cpu_bench", "fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"):
             self.assertEqual(F.memory_hold(kind, 512, st)["error"], "LOCAL_MEMORY_PRESSURE", kind)
+        recovered = {"total_mib": 32133, "available_mib": 6000}
+        recovered["pressure"], _ = F.classify_pressure(recovered["total_mib"], recovered["available_mib"])
+        self.assertIsNone(F.memory_hold("fleet.cpu_bench", 1024, recovered))                    # CPU work resumes by itself
         self.assertEqual(F.memory_hold("fleet.cpu_bench", 512, {"available_mib": None})["error"], "LOCAL_MEMORY_UNKNOWN")
         self.assertIsNone(F.memory_hold("dev.test_shard", 1024, {"total_mib": 32108, "available_mib": 8110, "pressure": "normal"}))
 

@@ -221,9 +221,6 @@ def inventory(progress):
 
 
 # ------------------------------------------------------------------ memory
-LIGHT_KINDS = frozenset({"fleet.inventory", "fleet.cpu_bench"})   # at most ~128 MiB, no files
-
-
 def classify_pressure(total_mib, available_mib, commit_pct=None, os_level=None, psi_some_avg10=None):
     """Pure rule, the same on every OS: 'high' when any signal says the PC is short of memory."""
     reasons = []
@@ -290,8 +287,8 @@ def memory_state():
 def memory_hold(kind, min_available_mib, state=None):
     """None when fleet work of this kind may start now, else the refusal (with the measurement).
 
-    Inventory always runs (it is how the owner sees the PC). Below `min_available_mib` nothing else
-    starts; under pressure only LIGHT_KINDS start. An unmeasurable PC is treated as short of memory."""
+    Inventory always runs (it is how the owner sees the PC). Below `min_available_mib`, or while the PC
+    reports memory pressure, nothing else starts. An unmeasurable PC is treated as short of memory."""
     if kind == "fleet.inventory":
         return None
     st = state if state is not None else memory_state()
@@ -300,7 +297,7 @@ def memory_hold(kind, min_available_mib, state=None):
         return {"ok": False, "error": "LOCAL_MEMORY_UNKNOWN", "memory": seen}
     if st["available_mib"] < min_available_mib:
         return {"ok": False, "error": "LOCAL_MEMORY_HOLD", "memory": dict(seen, min_available_mib=min_available_mib)}
-    if st.get("pressure") == "high" and kind not in LIGHT_KINDS:
+    if st.get("pressure") == "high":
         return {"ok": False, "error": "LOCAL_MEMORY_PRESSURE", "memory": seen}
     return None
 
