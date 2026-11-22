@@ -48,3 +48,29 @@ Bug found by the real run: the detached runner starts in its job directory, so a
   changing Commander V1 permissions, firewall changes.
 - Agents on PCs this session could not execute on.
 - Any GPU allocation on a PC whose GPU serves production; the QLoRA measurement itself.
+
+## Follow-up: throughput placement and a real workload (branch `feature/rian-commander-v2-fleet-throughput`)
+
+- Placement uses measured seconds per work unit per PC and kind (median of finished jobs) and picks the
+  earliest expected finish; an unmeasured PC is explored with one job at a time. `placement:"cores"`
+  keeps the first version for comparison. PCs may queue up to 2 x maxConcurrent (capped by the per-PC
+  open-job limit); claims still run maxConcurrent at once.
+- `fleet.blob_verify`: a PC hashes its own content-addressed store (Ollama `sha256-<hex>` or Hugging Face
+  hub blobs) named in its own config; results are counts, bytes, speed, mismatched names.
+- Fleet suites now run inside CI-run files (imports), since the workflow file cannot be changed here.
+
+Real run (same two PCs, loopback service, SSH tunnel; 64 synthetic units x 40, then real public-model stores):
+
+| Run | Wall time |
+|---|---|
+| One PC, at most `maxConcurrent` open jobs | 176.5 s |
+| **One PC, same queue depth as the pool (fair baseline)** | **103.9 s** |
+| Pool, cores placement (first version) | 120.9 s (16 % slower than the fair baseline) |
+| **Pool, throughput placement** | **90.6 s (13 % faster)**, digests identical in all four runs |
+| Store integrity, 32.3 GB / 37 public-model files on both PCs, parallel (cold cache) | **22 s**, 0 mismatches |
+| Same stores one job at a time (partly warm cache) | 56 s |
+
+The first "1.5x" of the 16-unit run compared against the no-queue baseline; against the fair baseline the
+two-PC gain for CPU units is 13 %, bounded by the second PC being ~3x slower per unit. Verifying a store
+where it lives moved only job JSON over the network; pulling the second PC's 16.9 GB to one PC at the
+measured 6.6 MB/s would have taken ~44 min of transfer alone. All 266 jobs of the run: dispatched once each.

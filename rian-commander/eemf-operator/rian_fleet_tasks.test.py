@@ -120,6 +120,12 @@ class BlobVerify(unittest.TestCase):
         self.assertEqual(sum(halves), 2)                                   # shards partition the store
         with self.assertRaises(F.FleetError):
             F.blob_verify("elsewhere", 0, 1, cfg, nop, lambda: False)      # a store this PC did not configure
+        hf = Path(tempfile.mkdtemp())                                      # Hugging Face layout: models--x/blobs/<hex>
+        (hf / "models--a--b" / "blobs").mkdir(parents=True)
+        (hf / "models--a--b" / "blobs" / hashlib.sha256(good).hexdigest()).write_bytes(good)
+        (hf / "models--a--b" / "blobs" / ("0" * 40)).write_bytes(b"git sha1 named small file")   # not sha256: skipped
+        r2 = F.blob_verify("both", 0, 1, {"blob_stores": {"both": [str(hf), str(d)]}}, nop, lambda: False)
+        self.assertEqual((r2["files"], len(r2["mismatched"])), (3, 1))
 
     def test_agent_bounds_for_the_store_name(self):
         c = {"allowed_kinds": ["fleet.blob_verify"]}

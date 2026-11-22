@@ -353,19 +353,29 @@ def qlora_probe(params, cfg_fleet, progress, cancelled):
 
 
 # ------------------------------------------------------------------ store integrity (real research ops)
-BLOB = re.compile(r"^sha256[-:]([0-9a-f]{64})$")
+# Ollama names blobs "sha256-<hex>"; the Hugging Face hub names LFS blobs by the bare sha256 hex.
+BLOB = re.compile(r"^(?:sha256[-:])?([0-9a-f]{64})$")
+
+
+def _store_files(spec):
+    """A store is one path or a list; a path may hold blobs itself or HF-style */blobs folders."""
+    out = []
+    for root in ([spec] if isinstance(spec, str) else list(spec)):
+        base = Path(root)
+        if not base.is_dir():
+            raise FleetError("STORE_MISSING")
+        dirs = [base] + sorted(p for p in base.glob("*/blobs") if p.is_dir())
+        out += [p for d in dirs for p in d.iterdir() if p.is_file() and not p.is_symlink() and BLOB.match(p.name)]
+    return sorted(set(out), key=lambda p: (p.name, str(p)))
 
 
 def blob_verify(store, shard, shards, cfg_fleet, progress, cancelled):
     """Hash every content-addressed file (name = its sha256) in this PC's own store; report only counts."""
     stores = cfg_fleet.get("blob_stores") or {}
-    root = stores.get(store)
-    if not root:
+    spec = stores.get(store)
+    if not spec:
         raise FleetError("STORE_NOT_CONFIGURED_ON_THIS_PC")
-    base = Path(root)
-    if not base.is_dir():
-        raise FleetError("STORE_MISSING")
-    files = sorted(p for p in base.iterdir() if p.is_file() and BLOB.match(p.name))
+    files = _store_files(spec)
     mine = [p for i, p in enumerate(files) if i % shards == shard]
     total = sum(p.stat().st_size for p in mine)
     done_bytes, bad, start = 0, [], time.perf_counter()
