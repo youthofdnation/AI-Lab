@@ -71,5 +71,21 @@ the real session id of each real Claude Code session; no real usage exhaustion w
 `status --worktree` now also reports whether the five grant hooks are installed
 (`hooks.installed`, `missing`; StopFailure only counts with a `rate_limit` matcher).
 
-Real PR #5 worktree: the owner did **not** approve the second dialog (declined, closed or no click
-within 3 minutes → `OWNER_APPROVAL_NOT_GIVEN`). No grant and no hooks were installed there.
+### Real PR #5 worktree (2026-11-23 KST)
+
+| Step | Observed |
+|---|---|
+| First dialog (11-22) | not approved (declined, closed or no click within 3 minutes → `OWNER_APPROVAL_NOT_GIVEN`); nothing installed |
+| Second dialog | shown by a Codex session while Claude Code was usage-limited; owner clicked 승인 at 00:25:44 → grant `268d478c`, 5 runs, 7 days (until 11-30 00:24), 20 min/run, workspace edits only |
+| Hooks | five project-local hooks in git-ignored `.claude/settings.local.json`, pinned to the external runtime copy `b086c48` |
+| Real Claude Code session (new, headless, `git status` only) | `SessionStart` → `UserPromptSubmit` → `PostToolUse` all `CHECKPOINTED` (sequence 1–3); no trigger, no dispatch |
+| `status --worktree` | `ready: true`, no blockers, Codex 0.164.0 logged in, 0/5 runs used |
+
+Hooks only cover Claude Code sessions **started after** installation: a session already running in
+the folder recorded no hook events. The 00:23 usage limit that stopped Claude Code happened before
+the hooks existed (the owner moved to Codex by hand), so a real rate-limit `StopFailure` reaching
+`hook-grant` is still unobserved.
+
+`install-plan` (added afterwards) now emits Homebrew's stable `opt/node` path. On this Mac,
+`process.execPath` is the versioned `Cellar/node/26.0.0` path, which `brew upgrade` deletes; hooks
+pinned to it would fail on every event.
