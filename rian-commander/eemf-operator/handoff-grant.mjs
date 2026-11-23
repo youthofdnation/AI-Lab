@@ -12,7 +12,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash,randomUUID} from 'node:crypto';
 import {chmodSync,closeSync,existsSync,lstatSync,mkdirSync,openSync,readFileSync,readdirSync,realpathSync,renameSync,rmSync,writeFileSync} from 'node:fs';
 import {hostname} from 'node:os';
-import {isAbsolute,join,relative,sep} from 'node:path';
+import {basename,dirname,isAbsolute,join,relative,sep} from 'node:path';
 
 export const GRANT_LIMITS=Object.freeze({maxRuns:20,maxDays:30,maxRunMinutes:30});
 const assert=(v,c)=>{if(!v)throw Error(c);};
@@ -34,6 +34,11 @@ function atomic(file,obj){
   }finally{if(existsSync(temp))rmSync(temp);}
 }
 const grantFile=(store,worktree)=>join(store,'grants',hash(worktree)+'.json');
+function canonicalPath(path){
+  if(existsSync(path))return realpathSync(path);
+  const parent=dirname(path);
+  return join(canonicalPath(parent),basename(path));
+}
 
 /** Check the Git root without comparing Git's POSIX-formatted Windows paths to OS realpaths.
  * Git's --show-prefix is empty exactly at the worktree root on all three OSes.
@@ -61,6 +66,33 @@ export function planGrant({worktree,approvedRoot,runs=5,days=7,runMinutes=20,wor
     permissions:{workspaceWrite,network:false,push:false,deploy:false,credentials:false},
     maxRuns:runs,runTimeoutMs:runMinutes*60_000,checkpointMaxAgeMs:900_000,
     createdAt:new Date(now).toISOString(),expiresAt:new Date(now+days*86_400_000).toISOString()};
+}
+
+/** Output-only Claude Code project-local hook configuration for the existing grant receiver. */
+export function planGrantHooks({worktree,runtime,store,nodeCommand=process.execPath}){
+  const real=planGrant({worktree}).worktree;
+  assert(typeof runtime==='string'&&isAbsolute(runtime),'INSTALL_RUNTIME_ABSOLUTE_REQUIRED');
+  const runtimeStat=lstatSync(runtime);
+  assert(runtimeStat.isFile()&&!runtimeStat.isSymbolicLink(),'INSTALL_RUNTIME_UNSAFE');
+  const fixed=realpathSync(runtime),rel=relative(real,fixed);
+  assert(rel==='..'||rel.startsWith('..'+sep)||isAbsolute(rel),'INSTALL_RUNTIME_INSIDE_WORKTREE');
+  assert(fixed.endsWith(sep+'automatic-handoff-cli.mjs'),'INSTALL_RUNTIME_NAME_INVALID');
+  assert(typeof nodeCommand==='string'&&isAbsolute(nodeCommand),'INSTALL_NODE_ABSOLUTE_REQUIRED');
+  const args=[fixed,'hook-grant'];
+  if(store!==undefined){
+    assert(typeof store==='string'&&isAbsolute(store),'INSTALL_STORE_ABSOLUTE_REQUIRED');
+    const storeRel=relative(real,canonicalPath(store));
+    assert(storeRel==='..'||storeRel.startsWith('..'+sep)||isAbsolute(storeRel),'INSTALL_STORE_INSIDE_WORKTREE');
+    args.push('--store',store);
+  }
+  const hook=(timeout)=>[{hooks:[{type:'command',command:nodeCommand,args:[...args],timeout}]}];
+  const settings={hooks:{SessionStart:hook(20),UserPromptSubmit:hook(20),PostToolUse:hook(20),
+    PostToolUseFailure:hook(20),StopFailure:[{matcher:'rate_limit',hooks:[{type:'command',command:nodeCommand,args:[...args],timeout:30}]}]}};
+  const settingsPath=join(real,'.claude','settings.local.json');
+  return {state:'PREVIEW_ONLY',worktree:real,settingsPath,existingSettings:existsSync(settingsPath),
+    settings,requirements:['Review and merge with any existing project-local settings; do not overwrite them.',
+      'Use a fixed, reviewed runtime copy outside the editable worktree.',
+      'An active P2.2 grant for this exact worktree and device is required before handoff.']};
 }
 
 export function grantSummary(g){

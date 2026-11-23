@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
-import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,statSync,writeFileSync} from 'node:fs';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {existsSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,rmSync,statSync,writeFileSync} from 'node:fs';
 import {tmpdir,hostname} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createProjectGrant,grantHandoffStatus,handleClaudeHook,revokeProjectGrant,runDetachedDispatch} from './automatic-handoff.mjs';
-import {confirmGrantByDialog,planGrant,readGrant,capturePrompt} from './handoff-grant.mjs';
+import {confirmGrantByDialog,planGrant,planGrantHooks,readGrant,capturePrompt} from './handoff-grant.mjs';
+
+const cli=fileURLToPath(new URL('./automatic-handoff-cli.mjs',import.meta.url));
 
 function fixture(t,{runs=3}={}){
   const root=mkdtempSync(join(tmpdir(),'rian-grant-'));
@@ -138,4 +141,42 @@ test('status reports whether the five grant hooks are installed in the worktree'
   writeFileSync(join(f.repo,'.claude','settings.local.json'),JSON.stringify({hooks:{SessionStart:h(),UserPromptSubmit:h(),PostToolUse:h(),PostToolUseFailure:h(),StopFailure:h('rate_limit')}}));
   const after=grantHandoffStatus({worktree:f.repo,storeDir:f.store,probeCodex:false});
   assert.equal(after.hooks.installed,true);assert.deepEqual(after.hooks.files,['.claude/settings.local.json']);
+});
+
+test('install-plan prints five project-local grant hooks without installing or approving',t=>{
+  const f=fixture(t),settings=join(f.repo,'.claude','settings.local.json');
+  const before=f.git(f.repo,'status','--porcelain');
+  const r=spawnSync(process.execPath,[cli,'install-plan','--worktree',f.repo,'--runtime',cli,'--store',f.store],{encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr);
+  const plan=JSON.parse(r.stdout);
+  assert.equal(plan.state,'PREVIEW_ONLY');
+  assert.equal(plan.settingsPath,join(realpathSync(f.repo),'.claude','settings.local.json'));
+  assert.equal(plan.existingSettings,false);
+  assert.deepEqual(Object.keys(plan.settings.hooks),['SessionStart','UserPromptSubmit','PostToolUse','PostToolUseFailure','StopFailure']);
+  for(const [event,groups] of Object.entries(plan.settings.hooks)){
+    assert.equal(groups.length,1);
+    assert.equal(groups[0].matcher,event==='StopFailure'?'rate_limit':undefined);
+    assert.deepEqual(groups[0].hooks,[{type:'command',command:process.execPath,args:[cli,'hook-grant','--store',f.store],timeout:event==='StopFailure'?30:20}]);
+  }
+  assert.equal(existsSync(settings),false);
+  assert.equal(existsSync(f.store),false,'preview must not create an approval store');
+  assert.equal(f.git(f.repo,'status','--porcelain'),before);
+  mkdirSync(join(f.repo,'.claude'));
+  writeFileSync(settings,JSON.stringify(plan.settings));
+  assert.equal(grantHandoffStatus({worktree:f.repo,storeDir:f.store,probeCodex:false}).hooks.installed,true);
+  writeFileSync(settings,JSON.stringify({otherSetting:true}));
+  assert.equal(planGrantHooks({worktree:f.repo,runtime:cli}).existingSettings,true);
+  assert.equal(readFileSync(settings,'utf8'),JSON.stringify({otherSetting:true}),'existing settings are preserved');
+});
+
+test('install-plan refuses an editable or invalid runtime and unsafe scope',t=>{
+  const f=fixture(t),local=join(f.repo,'automatic-handoff-cli.mjs');
+  writeFileSync(local,'// editable copy\n');
+  assert.throws(()=>planGrantHooks({worktree:f.repo,runtime:local}),/INSTALL_RUNTIME_INSIDE_WORKTREE/);
+  assert.throws(()=>planGrantHooks({worktree:f.repo,runtime:'relative.mjs'}),/INSTALL_RUNTIME_ABSOLUTE_REQUIRED/);
+  assert.throws(()=>planGrantHooks({worktree:f.repo,runtime:cli,store:join(f.repo,'store')}),/INSTALL_STORE_INSIDE_WORKTREE/);
+  assert.throws(()=>planGrantHooks({worktree:f.repo,runtime:cli,nodeCommand:'node'}),/INSTALL_NODE_ABSOLUTE_REQUIRED/);
+  assert.throws(()=>planGrantHooks({worktree:join(f.repo,'sub'),runtime:cli}),/ENOENT|GRANT_WORKTREE_MUST_BE_GIT_ROOT/);
+  const r=spawnSync(process.execPath,[cli,'install-plan','--worktree',f.repo,'--runtime',cli,'--runs','2'],{encoding:'utf8'});
+  assert.equal(r.status,1);assert.match(r.stderr,/USAGE/);
 });

@@ -31,20 +31,26 @@ node automatic-handoff-cli.mjs grant --worktree "/ABS/PROJECT" --runs 5 --days 7
 node automatic-handoff-cli.mjs status --worktree "/ABS/PROJECT"
 # Revoke immediately without an approval dialogue
 node automatic-handoff-cli.mjs revoke --worktree "/ABS/PROJECT"
+# Preview the exact project-local Claude hook settings (JSON output only)
+node automatic-handoff-cli.mjs install-plan --worktree "/ABS/PROJECT" --runtime "/ABS/FIXED/automatic-handoff-cli.mjs"
 ```
 
 After the owner approves, the developer must still install the Claude Code
-**project-local** hooks explicitly, pointing to a **fixed, reviewed copy of the
-handoff runtime outside the editable worktree**. All five hook events
+**project-local** hooks explicitly. `install-plan` prints a JSON preview with
+`settingsPath`, `existingSettings`, and `settings`; it does not create a grant,
+write settings, or activate hooks. Review the `settings` object and merge it
+with any existing `.claude/settings.local.json`, preserving its other entries.
+The runtime argument must point to a **fixed, reviewed copy of the handoff
+runtime outside the editable worktree**. If the grant uses a custom store,
+include the same absolute `--store` path in the preview command. All five hook events
 (`SessionStart`, `UserPromptSubmit`, `PostToolUse`,
 `PostToolUseFailure`, and `StopFailure` with `rate_limit` matcher) must
 invoke `automatic-handoff-cli.mjs hook-grant` with the hook JSON on standard
 input. The latter uses the official event's `cwd` to identify the exact worktree;
 it must not accept a different worktree from a remote sender. The current
 `automatic-handoff-hooks.sample.json` documents the older per-task
-`--manifest` flow, **not** the new standing-grant installation. An
-`install-plan` preview/generator for the grant mode is a separate future task;
-do not suggest manual replacement of a global Claude settings file.
+`--manifest` flow, **not** the new standing-grant installation. Do not replace
+a global Claude settings file.
 
 The `UserPromptSubmit` hook saves the owner's last request locally, with
 sensitive-looking text refused. On an official `StopFailure(error=rate_limit)`,

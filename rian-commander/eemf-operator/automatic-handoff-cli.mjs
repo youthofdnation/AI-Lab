@@ -5,6 +5,7 @@
  *     grant  --worktree ABS [--runs 5] [--days 7] [--run-minutes 20] [--read-only]   one owner click (native dialog)
  *     revoke --worktree ABS                     immediate, no confirmation needed
  *     status --worktree ABS                     read-only readiness
+ *     install-plan --worktree ABS --runtime ABS  print project-local hook settings; no installation
  *     hook-grant                                Claude command hook (grant looked up from the event's cwd)
  *   P2 manifest mode (per-task seal): approve | hook | recover | status --manifest ABS
  */
@@ -14,8 +15,9 @@ import {resolve} from 'node:path';
 import {authorizeActivation,automaticHandoffStatus,categorizeHandoffError,createProjectGrant,grantHandoffStatus,handleClaudeHook,
   readActivationManifest,reconcileAutomaticLease,revokeProjectGrant,runDetachedDispatch} from './automatic-handoff.mjs';
 import {confirmGrantByDialog,grantSummary} from './handoff-grant.mjs';
+import {planGrantHooks} from './handoff-grant.mjs';
 
-const VALUE=['--manifest','--worktree','--store','--handoff-id','--reason','--session','--runs','--days','--run-minutes'];
+const VALUE=['--manifest','--worktree','--runtime','--store','--handoff-id','--reason','--session','--runs','--days','--run-minutes'];
 const FLAG=['--read-only'];
 function args(argv){
   const out={};
@@ -54,16 +56,19 @@ async function main(){
   const [action,...rest]=process.argv.slice(2),o=args(rest);
   const storeDir=o.store?resolve(o.store):undefined;
   const worktree=o.worktree?resolve(o.worktree):undefined,manifestPath=o.manifest?resolve(o.manifest):undefined;
-  const grantActions=['grant','revoke','hook-grant'];
+  const grantActions=['grant','revoke','hook-grant','install-plan'];
   if(![...grantActions,'approve','hook','recover','status','dispatch-run'].includes(action)||
-    (['grant','revoke'].includes(action)&&!worktree)||
+    (['grant','revoke','install-plan'].includes(action)&&!worktree)||
+    (action==='install-plan'&&(!o.runtime||Object.keys(o).some(k=>!['worktree','runtime','store'].includes(k))))||
     (['approve','hook','recover'].includes(action)&&!manifestPath)||
     (['status','dispatch-run'].includes(action)&&!worktree===!manifestPath))
-    throw Error('USAGE: grant|revoke|status --worktree ABS | hook-grant | approve|hook|recover|status --manifest ABS');
+    throw Error('USAGE: grant|revoke|status --worktree ABS | install-plan --worktree ABS --runtime ABS | hook-grant | approve|hook|recover|status --manifest ABS');
   if(action==='grant'){
     const g=await createProjectGrant({worktree,storeDir,runs:int(o.runs,5),days:int(o.days,7),runMinutes:int(o.run_minutes,20),
       workspaceWrite:!o.read_only,confirm:confirmGrant});
     stdout.write(JSON.stringify({state:'GRANTED',grantId:g.grantId,worktree:g.worktree,expiresAt:g.expiresAt,maxRuns:g.maxRuns,approvedVia:g.approvedVia})+'\n');
+  }else if(action==='install-plan'){
+    stdout.write(JSON.stringify(planGrantHooks({worktree:o.worktree,runtime:o.runtime,store:o.store}),null,2)+'\n');
   }else if(action==='revoke'){
     stdout.write(JSON.stringify(revokeProjectGrant({worktree,storeDir,reason:o.reason}))+'\n');
   }else if(action==='hook-grant'){
