@@ -1,0 +1,53 @@
+name: RIAN Commander agent handoff foundation
+on:
+  push:
+    branches: ['feature/rian-commander-agent-handoff-*']
+    paths:
+      - 'rian-commander/eemf-operator/agent-handoff.*'
+      - 'rian-commander/eemf-operator/manual-handoff.*'
+      - 'rian-commander/eemf-operator/manual-handoff-cli.mjs'
+      - 'rian-commander/eemf-operator/automatic-handoff.*'
+      - 'rian-commander/eemf-operator/automatic-handoff-cli.mjs'
+      - 'rian-commander/eemf-operator/handoff-grant.*'
+      - 'rian-commander/eemf-operator/automatic-handoff-hooks.sample.json'
+      - 'rian-commander/eemf-operator/AUTOMATIC-HANDOFF.md'
+      - 'rian-commander/eemf-operator/AGENT-HANDOFF.md'
+      - '.github/workflows/rian-agent-handoff.yml'
+  pull_request:
+    paths:
+      - 'rian-commander/eemf-operator/agent-handoff.*'
+      - 'rian-commander/eemf-operator/manual-handoff.*'
+      - 'rian-commander/eemf-operator/manual-handoff-cli.mjs'
+      - 'rian-commander/eemf-operator/automatic-handoff.*'
+      - 'rian-commander/eemf-operator/automatic-handoff-cli.mjs'
+      - 'rian-commander/eemf-operator/handoff-grant.*'
+      - 'rian-commander/eemf-operator/automatic-handoff-hooks.sample.json'
+      - 'rian-commander/eemf-operator/AUTOMATIC-HANDOFF.md'
+      - 'rian-commander/eemf-operator/AGENT-HANDOFF.md'
+      - '.github/workflows/rian-agent-handoff.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-only-unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: P0/P1/P2 synthetic hook and subprocess tests
+        working-directory: rian-commander/eemf-operator
+        run: |
+          node --check agent-handoff.mjs
+          node --check manual-handoff.mjs
+          node --check manual-handoff-cli.mjs
+          node --check automatic-handoff.mjs
+          node --check automatic-handoff-cli.mjs
+          node --check handoff-grant.mjs
+          node --test agent-handoff.test.mjs manual-handoff.test.mjs automatic-handoff.test.mjs handoff-grant.test.mjs
