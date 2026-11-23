@@ -68,8 +68,16 @@ export function planGrant({worktree,approvedRoot,runs=5,days=7,runMinutes=20,wor
     createdAt:new Date(now).toISOString(),expiresAt:new Date(now+days*86_400_000).toISOString()};
 }
 
+/** Homebrew's process.execPath is the versioned Cellar path, which `brew upgrade` deletes; a hook
+ * pinned to it fails on every event and the handoff never runs. Its opt/ link survives upgrades. */
+export function stableNodeCommand(execPath=process.execPath,exists=existsSync){
+  const m=/^(.+)\/Cellar\/(node(?:@\d+)?)\/[^/]+\/bin\/node$/.exec(execPath);
+  const opt=m&&`${m[1]}/opt/${m[2]}/bin/node`;
+  return opt&&exists(opt)?opt:execPath;
+}
+
 /** Output-only Claude Code project-local hook configuration for the existing grant receiver. */
-export function planGrantHooks({worktree,runtime,store,nodeCommand=process.execPath}){
+export function planGrantHooks({worktree,runtime,store,nodeCommand=stableNodeCommand()}){
   const real=planGrant({worktree}).worktree;
   assert(typeof runtime==='string'&&isAbsolute(runtime),'INSTALL_RUNTIME_ABSOLUTE_REQUIRED');
   const runtimeStat=lstatSync(runtime);

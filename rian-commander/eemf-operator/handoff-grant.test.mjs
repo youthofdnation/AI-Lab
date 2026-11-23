@@ -6,7 +6,7 @@ import {tmpdir,hostname} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createProjectGrant,grantHandoffStatus,handleClaudeHook,revokeProjectGrant,runDetachedDispatch} from './automatic-handoff.mjs';
-import {confirmGrantByDialog,planGrant,planGrantHooks,readGrant,capturePrompt} from './handoff-grant.mjs';
+import {confirmGrantByDialog,planGrant,planGrantHooks,readGrant,capturePrompt,stableNodeCommand} from './handoff-grant.mjs';
 
 const cli=fileURLToPath(new URL('./automatic-handoff-cli.mjs',import.meta.url));
 
@@ -156,7 +156,7 @@ test('install-plan prints five project-local grant hooks without installing or a
   for(const [event,groups] of Object.entries(plan.settings.hooks)){
     assert.equal(groups.length,1);
     assert.equal(groups[0].matcher,event==='StopFailure'?'rate_limit':undefined);
-    assert.deepEqual(groups[0].hooks,[{type:'command',command:process.execPath,args:[cli,'hook-grant','--store',f.store],timeout:event==='StopFailure'?30:20}]);
+    assert.deepEqual(groups[0].hooks,[{type:'command',command:stableNodeCommand(),args:[cli,'hook-grant','--store',f.store],timeout:event==='StopFailure'?30:20}]);
   }
   assert.equal(existsSync(settings),false);
   assert.equal(existsSync(f.store),false,'preview must not create an approval store');
@@ -179,4 +179,13 @@ test('install-plan refuses an editable or invalid runtime and unsafe scope',t=>{
   assert.throws(()=>planGrantHooks({worktree:join(f.repo,'sub'),runtime:cli}),/ENOENT|GRANT_WORKTREE_MUST_BE_GIT_ROOT/);
   const r=spawnSync(process.execPath,[cli,'install-plan','--worktree',f.repo,'--runtime',cli,'--runs','2'],{encoding:'utf8'});
   assert.equal(r.status,1);assert.match(r.stderr,/USAGE/);
+});
+
+test('install-plan pins a Homebrew node path that survives brew upgrade',()=>{
+  const cellar='/opt/homebrew/Cellar/node/26.0.0/bin/node',opt='/opt/homebrew/opt/node/bin/node';
+  assert.equal(stableNodeCommand(cellar,p=>p===opt),opt);
+  assert.equal(stableNodeCommand('/usr/local/Cellar/node@22/22.1.0/bin/node',()=>true),'/usr/local/opt/node@22/bin/node');
+  assert.equal(stableNodeCommand(cellar,()=>false),cellar,'no opt link: keep the real path');
+  for(const p of ['/usr/bin/node','/Users/runner/hostedtoolcache/node/22.0.0/arm64/bin/node','C:\\Program Files\\nodejs\\node.exe'])
+    assert.equal(stableNodeCommand(p,()=>true),p);
 });
