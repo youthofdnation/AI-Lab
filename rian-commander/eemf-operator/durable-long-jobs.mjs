@@ -185,7 +185,7 @@ export class LongJobQueue {
       if(requestKey){
         const old=db.prepare('SELECT * FROM long_jobs WHERE tenant=? AND owner=? AND request_key=?').get(actor.tenantId,actor.id,requestKey);
         if(old){
-          if(old.spec_sha!==specSha)throw Error('IDEMPOTENCY_CONFLICT');
+          if(old.spec_sha!==specSha||old.client_ref!==clientRef)throw Error('IDEMPOTENCY_CONFLICT');
           return {...this.#summary(old,{withResult:false}),deduplicated:true};
         }
       }
@@ -193,7 +193,10 @@ export class LongJobQueue {
         ?db.prepare(`SELECT * FROM long_jobs WHERE tenant=? AND device=? AND lock_group=? AND state IN (${placeholder(ACTIVE.length)}) ORDER BY created LIMIT 1`).get(actor.tenantId,deviceId,spec.lockGroup,...ACTIVE)
         :db.prepare(`SELECT * FROM long_jobs WHERE tenant=? AND device=? AND spec_sha=? AND state IN (${placeholder(ACTIVE.length)}) ORDER BY created LIMIT 1`).get(actor.tenantId,deviceId,specSha,...ACTIVE);
       if(active){
-        if(active.spec_sha===specSha)return {...this.#summary(active,{withResult:false}),deduplicated:true};
+        if(active.owner===actor.id&&active.client_ref===clientRef&&active.spec_sha===specSha)
+          return {...this.#summary(active,{withResult:false}),deduplicated:true};
+        // Never reveal a different owner's job ID or result in a deduplication response.
+        if(active.owner!==actor.id)throw Error('ACTIVE_JOB_CONFLICT');
         throw Error('ACTIVE_JOB_CONFLICT:'+active.id);
       }
       const open=db.prepare(`SELECT COUNT(*) AS n FROM long_jobs WHERE tenant=? AND device=? AND state IN (${placeholder(ACTIVE.length)})`).get(actor.tenantId,deviceId,...ACTIVE).n;
