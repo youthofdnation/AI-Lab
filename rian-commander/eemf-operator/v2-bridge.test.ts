@@ -17,7 +17,8 @@ test("V2 calls are forwarded only after the existing OAuth access-token check",(
  const forward=gateway.indexOf('result=await v2Rpc("tools/call"',mcp);
  expect(mcp).toBeGreaterThanOrEqual(0);
  expect(auth>mcp&&forward>auth).toBe(true);
- expect(gateway).toContain('if(v2Ready&&/^rian_v2_[a-z_]+$/.test(name))');
+ expect(gateway).toContain('if(v2Ready&&v2ToolAllowed(name))');
+ expect(gateway).toContain('.filter(t=>v2ToolAllowed(t?.name))');
  expect(gateway).toContain('if(!bridgeReady)throw Error("Backend unavailable")');
 });
 test("gateway sends a client digest, never the OAuth client id or access token, to the job service",()=>{
@@ -40,4 +41,15 @@ test("general fleet and file reads cannot reach the mail cache or mailbox files"
  expect(gateway).toContain('"ntuser.dat","rian-mail-v2"]');
  expect(gateway).toContain('/\\.(pfx|pem|key|eml|mbox|msg|pst|ost)$/');
  expect(policy).toContain("'config.json','rian-mail-v2'");
+});
+
+test("V2 mail forwarding is limited to the six fixed read-only tools",()=>{
+ const decl=/const v2MailTools=new Set\(\[(.*?)\]\);/.exec(gateway);
+ const predicate=/function v2ToolAllowed\(name\)\{[^\n]+\}/.exec(gateway);
+ expect(decl).not.toBeNull();
+ expect(predicate).not.toBeNull();
+ const expected=["mail_status","mail_sync","mail_search","mail_read","mail_recent","mail_review_pending"];
+ expect(JSON.parse("["+decl![1]+"]")).toEqual(expected);
+ expect(predicate![0]).toBe('function v2ToolAllowed(name){return typeof name==="string"&&(/^rian_v2_[a-z_]+$/.test(name)||v2MailTools.has(name))}');
+ expect(expected.some(name=>/send|delete|move|approve|shell|command/.test(name))).toBe(false);
 });
