@@ -58,6 +58,28 @@ const MAIL_KINDS={
   }
 };
 
+/** Opt-in metadata-only jobs; no caller-supplied mailbox path/account or executable. */
+const bounded=(v,min,max)=>Number.isInteger(v)&&v>=min&&v<=max;
+const filterText=v=>typeof v==='string'&&v.length>=1&&v.length<=120&&!/[\x00-\x1f\x7f]/.test(v);
+const RECENT_KINDS={
+  'mail.status':{
+    label:'업무메일 로컬 색인 상태 (본문 없음)',lockGroup:null,maxRuntimeSeconds:120,leaseSeconds:60,grantable:true,
+    validate(p){exactKeys(p,[]);return {};},
+    describe:()=>['로컬 색인 건수, 최신 동기화 시각 및 수신·발신 분류 가능 여부만 확인','메일 본문 및 인증정보 반환 없음']
+  },
+  'mail.recent':{
+    label:'최근 업무메일 목록 (메타데이터, 페이지 조회)',lockGroup:null,maxRuntimeSeconds:120,leaseSeconds:60,grantable:true,
+    validate(p){
+      exactKeys(p,['days','limit','offset','folder','sender','recipient','query'],['days']);
+      const {days,limit=20,offset=0,folder='all'}=p;
+      if(!bounded(days,1,14)||!bounded(limit,1,20)||!bounded(offset,0,1000)||!['all','inbox','sent'].includes(folder))throw Error('INVALID_PARAMS');
+      for(const k of ['sender','recipient','query'])if(p[k]!==undefined&&!filterText(p[k]))throw Error('INVALID_PARAMS');
+      return {days,limit,offset,folder,...Object.fromEntries(['sender','recipient','query'].filter(k=>p[k]!==undefined).map(k=>[k,p[k]]))};
+    },
+    describe:p=>['최근 '+p.days+'일, 최대 '+p.limit+'건씩 메타데이터 조회 (본문 및 첨부파일 없음)','폴더 분류와 발신·수신 정보가 없는 메일은 미확인으로 처리']
+  }
+};
+
 const DIAG_KINDS={
   'diag.wait':{
     label:'합성 장시간 진단 작업 (대기·진행률 보고만, 파일·메일 접근 없음)',
@@ -73,8 +95,8 @@ const DIAG_KINDS={
 
 export class LongJobKinds {
   #kinds;
-  constructor({allowDiagnostics=false}={}){
-    this.#kinds=new Map(Object.entries({...MAIL_KINDS,...(allowDiagnostics===true?DIAG_KINDS:{})}));
+  constructor({allowDiagnostics=false,allowMailReviewTools=false}={}){
+    this.#kinds=new Map(Object.entries({...MAIL_KINDS,...(allowMailReviewTools===true?RECENT_KINDS:{}),...(allowDiagnostics===true?DIAG_KINDS:{})}));
   }
   names(){return [...this.#kinds.keys()];}
   get(kind){

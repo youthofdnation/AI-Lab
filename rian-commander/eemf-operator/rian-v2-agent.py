@@ -41,7 +41,7 @@ _spec.loader.exec_module(_artifact)
 Client, TransferError = _artifact.Client, _artifact.TransferError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"}
+KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "mail.status", "mail.recent", "diag.wait"}
 MAX_OUTPUT = 96 * 1024
 # The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
 # request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
@@ -101,6 +101,17 @@ def validate_local(kind, params, cfg):
     elif kind == "mail.search":
         if not keys <= {"query", "limit"} or "query" not in keys:
             raise mail.MailError("INVALID_PARAMS")
+    elif kind == "mail.status":
+        if keys:
+            raise mail.MailError("INVALID_PARAMS")
+        if not re.fullmatch(r"[a-f0-9]{64}", str((cfg.get("mail") or {}).get("account_fingerprint", ""))):
+            raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
+    elif kind == "mail.recent":
+        if not keys <= {"days", "limit", "offset", "folder", "sender", "recipient", "query"} or "days" not in keys:
+            raise mail.MailError("INVALID_PARAMS")
+        if not re.fullmatch(r"[a-f0-9]{64}", str((cfg.get("mail") or {}).get("account_fingerprint", ""))):
+            raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
+        mail.validate_recent_params(**params)
     elif kind == "mail.read":
         if keys != {"messageId"} or not mail.MESSAGE_ID.fullmatch(str(params["messageId"])):
             raise mail.MailError("INVALID_MESSAGE_ID")
@@ -148,9 +159,19 @@ def run_job(job_dir, cfg):
             data_dir = mcfg.get("data_dir")
             if not data_dir:
                 raise mail.MailError("MAIL_DATA_DIR_REQUIRED")
+            account_pin = mcfg.get("account_fingerprint")
+            if account_pin is not None:
+                mail.verify_mail_account(data_dir, account_pin)
             if job["kind"] == "mail.sync":
-                output = mail.sync(data_dir, mail.source_from_config(mcfg.get("source")), params["days"], params["maxMessages"],
+                source = mail.source_from_config(mcfg.get("source"))
+                if account_pin is not None and mail.account_fingerprint(source.account) != account_pin:
+                    raise mail.MailError("ACCOUNT_MISMATCH")
+                output = mail.sync(data_dir, source, params["days"], params["maxMessages"],
                                    legacy_index=mcfg.get("legacy_index"), progress=progress, should_cancel=cancelled)
+            elif job["kind"] == "mail.status":
+                output = mail.status(data_dir, expected_account_fingerprint=account_pin)
+            elif job["kind"] == "mail.recent":
+                output = mail.recent(data_dir, expected_account_fingerprint=account_pin, **params)
             elif job["kind"] == "mail.search":
                 output = mail.search(data_dir, params["query"], params.get("limit", 20))
             else:

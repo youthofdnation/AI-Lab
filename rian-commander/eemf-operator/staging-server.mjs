@@ -20,7 +20,7 @@ function parseJson(text,label){
 /** Reads only explicit configuration; there is no global admin token fallback. */
 export function stagingConfigFromEnv(env){
   const artifactsEnabled=env.RIAN_STAGE_API_ENABLED==='1',jobsEnabled=env.RIAN_STAGE_JOBS_ENABLED==='1';
-  const cfg={artifactsEnabled,jobsEnabled,allowDiagnostics:env.RIAN_STAGE_ALLOW_DIAGNOSTICS==='1'};
+  const cfg={artifactsEnabled,jobsEnabled,allowDiagnostics:env.RIAN_STAGE_ALLOW_DIAGNOSTICS==='1',allowMailReviewTools:env.RIAN_STAGE_MAIL_REVIEW_TOOLS==='1'};
   if(artifactsEnabled||jobsEnabled){
     cfg.principals=parseJson(env.RIAN_STAGE_PRINCIPALS_JSON,'TENANT_CONFIGURATION');
     cfg.devices=parseJson(env.RIAN_STAGE_DEVICES_JSON,'TENANT_CONFIGURATION');
@@ -47,7 +47,7 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
   if(config.jobsEnabled){
     // Optional per-device allowlist: RIAN_STAGE_DEVICES_JSON [{id,tenantId,allowedKinds:["diag.wait"]}]
     const deviceKinds=new Map((config.devices||[]).filter(d=>d&&d.allowedKinds!==undefined).map(d=>[d.id,d.allowedKinds]));
-    jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true}),clock,deviceKinds});
+    jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true,allowMailReviewTools:config.allowMailReviewTools===true}),clock,deviceKinds});
     recovery=jobs.recoverAfterRestart();
     jobHandler=createLongJobHandler({directory,queue:jobs,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
   }

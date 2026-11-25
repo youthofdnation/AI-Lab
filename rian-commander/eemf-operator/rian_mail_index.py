@@ -210,7 +210,7 @@ class FixtureSource:
         for m in self.messages:
             when = parse_iso(m["date"])
             if when and when >= since:
-                out.append({"message_id": m.get("message_id"), "date": when, "from": m.get("from", ""),
+                out.append({"message_id": m.get("message_id"), "date": when, "from": m.get("from", ""), "to": m.get("to", ""),
                             "subject": m.get("subject", ""), "folder": m.get("folder", "INBOX"),
                             "size": len(m.get("body", "").encode("utf-8")), "attachments": int(m.get("attachments", 0)),
                             "body": m.get("body", "")})
@@ -289,7 +289,7 @@ def parse_rfc822(raw, folder):
     except (TypeError, ValueError, IndexError):
         when = None
     return {"message_id": str(msg["message-id"] or ""), "date": when or utcnow(), "from": str(msg["from"] or ""),
-            "subject": str(msg["subject"] or ""), "folder": folder, "size": len(raw),
+            "subject": str(msg["subject"] or ""), "to": str(msg["to"] or ""), "folder": folder, "size": len(raw),
             "attachments": sum(1 for _ in msg.iter_attachments()), "body": _text_body(msg)}
 
 
@@ -428,7 +428,7 @@ def sync(data_dir, source, days, max_messages, *, now=None, legacy_index=None, p
             else:
                 store.put_body(key, m.get("body", ""))
                 index["messages"][key] = {"date": iso(m["date"]), "from": _clip(m.get("from"), 200), "subject": _clip(m.get("subject"), 300),
-                                          "folder": _clip(m.get("folder", "INBOX"), 100), "size": int(m.get("size", 0)),
+                                          "folder": _clip(m.get("folder", "INBOX"), 100), "to": _clip(m.get("to"), 300), "size": int(m.get("size", 0)),
                                           "attachments": int(m.get("attachments", 0))}
                 added += 1
             progress(stage="merging", percent=5 + int(85 * i / max(1, len(fetched))), done=i, total=len(fetched))
@@ -462,6 +462,88 @@ def search(data_dir, query, limit=20):
     return {"ok": True, "query": query, "count": len(hits), "results": [
         {"message_id": k, "date": v.get("date"), "from": v.get("from"), "subject": v.get("subject"), "folder": v.get("folder")}
         for k, v in hits[:limit]], "bodies_included": False}
+
+
+def _mail_direction(folder):
+    # Folder names are deliberately conservative; unknown/localized folders need explicit configuration.
+    name = str(folder or "").strip().lower().replace("\\\\", "/")
+    tail = name.rsplit("/", 1)[-1]
+    if name == "inbox":
+        return "inbox"
+    if tail in ("sent", "sent items", "sent mail", "보낸 편지함", "보낸메일함", "보낸 메일함"):
+        return "sent"
+    return "unknown"
+
+
+def validate_recent_params(days, limit=20, offset=0, folder="all", sender=None, recipient=None, query=None):
+    _bounded_int(days, 1, MAX_SYNC_DAYS, "INVALID_DAYS")
+    _bounded_int(limit, 1, 20, "INVALID_LIMIT")
+    _bounded_int(offset, 0, 1000, "INVALID_OFFSET")
+    if folder not in ("all", "inbox", "sent"):
+        raise MailError("INVALID_FOLDER")
+    for value in (sender, recipient, query):
+        if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 120 or re.search(r"[\x00-\x1f\x7f]", value)):
+            raise MailError("INVALID_FILTER")
+
+
+def verify_mail_account(data_dir, expected_account_fingerprint):
+    if not isinstance(expected_account_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_account_fingerprint):
+        raise MailError("MAIL_ACCOUNT_PIN_REQUIRED")
+    index = MailStore(data_dir).load()
+    if index is not None and index["account"] != expected_account_fingerprint:
+        raise MailError("ACCOUNT_MISMATCH")
+    return index
+
+
+def status(data_dir, *, expected_account_fingerprint):
+    index = verify_mail_account(data_dir, expected_account_fingerprint)
+    messages = index["messages"] if index is not None else {}
+    counts = {"inbox": 0, "sent": 0, "unknown": 0}
+    for meta in messages.values():
+        counts[_mail_direction(meta.get("folder"))] += 1
+    return {"ok": True, "index_exists": index is not None, "messages": len(messages),
+            "updated_at": index.get("updated_at") if index is not None else None,
+            "folder_counts": counts, "recipient_metadata_available": sum(bool(v.get("to")) for v in messages.values()),
+            "mailbox_modified": False, "bodies_included": False}
+
+
+def recent(data_dir, days, limit=20, offset=0, folder="all", sender=None, recipient=None, query=None, *,
+           expected_account_fingerprint, now=None):
+    validate_recent_params(days, limit, offset, folder, sender, recipient, query)
+    index = verify_mail_account(data_dir, expected_account_fingerprint)
+    if index is None:
+        raise MailError("INDEX_NOT_FOUND")
+    now = now or utcnow()
+    earliest = now - dt.timedelta(days=days)
+    matches, unknown_recipient, unknown_folder = [], 0, 0
+    for key, meta in index["messages"].items():
+        date = parse_iso(meta.get("date"))
+        if date is None or not earliest <= date <= now + dt.timedelta(minutes=5):
+            continue
+        direction = _mail_direction(meta.get("folder"))
+        if direction == "unknown":
+            unknown_folder += 1
+        if folder != "all" and direction != folder:
+            continue
+        if sender is not None and sender.casefold() not in str(meta.get("from", "")).casefold():
+            continue
+        if query is not None and query.casefold() not in (str(meta.get("subject", "")) + " " + str(meta.get("from", ""))).casefold():
+            continue
+        if not meta.get("to"):
+            unknown_recipient += 1
+        if recipient is not None and recipient.casefold() not in str(meta.get("to", "")).casefold():
+            continue
+        matches.append((date, key, {"message_id": key, "date": meta.get("date"), "from": meta.get("from"),
+                        "to": meta.get("to"), "subject": meta.get("subject"), "folder": meta.get("folder"),
+                        "direction": direction, "body_cached": MailStore(data_dir).has_body(key)}))
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    page = matches[offset:offset + limit]
+    return {"ok": True, "days": days, "count": len(matches), "offset": offset,
+            "next_offset": offset + limit if offset + limit < len(matches) and offset + limit <= 1000 else None,
+            "results": [item[2] for item in page], "updated_at": index.get("updated_at"),
+            "unknown_recipient_count": unknown_recipient, "unknown_folder_count": unknown_folder,
+            "pagination_limit": 1000, "bodies_included": False, "mailbox_modified": False,
+            "pending_status": "NOT_DETERMINED_METADATA_ONLY"}
 
 
 def read_message(data_dir, message_id, max_bytes=MAX_BODY_RETURN_BYTES):

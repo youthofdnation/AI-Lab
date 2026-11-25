@@ -14,9 +14,9 @@ const sha=b=>createHash('sha256').update(b).digest('hex');
 const ORIGIN='https://rian-commander-tenant-staging.example.test';
 function fixture(t){
  const dir=mkdtempSync(join(tmpdir(),'rian-ljhttp-'));
- const tkn=Object.fromEntries(['oa','ob','aa','ab'].map(x=>[x,randomBytes(40).toString('base64url')]));
+ const tkn=Object.fromEntries(['oa','oa2','ob','aa','ab'].map(x=>[x,randomBytes(40).toString('base64url')]));
  const directory=new TenantDirectory({devices:[{id:'pcA',tenantId:'A'},{id:'pcB',tenantId:'B'}],
-  principals:[['oa','A','owner'],['ob','B','owner'],['aa','A','agent','pcA'],['ab','B','agent','pcB']]
+  principals:[['oa','A','owner'],['oa2','A','owner'],['ob','B','owner'],['aa','A','agent','pcA'],['ab','B','agent','pcB']]
    .map(([id,tenantId,kind,deviceId])=>({id,tenantId,kind,...(deviceId?{deviceId}:{}),tokenSha256:sha(tkn[id])}))});
  const store=new StagingSqlite({filename:join(dir,'s.db'),encryptionKeyHex:randomBytes(32).toString('hex')});
  const queue=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true})});
@@ -28,8 +28,8 @@ function fixture(t){
   const r=await handler(new Request(ORIGIN+'/v2/mcp',{method:'POST',headers:{authorization:'Bearer '+tkn[who],'content-type':'application/json',...extra},body:JSON.stringify({jsonrpc:'2.0',id:7,method,params})}));
   return {status:r.status,body:r.status===202?null:await r.json()};
  };
- const tool=async(who,name,args)=>{
-  const {body}=await rpc(who,'tools/call',{name,arguments:args});
+ const tool=async(who,name,args,headers={})=>{
+  const {body}=await rpc(who,'tools/call',{name,arguments:args},headers);
   const textOut=body.result.content[0].text;
   return body.result.isError?{error:textOut}:JSON.parse(textOut);
  };
@@ -161,4 +161,128 @@ test('spoofed X-Forwarded-For cannot bypass the per-job password attempt limit',
  const post=(ip,password)=>f.handler(new Request(ORIGIN+'/v2/approve/'+s.job_id,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:ORIGIN,'x-forwarded-for':ip},body:new URLSearchParams({ticket,password}).toString()}));
  for(let i=0;i<10;i++)await post('10.0.0.'+i,'wrong-password-but-long-enough');
  assert.equal((await post('10.9.9.9',f.pwA)).status,429);
+});
+
+
+test('mail-review: one browser approval permits multiple different searches and selected recent bodies',async t=>{
+ const f=fixture(t),oauthA={'x-rian-client-ref':'a'.repeat(32)},oauthOther={'x-rian-client-ref':'b'.repeat(32)};
+ const sync=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:108}},oauthA);
+ assert.equal(sync.state,'AWAITING_APPROVAL');
+ const form=await f.approvePage(sync.job_id);
+ assert.match(form.html,/업무메일 연속 검토/);
+ assert.match(form.html,/최근 지정 기간의 메일/);
+ const approved=await f.submit(sync.job_id,{ticket:form.ticket,password:f.pwA,review:'1',
+   review_minutes:'60',review_jobs:'8',review_body:'1',review_reads:'2'});
+ assert.equal(approved.status,200);
+ assert.match(approved.html,/연속 검토 세션을 승인/);
+ const active=await f.tool('oa','rian_v2_list_grants',{});
+ assert.equal(active.grants.length,1);
+ const review=active.grants[0];
+ assert.equal(review.kind,'mail.review.readonly');
+ assert.equal(review.runs_left,8);assert.equal(review.body_reads_left,2);
+ // Local agent consumes the approved initial read-only sync job.
+ const sc=(await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA'})).body.job;
+ assert.equal(sc.jobId,sync.job_id);
+ await f.agentCall('aa','/v2/agent/jobs/'+sc.jobId+'/complete',{leaseToken:sc.leaseToken,
+   outcome:'SUCCEEDED',exitCode:0,output:JSON.stringify({ok:true,added:108})});
+ const recent='c'.repeat(40),old='d'.repeat(40);
+ const search=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.search',params:{query:'장애',limit:20}},oauthA);
+ assert.equal(search.state,'QUEUED');assert.equal(search.approval_required,false);
+ assert.equal(search.via_mail_review_session,true);
+ const work=(await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA'})).body.job;
+ assert.equal(work.jobId,search.job_id);
+ await f.agentCall('aa','/v2/agent/jobs/'+work.jobId+'/complete',{leaseToken:work.leaseToken,outcome:'SUCCEEDED',exitCode:0,
+   output:JSON.stringify({ok:true,results:[
+     {message_id:recent,date:new Date().toISOString(),subject:'장애',from:'example.invalid'},
+     {message_id:old,date:'2020-01-01T00:00:00Z',subject:'옛 장애',from:'example.invalid'}
+   ],bodies_included:false})});
+ const read=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:recent}},oauthA);
+ assert.equal(read.state,'QUEUED');assert.equal(read.approval_required,false);
+ assert.equal(read.via_mail_review_session,true);
+ // A different OAuth client, older message, and unused address cannot inherit the grant.
+ const otherClient=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:old}},oauthOther);
+ assert.equal(otherClient.state,'AWAITING_APPROVAL');
+ const ancient=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:old}},oauthA);
+ assert.match(ancient.error,/ACTIVE_JOB_CONFLICT/,'a different OAuth client cannot deduplicate another pending request');
+ assert.equal((await f.tool('ob','rian_v2_list_grants',{})).grants.length,0);
+ const second=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.search',params:{query:'정기점검',limit:8}},oauthA);
+ assert.equal(second.state,'QUEUED','changed query reuses the same single owner approval');
+ const remaining=(await f.tool('oa','rian_v2_list_grants',{})).grants[0];
+ assert.equal(remaining.runs_left,5);
+ assert.equal(remaining.body_reads_left,1);
+ // Revoking a review session stops all its queued jobs before claim.
+ const revoked=await f.tool('oa','rian_v2_revoke_grant',{grant_id:review.grant_id});
+ assert.equal(revoked.state,'REVOKED');
+ assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:second.job_id})).state,'CANCELLED');
+ assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:read.job_id})).state,'CANCELLED');
+ assert.equal((await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.search',params:{query:'새 요청',limit:2}},oauthA)).state,'AWAITING_APPROVAL');
+ assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.length,0);
+});
+
+test('mail-review: original approval remains one-time without OAuth ref; review input is bounded',async t=>{
+ const f=fixture(t);
+ const one=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:100}});
+ const page=await f.approvePage(one.job_id);
+ assert.doesNotMatch(page.html,/업무메일 연속 검토/);
+ assert.equal((await f.submit(one.job_id,{ticket:page.ticket,password:f.pwA,
+   review:'1',review_minutes:'30',review_jobs:'10'})).status,400,'cannot grant to unbound caller');
+ const withRef=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:100}},{
+  'x-rian-client-ref':'b'.repeat(32)
+ });
+ // This is a duplicate active sync; it must not gain client ref by replay.
+ assert.match(withRef.error,/ACTIVE_JOB_CONFLICT/,'a new OAuth client cannot inherit the existing unaffiliated sync job');
+ const bad=await f.approvePage(one.job_id);
+ assert.equal((await f.submit(one.job_id,{ticket:bad.ticket,password:f.pwA,
+   standing:'1',review:'1'})).status,400);
+});
+
+test('mail-review scope policy: only bounded recent search hits authorize a body',async()=>{
+ const {planMailReview,recentMessageHashes,reviewMessageHash,reviewAllows}=await import('./mail-review-scope.mjs');
+ assert.throws(()=>planMailReview({initialKind:'mail.read',initialParams:{},clientRef:'a'.repeat(32)}),/INITIAL_SYNC/);
+ assert.throws(()=>planMailReview({initialKind:'mail.sync',initialParams:{days:14,maxMessages:100},clientRef:'a'.repeat(32),minutes:61}),/SCOPE_INVALID/);
+ const s=planMailReview({initialKind:'mail.sync',initialParams:{days:7,maxMessages:100},clientRef:'a'.repeat(32),bodyReads:2});
+ assert.equal(s.bodyReads,2);
+ const now=1762000000,fresh=new Date(now*1000).toISOString();
+ const ids=recentMessageHashes({ok:true,results:[{message_id:'e'.repeat(40),date:fresh},
+   {message_id:'f'.repeat(40),date:'2020-01-01T00:00:00Z'},
+   {message_id:'g'.repeat(40),date:fresh}]},{nowSeconds:now,maxDays:7});
+ assert.deepEqual(ids,[reviewMessageHash('e'.repeat(40))]);
+ assert.equal(reviewAllows({state:'ACTIVE',runs_left:1,reads_left:2,max_days:7,max_messages:100},'mail.read',{messageId:'e'.repeat(40)},true),true);
+ assert.equal(reviewAllows({state:'ACTIVE',runs_left:1,reads_left:2,max_days:7,max_messages:100},'mail.read',{messageId:'e'.repeat(40)},false),false);
+});
+
+
+test('mail-review: a different owner within the SAME tenant cannot list, view, cancel or deduplicate another owner job',async t=>{
+ const f=fixture(t);
+ const sync=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:100}},{
+  'x-rian-client-ref':'a'.repeat(32)
+ });
+ assert.equal(sync.state,'AWAITING_APPROVAL');
+ assert.equal((await f.tool('oa2','rian_v2_job_status',{job_id:sync.job_id})).error,'NOT_FOUND');
+ assert.equal((await f.tool('oa2','rian_v2_cancel_job',{job_id:sync.job_id})).error,'NOT_FOUND');
+ assert.deepEqual((await f.tool('oa2','rian_v2_list_jobs',{})).jobs,[]);
+ const cl=await f.tool('oa2','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:100}},{
+  'x-rian-client-ref':'a'.repeat(32)
+ });
+ assert.equal(cl.error,'ACTIVE_JOB_CONFLICT','no foreign owner job id is returned');
+ assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:sync.job_id})).state,'AWAITING_APPROVAL');
+ const otherOAuth=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:14,maxMessages:100}},{
+  'x-rian-client-ref':'b'.repeat(32)
+ });
+ assert.match(otherOAuth.error,/ACTIVE_JOB_CONFLICT/,'a different OAuth client cannot inherit the active request');
+});
+
+test('mail-review: default metadata-only approval cannot read any message body without a separate per-message approval',async t=>{
+ const f=fixture(t),ref={'x-rian-client-ref':'a'.repeat(32)};
+ const sync=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.sync',params:{days:7,maxMessages:50}},ref);
+ const page=await f.approvePage(sync.job_id);
+ const approval=await f.submit(sync.job_id,{ticket:page.ticket,password:f.pwA,review:'1',
+   review_minutes:'10',review_jobs:'4'});
+ assert.equal(approval.status,200);
+ const grant=(await f.tool('oa','rian_v2_list_grants',{})).grants[0];
+ assert.equal(grant.body_reads_left,0);
+ const searched=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.search',params:{query:'회의',limit:5}},ref);
+ assert.equal(searched.state,'QUEUED');
+ const read=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:'a'.repeat(40)}},ref);
+ assert.equal(read.state,'AWAITING_APPROVAL','no body permission in the original approval');
 });
