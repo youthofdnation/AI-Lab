@@ -101,7 +101,7 @@ export class LongJobQueue {
   #ownedRow(actor,jobId){
     this.#directory.assertOwner(actor);
     if(typeof jobId!=='string'||!UUID.test(jobId))throw Error('JOB_NOT_FOUND');
-    const j=this.#db().prepare('SELECT * FROM long_jobs WHERE id=? AND tenant=?').get(jobId,actor.tenantId);
+    const j=this.#db().prepare('SELECT * FROM long_jobs WHERE id=? AND tenant=? AND owner=?').get(jobId,actor.tenantId,actor.id);
     if(!j)throw Error('JOB_NOT_FOUND');
     return j;
   }
@@ -313,7 +313,7 @@ export class LongJobQueue {
     this.#directory.assertOwner(actor);
     if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('INVALID_LIMIT');
     this.reap();
-    return this.#db().prepare('SELECT * FROM long_jobs WHERE tenant=? ORDER BY created DESC,rowid DESC LIMIT ?').all(actor.tenantId,limit).map(j=>this.#summary(j,{withResult:false}));
+    return this.#db().prepare('SELECT * FROM long_jobs WHERE tenant=? AND owner=? ORDER BY created DESC,rowid DESC LIMIT ?').all(actor.tenantId,actor.id,limit).map(j=>this.#summary(j,{withResult:false}));
   }
   listGrants(actor){
     this.#directory.assertOwner(actor);
