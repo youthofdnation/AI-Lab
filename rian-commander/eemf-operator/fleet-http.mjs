@@ -48,7 +48,8 @@ export function fleetStatus(queue, actor, now) {
   const p = queue.fleet.summary();
   return {denylist_entries: p.denylistEntries, devices: p.devices.map((d) => {
     const i = inv.get(d.id), s = i && i.snapshot;
-    const workerJob = ['salpion.worker.status','salpion.worker.start','salpion.worker.stop']
+    // A stop that finishes in the same clock second as a status read wins conservatively.
+    const workerJob = ['salpion.worker.stop','salpion.worker.status','salpion.worker.start']
       .map(kind=>queue.latestSucceeded({actor, deviceId:d.id, kind})).filter(Boolean)
       .sort((a,b)=>b.finished-a.finished)[0];
     return {...d, online: online.get(d.id)?.online === true, last_seen: online.get(d.id)?.last_seen || null,
