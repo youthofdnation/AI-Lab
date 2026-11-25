@@ -46,11 +46,19 @@ test('policy fails closed: a denylist is mandatory and a denied host can never b
  const priv=structuredClone(POLICY);priv.devices[1].dataClasses.push('private');
  assert.throws(()=>new FleetPolicy(priv),/PRIVATE_NOT_APPROVED/,'private data needs an explicit approval flag');
  const p=policy();
- for(const n of ['DENIED-PC','denied-pc','Denied-PC.local'])assert.equal(p.isDenied(n),true,n);
+ for(const n of ['DENIED-PC','denied-pc','Denied-PC.local','denied-pc.local.local','DENIED-PC.'])assert.equal(p.isDenied(n),true,n);
  assert.throws(()=>p.device('DENIED-PC'),/DEVICE_DENIED/);
  assert.deepEqual(p.deviceKinds().get('quar'),['fleet.inventory'],'a quarantined PC can only be inspected');
  assert.throws(()=>p.assertDispatchable('gpu1','fleet.cpu_bench',{dataClass:'private'}),/DATA_CLASS_NOT_ALLOWED/);
  assert.equal(p.assertDispatchable('hub','fleet.cpu_bench',{dataClass:'private'}).id,'hub');
+});
+
+test('quarantine config cannot authorize non-inventory jobs',()=>{
+ for(const kind of ['fleet.cpu_bench','fleet.gpu_probe','dev.test_shard','youngmin.qlora_probe','mail.sync','diag.wait']){
+  const cfg=structuredClone(POLICY);cfg.quarantineKinds.push(kind);
+  assert.throws(()=>new FleetPolicy(cfg),/QUARANTINE_INVENTORY_ONLY/,kind);
+ }
+ assert.deepEqual(policy().deviceKinds().get('quar'),['fleet.inventory']);
 });
 
 test('denied and quarantined PCs get no work at request time and cannot claim',t=>{

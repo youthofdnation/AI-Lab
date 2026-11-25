@@ -10,7 +10,12 @@ reads file contents, credentials or process command lines, kills a process, or c
                          that the GPU memory came back (gpu_release)
   youngmin.qlora_probe   checks the QLoRA stack first; measures only when this PC's own config sets
                          fleet.qlora_measure=true (random weights + synthetic tokens, no data files)
+
+memory_state() is what inventory reports and what the agent checks before it starts fleet work: a PC
+that is short of memory (or already under OS memory pressure) is not given heavy work, and fleet work
+runs below normal priority so the PC's own services (a production model server, other projects) win.
 """
+import ctypes
 import hashlib
 import json
 import os
@@ -45,9 +50,9 @@ class FleetCancelled(Exception):
 
 def _run(argv, timeout=20):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return None
     return p.stdout if p.returncode == 0 else None
 
@@ -55,7 +60,7 @@ def _run(argv, timeout=20):
 def _ps(script, timeout=30):
     """A fixed PowerShell snippet (never built from server input); returns parsed JSON or None."""
     out = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                "$ErrorActionPreference='SilentlyContinue';" + script + " | ConvertTo-Json -Compress -Depth 4"], timeout)
+                "$ErrorActionPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;& {" + script + "} | ConvertTo-Json -Compress -Depth 4"], timeout)
     try:
         return json.loads(out) if out and out.strip() else None
     except ValueError:
@@ -74,7 +79,7 @@ def nvidia_gpus():
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
-    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,driver_version",
+    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version",
                 "--format=csv,noheader,nounits"])
     if out is None:
         return None
@@ -84,10 +89,10 @@ def nvidia_gpus():
     gpus = []
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) < 7:
+        if len(f) < 8 or not f[0].isdigit():
             continue
         gpus.append({"index": int(f[0]), "name": f[1], "vram_total_mib": _num(f[2]), "vram_used_mib": _num(f[3]),
-                     "util_pct": _num(f[4]), "temp_c": _num(f[5]), "driver": f[6], "cuda_driver_api": cuda.group(1) if cuda else None,
+                     "vram_free_mib": _num(f[4]), "util_pct": _num(f[5]), "temp_c": _num(f[6]), "driver": f[7], "cuda_driver_api": cuda.group(1) if cuda else None,
                      "compute_processes": []})
     pids = []
     for line in apps.strip().splitlines():
@@ -176,29 +181,18 @@ def inventory(progress):
         p = p[0] if isinstance(p, list) else p
         if p:
             cpu.update(model=p.get("Name"), physical=p.get("NumberOfCores"), load_pct=_num(p.get("LoadPercentage")))
-        m = _ps("Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory")
-        ram = {"total_mib": round(_num(m["TotalVisibleMemorySize"]) / 1024), "available_mib": round(_num(m["FreePhysicalMemory"]) / 1024)} if m else {}
     elif not MAC:  # Linux (CI runners, future nodes)
         info = Path("/proc/cpuinfo").read_text("utf-8", "replace") if Path("/proc/cpuinfo").exists() else ""
         model = re.search(r"^model name\s*:\s*(.+)$", info, re.M)
         cpu.update(model=model.group(1).strip() if model else None,
                    load_pct=round(min(100.0, 100.0 * os.getloadavg()[0] / max(1, os.cpu_count() or 1)), 1))
-        mem = Path("/proc/meminfo").read_text("utf-8", "replace") if Path("/proc/meminfo").exists() else ""
-        kib = {k: int(v) for k, v in re.findall(r"^(\w+):\s+(\d+) kB", mem, re.M)}
-        ram = {"total_mib": round(kib.get("MemTotal", 0) / 1024), "available_mib": round(kib.get("MemAvailable", 0) / 1024)}
     else:
         cpu.update(model=(_run(["sysctl", "-n", "machdep.cpu.brand_string"]) or "").strip(),
                    physical=int((_run(["sysctl", "-n", "hw.physicalcpu"]) or "0").strip() or 0))
         top = _run(["top", "-l", "1", "-n", "0"]) or ""
         idle = re.search(r"([\d.]+)% idle", top)
         cpu["load_pct"] = round(100 - float(idle.group(1)), 1) if idle else None
-        total = int((_run(["sysctl", "-n", "hw.memsize"]) or "0").strip() or 0)
-        vm = _run(["vm_stat"]) or ""
-        page = int((re.search(r"page size of (\d+)", vm) or [0, 16384])[1])
-        free_pages = sum(int(x) for k in ("Pages free", "Pages inactive", "Pages speculative")
-                         for x in re.findall(k + r":\s+(\d+)", vm))
-        ram = {"total_mib": round(total / 2**20), "available_mib": round(free_pages * page / 2**20)}
-    snap["cpu"], snap["ram"] = cpu, ram
+    snap["cpu"], snap["ram"] = cpu, memory_state()
     progress(stage="gpu", percent=35)
     g = nvidia_gpus()
     if g:
@@ -224,6 +218,104 @@ def inventory(progress):
         n = _ps("Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name,LinkSpeed")
         snap["network"] = [{"name": x.get("Name"), "link": x.get("LinkSpeed")} for x in (n if isinstance(n, list) else [n] if n else [])]
     return {"ok": True, "snapshot": snap}
+
+
+# ------------------------------------------------------------------ memory
+def classify_pressure(total_mib, available_mib, commit_pct=None, os_level=None, psi_some_avg10=None):
+    """Pure rule, the same on every OS: 'high' when any signal says the PC is short of memory."""
+    reasons = []
+    if available_mib is not None and total_mib and available_mib < max(1024, 0.05 * total_mib):
+        reasons.append("LOW_AVAILABLE")
+    if commit_pct is not None and commit_pct >= 90:
+        reasons.append("COMMIT_HIGH")            # Windows: committed memory near the page-file limit
+    if os_level is not None and os_level >= 2:
+        reasons.append("OS_PRESSURE")            # macOS kern.memorystatus_vm_pressure_level: 2 warn, 4 critical
+    if psi_some_avg10 is not None and psi_some_avg10 >= 10:
+        reasons.append("PSI_STALLS")             # Linux: tasks stalled on memory >= 10% of the last 10 s
+    return ("high" if reasons else "normal"), reasons
+
+
+def memory_state():
+    """{total_mib, available_mib, commit_pct?, swap_used_mib?, os_level?, psi_some_avg10?, pressure, pressure_reasons}"""
+    out = {"total_mib": None, "available_mib": None}
+    try:
+        if WIN:
+            class MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MemStatus()
+            m.dwLength = ctypes.sizeof(MemStatus)
+            if ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(m)):
+                out.update(total_mib=round(m.ullTotalPhys / 2**20), available_mib=round(m.ullAvailPhys / 2**20))
+                if m.ullTotalPageFile:
+                    out["commit_pct"] = round(100.0 * (1 - m.ullAvailPageFile / m.ullTotalPageFile), 1)
+        elif MAC:
+            total = int((_run(["sysctl", "-n", "hw.memsize"]) or "0").strip() or 0)
+            vm = _run(["vm_stat"]) or ""
+            page = int((re.search(r"page size of (\d+)", vm) or [0, 16384])[1])
+            free_pages = sum(int(x) for k in ("Pages free", "Pages inactive", "Pages speculative")
+                             for x in re.findall(k + r":\s+(\d+)", vm))
+            out.update(total_mib=round(total / 2**20), available_mib=round(free_pages * page / 2**20))
+            level = (_run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]) or "").strip()
+            if level.isdigit():
+                out["os_level"] = int(level)
+            swap = re.search(r"used = ([\d.]+)M", _run(["sysctl", "-n", "vm.swapusage"]) or "")
+            if swap:
+                out["swap_used_mib"] = round(float(swap.group(1)))
+        else:
+            mem = Path("/proc/meminfo").read_text("utf-8", "replace") if Path("/proc/meminfo").exists() else ""
+            kib = {k: int(v) for k, v in re.findall(r"^(\w+):\s+(\d+) kB", mem, re.M)}
+            out.update(total_mib=round(kib.get("MemTotal", 0) / 1024), available_mib=round(kib.get("MemAvailable", 0) / 1024))
+            if "SwapTotal" in kib:
+                out["swap_used_mib"] = round((kib["SwapTotal"] - kib.get("SwapFree", 0)) / 1024)
+            psi = Path("/proc/pressure/memory")
+            hit = re.search(r"^some avg10=([\d.]+)", psi.read_text("utf-8", "replace"), re.M) if psi.exists() else None
+            if hit:
+                out["psi_some_avg10"] = float(hit.group(1))
+    except (OSError, ValueError, AttributeError):
+        pass
+    out["pressure"], out["pressure_reasons"] = classify_pressure(out["total_mib"], out["available_mib"], out.get("commit_pct"),
+                                                                 out.get("os_level"), out.get("psi_some_avg10"))
+    if not out["available_mib"]:
+        out["pressure"], out["pressure_reasons"] = "unknown", ["NOT_MEASURED"]
+    return out
+
+
+def memory_hold(kind, min_available_mib, state=None):
+    """None when fleet work of this kind may start now, else the refusal (with the measurement).
+
+    Inventory always runs (it is how the owner sees the PC). Below `min_available_mib`, or while the PC
+    reports memory pressure, nothing else starts. An unmeasurable PC is treated as short of memory."""
+    if kind == "fleet.inventory":
+        return None
+    st = state if state is not None else memory_state()
+    seen = {k: st.get(k) for k in ("available_mib", "total_mib", "pressure", "pressure_reasons")}
+    if not st.get("available_mib"):
+        return {"ok": False, "error": "LOCAL_MEMORY_UNKNOWN", "memory": seen}
+    if st["available_mib"] < min_available_mib:
+        return {"ok": False, "error": "LOCAL_MEMORY_HOLD", "memory": dict(seen, min_available_mib=min_available_mib)}
+    if st.get("pressure") == "high":
+        return {"ok": False, "error": "LOCAL_MEMORY_PRESSURE", "memory": seen}
+    return None
+
+
+def lower_priority():
+    """Run this process (and the children it starts) below normal priority. Returns True on success."""
+    try:
+        if WIN:
+            k = ctypes.WinDLL("kernel32")
+            k.GetCurrentProcess.restype = ctypes.c_void_p
+            k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            return bool(k.SetPriorityClass(k.GetCurrentProcess(), 0x00004000))   # BELOW_NORMAL_PRIORITY_CLASS
+        # setpriority/getpriority, not os.nice(): nice()'s return value differed on a CI macOS runner.
+        if os.getpriority(os.PRIO_PROCESS, 0) < 10:
+            os.setpriority(os.PRIO_PROCESS, 0, 10)
+        return os.getpriority(os.PRIO_PROCESS, 0) >= 10
+    except (OSError, AttributeError):
+        return False
 
 
 # ------------------------------------------------------------------ CPU bench
@@ -350,3 +442,143 @@ def qlora_probe(params, cfg_fleet, progress, cancelled):
     except (subprocess.TimeoutExpired, ValueError):
         measured = {"error": "MEASURE_TIMEOUT_OR_BAD_OUTPUT"}
     return {"ok": "error" not in measured, "measurement": measured, **base, "gpu_release": _measure_release(before, before_pids)}
+
+
+# ------------------------------------------------------------------ store integrity (real research ops)
+# Ollama names blobs "sha256-<hex>"; the Hugging Face hub names LFS blobs by the bare sha256 hex.
+BLOB = re.compile(r"^(?:sha256[-:])?([0-9a-f]{64})$")
+
+
+def _store_files(spec):
+    """A store is one path or a list; a path may hold blobs itself or HF-style */blobs folders."""
+    out = []
+    for root in ([spec] if isinstance(spec, str) else list(spec)):
+        base = Path(root)
+        if not base.is_dir():
+            raise FleetError("STORE_MISSING")
+        dirs = [base] + sorted(p for p in base.glob("*/blobs") if p.is_dir())
+        out += [p for d in dirs for p in d.iterdir() if p.is_file() and not p.is_symlink() and BLOB.match(p.name)]
+    return sorted(set(out), key=lambda p: (p.name, str(p)))
+
+
+def blob_verify(store, shard, shards, cfg_fleet, progress, cancelled):
+    """Hash every content-addressed file (name = its sha256) in this PC's own store; report only counts."""
+    stores = cfg_fleet.get("blob_stores") or {}
+    spec = stores.get(store)
+    if not spec:
+        raise FleetError("STORE_NOT_CONFIGURED_ON_THIS_PC")
+    files = _store_files(spec)
+    mine = [p for i, p in enumerate(files) if i % shards == shard]
+    total = sum(p.stat().st_size for p in mine)
+    done_bytes, bad, start = 0, [], time.perf_counter()
+    for i, p in enumerate(mine):
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for block in iter(lambda: f.read(8 << 20), b""):
+                if cancelled():
+                    raise FleetCancelled()
+                h.update(block)
+                done_bytes += len(block)
+        if h.hexdigest() != BLOB.match(p.name).group(1):
+            bad.append(p.name[:20])
+        progress(stage="hashing", percent=int(100 * done_bytes / max(1, total)), done=i + 1, total=len(mine))
+    secs = time.perf_counter() - start
+    return {"ok": not bad, **({"error": "HASH_MISMATCH"} if bad else {}), "store": store, "shard": shard, "shards": shards,
+            "files": len(mine), "files_in_store": len(files), "bytes": total, "seconds": round(secs, 2),
+            "mb_per_s": round(total / 2**20 / max(secs, 1e-6), 1), "mismatched": bad, "host": socket.gethostname()}
+
+
+
+# ------------------------------------------------------------------ distributed code tests
+def _git(repo, *args):
+    out = _run(["git", "-C", str(repo), *args], timeout=30)
+    return None if out is None else out.strip()
+
+
+def test_shard(suite, commit, shard, shards, cfg_fleet, progress, cancelled):
+    """Run one shard of a test suite this PC's config defines, only on a clean checkout at `commit`."""
+    spec = (cfg_fleet.get("test_suites") or {}).get(suite)
+    if not spec:
+        raise FleetError("SUITE_NOT_CONFIGURED_ON_THIS_PC")
+    repo, cwd = Path(spec["repo"]), Path(spec["repo"]) / spec.get("cwd", ".")
+    head = _git(repo, "rev-parse", "HEAD")
+    if head != commit:
+        return {"ok": False, "error": "CHECKOUT_NOT_AT_COMMIT", "head": (head or "")[:12]}
+    if _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        return {"ok": False, "error": "CHECKOUT_HAS_LOCAL_CHANGES"}
+    files = sorted(str(p.relative_to(cwd)).replace("\\", "/") for p in cwd.glob(spec["glob"]) if p.is_file())
+    files = [f for f in files if f not in set(spec.get("exclude") or [])]
+    mine = [f for i, f in enumerate(files) if i % shards == shard]
+    if not mine:
+        return {"ok": True, "files": 0, "seconds": 0.0, "exit": 0, "suite": suite, "shard": shard, "shards": shards}
+    argv = [str(x) for x in spec["command"]]
+    exe = shutil.which(argv[0]) or argv[0]
+    progress(stage="testing", percent=5, done=0, total=len(mine))
+    start = time.perf_counter()
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    results = []
+    if spec.get("per_file"):
+        for i, f in enumerate(mine):
+            if cancelled():
+                raise FleetCancelled()
+            p = subprocess.run([exe, *argv[1:], f], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=int(spec.get("timeout", 900)), env=env)
+            results.append((f, p.returncode, (p.stdout + p.stderr)[-600:]))
+            progress(stage="testing", percent=int(100 * (i + 1) / len(mine)), done=i + 1, total=len(mine))
+    else:
+        p = subprocess.run([exe, *argv[1:], *mine], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=int(spec.get("timeout", 900)), env=env)
+        results.append(("*", p.returncode, (p.stdout + p.stderr)[-2000:]))
+    failed = [f for f, rc, _ in results if rc != 0]
+    tail = chr(10).join(t for _, rc, t in results if rc != 0)[-2000:]
+    return {"ok": not failed, **({"error": "TESTS_FAILED"} if failed else {}), "suite": suite, "shard": shard, "shards": shards,
+            "files": len(mine), "failed_files": failed[:20], "seconds": round(time.perf_counter() - start, 2),
+            "failure_tail": tail, "host": socket.gethostname(), "commit": commit[:12]}
+
+# ------------------------------------------------------------------ owner-run read-only CLI
+SECURITY_PS = r"""
+$o = [ordered]@{}
+$o.tasks = @(Get-ScheduledTask | Where-Object { $_.TaskName -like 'GoogleUpdate*' -or $_.TaskPath -like '*Google*' } | ForEach-Object {
+  $a = $_.Actions | Select-Object -First 1
+  $exe = if ($a.Execute) { [Environment]::ExpandEnvironmentVariables($a.Execute.Trim('"')) } else { $null }
+  $sig = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AuthenticodeSignature -LiteralPath $exe } else { $null }
+  $info = Get-ScheduledTaskInfo -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue
+  [ordered]@{ name = $_.TaskName; path = $_.TaskPath; state = [string]$_.State; principal = $_.Principal.UserId; run_level = [string]$_.Principal.RunLevel
+    exe = $exe; exe_exists = [bool]($exe -and (Test-Path -LiteralPath $exe)); signature = if ($sig) { [string]$sig.Status } else { $null }
+    signer = if ($sig -and $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
+    sha256 = if ($exe -and (Test-Path -LiteralPath $exe)) { (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash } else { $null }
+    arguments_present = [bool]$a.Arguments; last_run = if ($info) { [string]$info.LastRunTime } else { $null }; last_result = if ($info) { $info.LastTaskResult } else { $null } } })
+$o.gpu_engine_top = @(Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction SilentlyContinue | ForEach-Object { $_.CounterSamples } |
+  Where-Object { $_.CookedValue -gt 1 } | Sort-Object CookedValue -Descending | Select-Object -First 10 |
+  ForEach-Object { $pid_ = if ($_.InstanceName -match 'pid_(\d+)') { [int]$Matches[1] } else { $null }
+    [ordered]@{ pid = $pid_; process = if ($pid_) { (Get-Process -Id $pid_ -ErrorAction SilentlyContinue).ProcessName } else { $null }; util_pct = [math]::Round($_.CookedValue, 1) } })
+$o.defender = try { $m = Get-MpComputerStatus -ErrorAction Stop; [ordered]@{ realtime = $m.RealTimeProtectionEnabled; antivirus = $m.AntivirusEnabled; signature_age_days = $m.AntivirusSignatureAge; last_quick_scan = [string]$m.QuickScanEndTime } } catch { 'UNREADABLE' }
+$o.listening = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ port = $_.LocalPort; address = $_.LocalAddress; process = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName } } | Sort-Object port -Unique)
+$o
+"""
+
+
+def security_inventory():
+    if not WIN:
+        return {"ok": False, "error": "WINDOWS_ONLY"}
+    data = _ps(SECURITY_PS, timeout=120)
+    return {"ok": data is not None, "host": socket.gethostname(), "security": data,
+            "note": "read-only: names, paths, signatures and hashes only; nothing stopped or changed"}
+
+
+def _cli(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description="RIAN fleet read-only inventory (owner-run; no network, nothing changed)")
+    ap.add_argument("what", choices=["inventory", "security"])
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    res = inventory(lambda **k: None) if a.what == "inventory" else security_inventory()
+    res["collected_at"] = int(time.time())
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text(json.dumps(res, ensure_ascii=False, indent=1), "utf-8")
+    print(json.dumps({"written": a.out, "ok": res.get("ok")}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

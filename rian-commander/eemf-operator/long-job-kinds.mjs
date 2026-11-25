@@ -82,27 +82,53 @@ const intIn=(v,lo,hi)=>{if(!Number.isInteger(v)||v<lo||v>hi)throw Error('INVALID
 const FLEET_KINDS={
   'fleet.inventory':{
     label:'장비 자원 읽기 (CPU·RAM·GPU·디스크·암호화·실행환경·AI 프로세스 이름, 읽기 전용)',
-    lockGroup:'fleet-inventory',maxRuntimeSeconds:180,leaseSeconds:60,grantable:true,gpu:false,dataClass:'synthetic',
+    lockGroup:'fleet-inventory',maxRuntimeSeconds:180,leaseSeconds:60,grantable:true,ramMiB:128,gpu:false,dataClass:'synthetic',
     validate(p){exactKeys(p,[]);return {};},
     describe:()=>['CPU·RAM·GPU·디스크 사용량, 디스크 암호화 상태, OS·CUDA·PyTorch 버전, AI 서버 프로세스 이름만 읽음',
       '프로세스 명령줄·파일 내용·인증정보는 읽지 않음, 아무것도 바꾸거나 종료하지 않음']
   },
   'fleet.cpu_bench':{
     label:'합성 CPU 작업 1조각 (SHA-256 연쇄 계산, 파일·네트워크 접근 없음)',
-    lockGroup:null,maxRuntimeSeconds:900,leaseSeconds:45,grantable:true,gpu:false,dataClass:'synthetic',
+    lockGroup:null,maxRuntimeSeconds:900,leaseSeconds:45,grantable:true,ramMiB:64,gpu:false,dataClass:'synthetic',workUnits:p=>p.units,
     validate(p){exactKeys(p,['chunk','units']);return {chunk:intIn(p.chunk,0,9999),units:intIn(p.units,1,200)};},
     describe:p=>['조각 '+p.chunk+': SHA-256 연쇄 '+p.units+'단위 계산 후 결과 해시와 걸린 시간만 보고','파일·네트워크·GPU 접근 없음']
   },
+  'fleet.blob_verify':{
+    label:'모델·백업 저장소 무결성 검사 (파일 이름=SHA-256인 저장소를 PC 안에서 해시 대조, 내용 반출 없음)',
+    lockGroup:null,maxRuntimeSeconds:3600,leaseSeconds:60,grantable:true,ramMiB:256,gpu:false,dataClass:'public',
+    validate(p){
+      exactKeys(p,['store','shard','shards']);
+      if(typeof p.store!=='string'||!/^[a-z][a-z0-9-]{1,31}$/.test(p.store))throw Error('INVALID_PARAMS');
+      const shards=intIn(p.shards,1,64),shard=intIn(p.shard,0,63);if(shard>=shards)throw Error('INVALID_PARAMS');
+      return {store:p.store,shard,shards};
+    },
+    describe:p=>['이 PC 설정에 등록된 저장소 "'+p.store+'"의 '+(p.shard+1)+'/'+p.shards+' 조각만 읽어 SHA-256을 파일 이름과 대조',
+      '저장소 위치는 PC가 자기 설정에서 정함(서버는 이름만 보냄), 결과는 개수·바이트·불일치 파일 이름뿐','아무것도 쓰거나 옮기지 않음']
+  },
+  'dev.test_shard':{
+    label:'코드 테스트 1조각 실행 (PC 설정의 고정 명령, 지정 커밋의 깨끗한 체크아웃에서만)',
+    lockGroup:null,maxRuntimeSeconds:1800,leaseSeconds:60,grantable:true,ramMiB:2048,gpu:false,dataClass:'public',
+    validate(p){
+      exactKeys(p,['suite','commit','shard','shards']);
+      if(typeof p.suite!=='string'||!/^[a-z][a-z0-9-]{1,31}$/.test(p.suite))throw Error('INVALID_PARAMS');
+      if(typeof p.commit!=='string'||!/^[0-9a-f]{40}$/.test(p.commit))throw Error('INVALID_PARAMS');
+      const shards=intIn(p.shards,1,64),shard=intIn(p.shard,0,63);if(shard>=shards)throw Error('INVALID_PARAMS');
+      return {suite:p.suite,commit:p.commit,shard,shards};
+    },
+    describe:p=>['테스트 묶음 "'+p.suite+'"의 '+(p.shard+1)+'/'+p.shards+' 조각을 커밋 '+p.commit.slice(0,12)+'에서 실행',
+      '명령과 체크아웃 위치는 PC 자기 설정이 정함, 체크아웃이 그 커밋이 아니거나 변경된 파일이 있으면 실행하지 않음',
+      '결과는 통과/실패와 마지막 출력 일부(2KB)만']
+  },
   'fleet.gpu_probe':{
     label:'GPU 할당·반환 확인 (합성 텐서 할당 후 하위 프로세스 종료, 메모리 반환 측정)',
-    lockGroup:'gpu',maxRuntimeSeconds:300,leaseSeconds:45,grantable:true,gpu:true,dataClass:'synthetic',
+    lockGroup:'gpu',maxRuntimeSeconds:300,leaseSeconds:45,grantable:true,ramMiB:512,gpu:true,dataClass:'synthetic',
     validate(p){exactKeys(p,['mib']);return {mib:intIn(p.mib,16,2048)};},
     describe:p=>[p.mib+' MiB 합성 텐서를 하위 프로세스에서 할당·해제','하위 프로세스 종료 후 GPU 메모리가 작업 전 수준으로 돌아왔는지 측정',
       '보호 대상 GPU 프로세스(운영 서버 등)가 있으면 시작하지 않음']
   },
   'youngmin.qlora_probe':{
     label:'Youngmin QLoRA 학습 가능성 사전 시험 (무작위 가중치·합성 토큰, 비공개 데이터 없음)',
-    lockGroup:'gpu',maxRuntimeSeconds:3600,leaseSeconds:60,grantable:false,gpu:true,dataClass:'synthetic',
+    lockGroup:'gpu',maxRuntimeSeconds:3600,leaseSeconds:60,grantable:false,ramMiB:6144,gpu:true,dataClass:'synthetic',
     validate(p){
       exactKeys(p,['seqLen','batch','steps','rank','gradCheckpointing']);
       if(typeof p.gradCheckpointing!=='boolean')throw Error('INVALID_PARAMS');

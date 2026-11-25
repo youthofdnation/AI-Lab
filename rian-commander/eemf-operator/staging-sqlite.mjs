@@ -42,9 +42,12 @@ export class StagingSqlite {
         'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))',
         // Fleet scheduling facts per long job (no params, no results): priority, reserved resources,
         // whether it needs a GPU slot, and the GPU memory hand-back verdict after it finished.
-        'CREATE TABLE IF NOT EXISTS fleet_jobs (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, needs_gpu INTEGER NOT NULL DEFAULT 0, cpu INTEGER NOT NULL DEFAULT 1, ram_mib INTEGER NOT NULL DEFAULT 0, vram_mib INTEGER NOT NULL DEFAULT 0, data_class TEXT NOT NULL, gpu_release TEXT)'
+        'CREATE TABLE IF NOT EXISTS fleet_jobs (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, needs_gpu INTEGER NOT NULL DEFAULT 0, cpu INTEGER NOT NULL DEFAULT 1, ram_mib INTEGER NOT NULL DEFAULT 0, vram_mib INTEGER NOT NULL DEFAULT 0, data_class TEXT NOT NULL, gpu_release TEXT, work_units INTEGER NOT NULL DEFAULT 1)'
       ];
       this.#db.exec(ddl.join(';')+';');
+      // fleet_jobs gained work_units after its first version: add it to an older table in place.
+      if(!this.#db.prepare("SELECT 1 FROM pragma_table_info('fleet_jobs') WHERE name='work_units'").get())
+        this.#db.exec('ALTER TABLE fleet_jobs ADD COLUMN work_units INTEGER NOT NULL DEFAULT 1;');
       if (version!==2) this.#db.exec('PRAGMA user_version=2;');
       const sentinel=this.#db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('storage-sentinel');
       if (sentinel) {

@@ -3,7 +3,7 @@
  * Reads RUN_DIR/driver.json (0600: origin, owner token, approval password - synthetic test values).
  *
  *   node fleet-pool-run.mjs RUN_DIR call <tool> '<json args>' [--approve]
- *   node fleet-pool-run.mjs RUN_DIR bench <single:DEVICE|pool> <chunks> <units> [chunkOffset]
+ *   node fleet-pool-run.mjs RUN_DIR bench <single:DEVICE|pool|pool-cores> <chunks> <units> [chunkOffset]
  *   node fleet-pool-run.mjs RUN_DIR wait <job_id> <seconds>
  *   node fleet-pool-run.mjs RUN_DIR audit <job_id>
  * Prints one JSON object. Never prints tokens or the password.
@@ -49,13 +49,16 @@ async function wait(jobId, seconds) {
 
 async function bench(mode, chunks, units, offset) {
   const t0 = Date.now(), pending = [], done = [], placementFails = [];
-  const single = mode.startsWith('single:') ? mode.slice(7) : null;
+  // single:DEVICE feeds at most maxConcurrent open jobs (no queue ahead, like the first pool version);
+  // single-queued:DEVICE keeps the same queue depth the throughput pool uses (min(5, 2 x maxConcurrent)).
+  const single = mode.startsWith('single:') ? mode.slice(7) : mode.startsWith('single-queued:') ? mode.slice(14) : null;
   let next = 0;
-  const limit = single ? cfg.maxConcurrent[single] : null;
+  const limit = single ? (mode.startsWith('single-queued:') ? Math.min(5, 2 * cfg.maxConcurrent[single]) : cfg.maxConcurrent[single]) : null;
   while (done.length < chunks) {
     // Feed: keep each PC at its own concurrency limit; the scheduler decides where in pool mode.
     while (next < chunks && (single ? pending.length < limit : true)) {
-      const s = await start({device: single || 'auto', kind: 'fleet.cpu_bench', params: {chunk: offset + next, units}, fleet: {cpu: 1, ramMiB: 64}});
+      const fleet = {cpu: 1, ramMiB: 64, ...(mode === 'pool-cores' ? {placement: 'cores'} : {})};
+      const s = await start({device: single || 'auto', kind: 'fleet.cpu_bench', params: {chunk: offset + next, units}, fleet});
       if (s.error) { if (!single && /^FLEET_NO_ELIGIBLE_DEVICE/.test(s.error)) { placementFails.push(s.error.slice(0, 120)); break; } throw Error('START_' + s.error); }
       pending.push({job: s.job_id, device: s.device, chunk: offset + next, submitted: Date.now() - t0}); next++;
     }

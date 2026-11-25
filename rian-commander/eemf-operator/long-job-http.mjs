@@ -109,7 +109,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       exact(args,['device','kind','params','request_key',...(queue.fleet?['fleet']:[])],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
       let device=args.device,placement;
-      if(queue.fleet&&device==='auto')({device,placement}=placeAuto(queue,actor,args.kind,args.fleet,Math.floor(clock()/1000)));
+      if(queue.fleet&&device==='auto')({device,placement}=placeAuto(queue,actor,args.kind,args.fleet,Math.floor(clock()/1000),args.params));
       const r=withApproval(queue.request({actor,deviceId:device,kind:args.kind,params:args.params,requestKey:args.request_key,clientRef,fleet:queue.fleet?args.fleet??null:null}));
       return placement?{...r,placement}:r;
     }
