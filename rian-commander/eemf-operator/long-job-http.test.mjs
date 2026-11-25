@@ -203,7 +203,7 @@ test('mail-review: one browser approval permits multiple different searches and 
  const otherClient=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:old}},oauthOther);
  assert.equal(otherClient.state,'AWAITING_APPROVAL');
  const ancient=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.read',params:{messageId:old}},oauthA);
- assert.equal(ancient.state,'AWAITING_APPROVAL');
+ assert.match(ancient.error,/ACTIVE_JOB_CONFLICT/,'a different OAuth client cannot deduplicate another pending request');
  assert.equal((await f.tool('ob','rian_v2_list_grants',{})).grants.length,0);
  const second=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'mail.search',params:{query:'정기점검',limit:8}},oauthA);
  assert.equal(second.state,'QUEUED','changed query reuses the same single owner approval');
@@ -230,7 +230,7 @@ test('mail-review: original approval remains one-time without OAuth ref; review 
   'x-rian-client-ref':'b'.repeat(32)
  });
  // This is a duplicate active sync; it must not gain client ref by replay.
- assert.equal(withRef.job_id,one.job_id);
+ assert.match(withRef.error,/ACTIVE_JOB_CONFLICT/,'a new OAuth client cannot inherit the existing unaffiliated sync job');
  const bad=await f.approvePage(one.job_id);
  assert.equal((await f.submit(one.job_id,{ticket:bad.ticket,password:f.pwA,
    standing:'1',review:'1'})).status,400);
