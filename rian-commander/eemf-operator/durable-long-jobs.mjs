@@ -76,7 +76,7 @@ export class LongJobQueue {
       this.#deviceKinds.set(device,new Set(list));
     }
   }
-  #kindAllowed(deviceId,kind){const allowed=this.#deviceKinds.get(deviceId);return !allowed||allowed.has(kind);}
+  #kindAllowed(deviceId,kind){const allowed=this.#deviceKinds.get(deviceId);if(['mail.status','mail.recent'].includes(kind))return !!allowed&&allowed.has(kind);return !allowed||allowed.has(kind);}
   get kinds(){return this.#kinds;}
   get limits(){return this.#limits;}
   #now(){return Math.floor(this.#clock()/1000);}
@@ -207,7 +207,7 @@ export class LongJobQueue {
       // Unlike an exact-params grant, the user-approved mail review session is
       // bound to this owner + device + OAuth client and permits bounded, varied queries.
       let review=null,readHash=null;
-      if(!grant&&clientRef!==null&&['mail.sync','mail.search','mail.read'].includes(kind)){
+      if(!grant&&clientRef!==null&&['mail.sync','mail.search','mail.read','mail.status','mail.recent'].includes(kind)){
         const candidate=db.prepare("SELECT * FROM mail_review_sessions WHERE tenant=? AND owner=? AND device=? AND client_ref=? AND state='ACTIVE' AND expires>? AND runs_left>0 ORDER BY created DESC LIMIT 1")
           .get(actor.tenantId,actor.id,deviceId,clientRef,now);
         if(candidate){
@@ -417,7 +417,7 @@ export class LongJobQueue {
       // Only successful, authentic agent search output populates approved read IDs.
       // Persist salted? Message IDs themselves are never stored, only SHA-256 digests.
       const review=this.#reviewForJob(j.id);
-      if(review&&j.kind==='mail.search'&&outcome==='SUCCEEDED'&&exitCode===0&&
+      if(review&&['mail.search','mail.recent'].includes(j.kind)&&outcome==='SUCCEEDED'&&exitCode===0&&
         review.state==='ACTIVE'&&review.expires>now){
         for(const idHash of recentMessageHashes(parsed,{nowSeconds:now,maxDays:review.max_days})){
           this.#db().prepare('INSERT OR IGNORE INTO mail_review_message_hashes(session_id,msg_sha) VALUES(?,?)')
