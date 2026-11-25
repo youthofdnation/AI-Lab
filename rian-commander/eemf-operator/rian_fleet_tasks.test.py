@@ -31,6 +31,18 @@ class CpuBench(unittest.TestCase):
 
 
 class Inventory(unittest.TestCase):
+    def test_nvidia_reports_measured_free_memory_not_a_guess(self):
+        from unittest.mock import patch
+        rows = "0, Test GPU, 6144, 2000, 4000, 12, 55, 572.83\n1, Unknown GPU, 8192, N/A, N/A, N/A, N/A, 572.83\n"
+        with patch.object(F.shutil, "which", return_value="nvidia-smi"), patch.object(F, "_run", side_effect=[rows, "", "CUDA Version: 12.8"]) as run:
+            result = F.nvidia_gpus()
+        self.assertIn("memory.free", run.call_args_list[0].args[0][1])
+        g, unknown = result["gpus"]
+        self.assertEqual((g["vram_total_mib"], g["vram_used_mib"], g["vram_free_mib"], g["util_pct"], g["driver"]), (6144, 2000, 4000, 12, "572.83"))
+        self.assertIsNone(unknown["vram_free_mib"])
+        self.assertIsNone(unknown["vram_used_mib"])
+        self.assertIsNone(unknown["util_pct"])
+
     def test_reads_names_and_numbers_only(self):
         r = F.inventory(nop)
         s = r["snapshot"]

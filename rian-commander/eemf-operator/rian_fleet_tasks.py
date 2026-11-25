@@ -79,7 +79,7 @@ def nvidia_gpus():
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
-    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,driver_version",
+    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version",
                 "--format=csv,noheader,nounits"])
     if out is None:
         return None
@@ -89,10 +89,10 @@ def nvidia_gpus():
     gpus = []
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) < 7:
+        if len(f) < 8 or not f[0].isdigit():
             continue
         gpus.append({"index": int(f[0]), "name": f[1], "vram_total_mib": _num(f[2]), "vram_used_mib": _num(f[3]),
-                     "util_pct": _num(f[4]), "temp_c": _num(f[5]), "driver": f[6], "cuda_driver_api": cuda.group(1) if cuda else None,
+                     "vram_free_mib": _num(f[4]), "util_pct": _num(f[5]), "temp_c": _num(f[6]), "driver": f[7], "cuda_driver_api": cuda.group(1) if cuda else None,
                      "compute_processes": []})
     pids = []
     for line in apps.strip().splitlines():
