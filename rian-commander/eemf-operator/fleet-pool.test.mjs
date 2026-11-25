@@ -53,6 +53,14 @@ test('policy fails closed: a denylist is mandatory and a denied host can never b
  assert.equal(p.assertDispatchable('hub','fleet.cpu_bench',{dataClass:'private'}).id,'hub');
 });
 
+test('quarantine config cannot authorize non-inventory jobs',()=>{
+ for(const kind of ['fleet.cpu_bench','fleet.gpu_probe','dev.test_shard','youngmin.qlora_probe','mail.sync','diag.wait']){
+  const cfg=structuredClone(POLICY);cfg.quarantineKinds.push(kind);
+  assert.throws(()=>new FleetPolicy(cfg),/QUARANTINE_INVENTORY_ONLY/,kind);
+ }
+ assert.deepEqual(policy().deviceKinds().get('quar'),['fleet.inventory']);
+});
+
 test('denied and quarantined PCs get no work at request time and cannot claim',t=>{
  const f=fixture(t),q=f.open();
  assert.throws(()=>req(f,q,'DENIED-PC','fleet.inventory',{}),/DEVICE_DENIED/);
