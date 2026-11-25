@@ -245,8 +245,13 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   return async function handle(request){
     const url=new URL(request.url),path=url.pathname,method=request.method.toUpperCase();
     try{
-      if(url.search||url.hash)return json({error:'NOT_FOUND'},404);
       const approveMatch=/^\/v2\/approve\/([0-9a-f-]{36})$/.exec(path);
+      // ChatGPT adds this tracking parameter when the owner opens an approval
+      // link. Accept it only on the read-only approval preview, never on POST
+      // or an authenticated API route.
+      const chatgptApprovalLink=method==='GET'&&approveMatch&&
+        url.searchParams.size===1&&url.searchParams.get('utm_source')==='chatgpt.com';
+      if(url.hash||(url.search&&!chatgptApprovalLink))return json({error:'NOT_FOUND'},404);
       if(approveMatch&&UUID.test(approveMatch[1])){
         if(method==='GET'){
           let preview;try{preview=queue.approvalPreview(approveMatch[1]);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}

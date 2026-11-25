@@ -69,6 +69,19 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  assert.equal(anon.status,401,'anonymous MCP call rejected');
 });
 
+test('ChatGPT approval link tracking parameter opens only the read-only preview',async t=>{
+ const f=fixture(t);
+ const job=await f.tool('oa','mail_sync',{device:'pcA',days:14,max_messages:100});
+ const path=ORIGIN+'/v2/approve/'+job.job_id;
+ const preview=await f.handler(new Request(path+'?utm_source=chatgpt.com'));
+ assert.equal(preview.status,200);
+ assert.match(await preview.text(),/업무메일 연속 검토|업무메일 색인 동기화/);
+ for(const query of ['?utm_source=other','?utm_source=chatgpt.com&utm_source=chatgpt.com','?utm_source=chatgpt.com&scope=extra']){
+  assert.equal((await f.handler(new Request(path+query))).status,404);
+ }
+ assert.equal((await f.handler(new Request(path+'?utm_source=chatgpt.com',{method:'POST'}))).status,404);
+});
+
 test('dedicated mail tools map to bounded jobs and preserve approval requirements',async t=>{
  const f=fixture(t);
  const sync=await f.tool('oa','mail_sync',{device:'pcA',days:14,max_messages:100});
