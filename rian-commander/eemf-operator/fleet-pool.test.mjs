@@ -9,9 +9,11 @@ import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds,FLEET_KIND_NAMES} from './long-job-kinds.mjs';
 import {FleetPolicy,recommend,verifyGpuRelease} from './fleet-policy.mjs';
+import {fleetStatus,fleetRecommend} from './fleet-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
-const ALL=['fleet.inventory','fleet.cpu_bench','fleet.gpu_probe','youngmin.qlora_probe'];
+const ALL=['fleet.inventory','fleet.cpu_bench','fleet.gpu_probe','youngmin.qlora_probe',
+  'salpion.worker.status','salpion.worker.start','salpion.worker.stop'];
 // Synthetic names only: the real roster lives in the central node's configuration, not in Git.
 const POLICY={version:1,denylist:{hostnames:['DENIED-PC']},quarantineKinds:['fleet.inventory'],devices:[
  {id:'hub',hostname:'hub-host.local',role:'central',status:'ACTIVE',maxConcurrent:2,gpuSlots:0,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['public','synthetic','private'],privateDataApproved:true},
@@ -19,6 +21,35 @@ const POLICY={version:1,denylist:{hostnames:['DENIED-PC']},quarantineKinds:['fle
  {id:'gpu2',hostname:'GPU-HOST-2',role:'gpu',status:'ACTIVE',maxConcurrent:1,gpuSlots:1,allowedKinds:ALL,dataClasses:['public','synthetic']},
  {id:'quar',hostname:'QUAR-HOST',role:'cpu',status:'QUARANTINED',quarantineReason:'security alert not cleared',maxConcurrent:1,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']}]};
 const policy=()=>new FleetPolicy(structuredClone(POLICY),{knownKinds:new Set(FLEET_KIND_NAMES)});
+
+test('Fleet status and placement never reveal another tenant device',()=>{
+ const p=new FleetPolicy({version:1,denylist:{hostnames:['DENIED-HOST']},devices:[
+  {id:'mac',hostname:'mac.local',status:'ACTIVE',maxConcurrent:1,gpuSlots:1,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']},
+  {id:'iso',hostname:'iso.local',status:'ACTIVE',maxConcurrent:1,gpuSlots:0,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']}]});
+ const snapshot={host:'mac.local',cpu:{logical:8,load_pct:10},ram:{available_mib:8192,pressure:'normal'},gpus:[]};
+ const queue={fleet:p,devices:()=>[{device:'mac',online:true,last_seen:1900}],
+  latestSucceeded:({deviceId,kind})=>kind==='fleet.inventory'?{finished:1900,result:{ok:true,snapshot:{...snapshot,host:deviceId+'.local'}}}:null,
+  fleetActive:()=>[],fleetThroughput:()=>new Map(),kinds:{get:()=>({ramMiB:64,gpu:false})},limits:{maxOpenPerDevice:5}};
+ const actor={tenantId:'MAC'};
+ assert.deepEqual(fleetStatus(queue,actor,2000).devices.map(d=>d.id),['mac']);
+ const placement=fleetRecommend(queue,actor,{kind:'fleet.cpu_bench'},2000);
+ assert.deepEqual(placement.candidates.map(d=>d.device),['mac']);
+ assert.deepEqual(placement.excluded,[]);
+});
+
+test('SALPION worker kinds keep exact empty params and require one owner approval for start and stop',()=>{
+ const kinds=new LongJobKinds({allowFleet:true});
+ for(const kind of ['salpion.worker.status','salpion.worker.start','salpion.worker.stop']){
+  assert.deepEqual(kinds.canonical('mac',kind,{}).params,{});
+  assert.throws(()=>kinds.canonical('mac',kind,{argv:['python']}),/INVALID_PARAMS/);
+ }
+ assert.equal(kinds.get('salpion.worker.start').grantable,false);
+ assert.equal(kinds.get('salpion.worker.stop').grantable,false);
+ const p=structuredClone(POLICY);
+ p.devices[2].allowedKinds.push('salpion.worker.start');
+ assert.equal(new FleetPolicy(p,{knownKinds:new Set(FLEET_KIND_NAMES)}).assertDispatchable('gpu2','salpion.worker.start',{dataClass:'synthetic',needsGpu:true}).id,'gpu2');
+ assert.throws(()=>policy().assertDispatchable('hub','salpion.worker.start',{dataClass:'synthetic',needsGpu:true}),/KIND_NOT_ALLOWED/);
+});
 
 function fixture(t){
  const dir=mkdtempSync(join(tmpdir(),'rian-fleet-')),file=join(dir,'state.db'),key=randomBytes(32).toString('hex');
@@ -119,6 +150,16 @@ test('the QLoRA probe always needs its own owner approval; a standing grant cann
  const j=req(f,q,'gpu2','youngmin.qlora_probe',{seqLen:256,batch:1,steps:2,rank:16,gradCheckpointing:true});
  assert.equal(j.approval_required,true);
  assert.throws(()=>q.approve({approver:f.approver,jobId:j.job_id,grant:{minutes:60,maxRuns:5}}),/GRANT/);
+});
+
+test('Mac worker lifecycle enters the existing approval queue and cannot use a standing grant',t=>{
+ const f=fixture(t),q=f.open();
+ const start=req(f,q,'gpu2','salpion.worker.start',{});
+ assert.equal(start.state,'AWAITING_APPROVAL');
+ assert.equal(start.approval_required,true);
+ assert.throws(()=>q.approve({approver:f.approver,jobId:start.job_id,grant:{minutes:60,maxRuns:5}}),/GRANT/);
+ approve(f,q,start);
+ assert.equal(q.claim({actor:f.a['a-gpu2'],deviceId:'gpu2'}).job.kind,'salpion.worker.start');
 });
 
 test('a lost connection never re-runs a job; the late authentic result is still collected once',t=>{

@@ -80,6 +80,28 @@ const intIn=(v,lo,hi)=>{if(!Number.isInteger(v)||v<lo||v>hi)throw Error('INVALID
  * synthetic tensors, so they are 'synthetic'.
  */
 const FLEET_KINDS={
+  'salpion.worker.status':{
+    label:'Mac SALPION Nano AI 워커 상태 조회 (읽기 전용)',
+    lockGroup:'salpion-worker',maxRuntimeSeconds:120,leaseSeconds:45,grantable:true,ramMiB:128,gpu:false,dataClass:'synthetic',
+    validate(p){exactKeys(p,[]);return {};},
+    describe:()=>['이 PC에 미리 등록된 Nano 워커의 프로세스 소유권, 로컬 상태, 모델 SHA-256 및 루프백 health만 조회',
+      '토큰·영상·파일 내용·명령줄은 반환하지 않음']
+  },
+  'salpion.worker.start':{
+    label:'Mac SALPION Nano AI 워커 시작 (고정된 로컬 구성, 매회 소유자 승인)',
+    lockGroup:'salpion-worker',maxRuntimeSeconds:180,leaseSeconds:45,grantable:false,ramMiB:2048,gpu:false,dataClass:'synthetic',
+    validate(p){exactKeys(p,[]);return {};},
+    describe:()=>['이 PC의 소유자 구성에 고정된 Python·스크립트·Nano 가중치 SHA-256·개인 토큰 파일만 사용',
+      '워커는 127.0.0.1에만 바인드, Tailscale/Serve·방화벽·ACL 변경 없음',
+      '현재 메모리 압력 및 보호 서비스 확인 후 시작; 반복 승인 불가']
+  },
+  'salpion.worker.stop':{
+    label:'Mac SALPION Nano AI 워커 종료 (소유 프로세스만, 매회 소유자 승인)',
+    lockGroup:'salpion-worker',maxRuntimeSeconds:120,leaseSeconds:45,grantable:false,ramMiB:128,gpu:false,dataClass:'synthetic',
+    validate(p){exactKeys(p,[]);return {};},
+    describe:()=>['RIAN이 시작하고 PID·시작 시각·명령 정체성이 일치하는 Nano 워커 프로세스에만 종료 신호',
+      'Youngmin 연구, LM Studio, Ollama, n8n, Docker 등 다른 프로세스는 건드리지 않음; 반복 승인 불가']
+  },
   'fleet.inventory':{
     label:'장비 자원 읽기 (CPU·RAM·GPU·디스크·암호화·실행환경·AI 프로세스 이름, 읽기 전용)',
     lockGroup:'fleet-inventory',maxRuntimeSeconds:180,leaseSeconds:60,grantable:true,ramMiB:128,gpu:false,dataClass:'synthetic',

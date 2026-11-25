@@ -1,5 +1,6 @@
 """Unit tests for the V2 agent: local allowlist, runner outcomes, exactly-once and recovery. No network."""
 import importlib.util
+import hashlib
 import json
 import sys
 import tempfile
@@ -63,6 +64,38 @@ class AllowlistTests(Base):
         self.cfg_path.write_text(json.dumps({**self.cfg, "allowed_kinds": ["run_command"]}), "utf-8")
         with self.assertRaises(SystemExit):
             agent.load_config(self.cfg_path)
+
+    def test_ai_worker_has_a_second_local_allowlist_and_no_remote_arguments(self):
+        self.cfg["allowed_kinds"] = ["salpion.worker.start"]
+        self.cfg["fleet"] = {"ai_worker": {"configured": True}}
+        with self.assertRaises(agent.mail.MailError):
+            agent.validate_local("salpion.worker.start", {"script": "/tmp/other.py"}, self.cfg)
+        if sys.platform == "darwin":
+            agent.validate_local("salpion.worker.start", {}, self.cfg)
+        else:
+            with self.assertRaises(agent.mail.MailError):
+                agent.validate_local("salpion.worker.start", {}, self.cfg)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Mac worker is macOS-only")
+    def test_mac_worker_config_is_pinned_and_unowned_process_cannot_be_stopped(self):
+        import rian_ai_worker as worker
+        script, weights, token = (self.root / x for x in ("worker.py", "weights.pth", "token"))
+        script.write_text("pass")
+        weights.write_bytes(b"synthetic fixture")
+        token.write_text("t" * 40)
+        token.chmod(0o600)
+        spec = {"python": sys.executable, "script": str(script),
+                "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+                "weights": str(weights), "weights_sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
+                "token_file": str(token), "state_file": str(self.root / "state.json"),
+                "record_file": str(self.root / "record.json"), "log_file": str(self.root / "worker.log")}
+        fleet = {"ai_worker": spec}
+        self.assertEqual(worker.status(fleet)["state"], "UNREGISTERED")
+        with self.assertRaisesRegex(worker.WorkerError, "WORKER_NOT_OWNED"):
+            worker.stop(fleet)
+        spec["script_sha256"] = "0" * 64
+        with self.assertRaisesRegex(worker.WorkerError, "WORKER_ARTIFACT_SHA_MISMATCH"):
+            worker._spec(fleet, verify_artifacts=True)
 
 
 class RunnerTests(Base):
