@@ -9,6 +9,7 @@ import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds,FLEET_KIND_NAMES} from './long-job-kinds.mjs';
 import {FleetPolicy,recommend,verifyGpuRelease} from './fleet-policy.mjs';
+import {fleetStatus,fleetRecommend} from './fleet-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const ALL=['fleet.inventory','fleet.cpu_bench','fleet.gpu_probe','youngmin.qlora_probe',
@@ -20,6 +21,21 @@ const POLICY={version:1,denylist:{hostnames:['DENIED-PC']},quarantineKinds:['fle
  {id:'gpu2',hostname:'GPU-HOST-2',role:'gpu',status:'ACTIVE',maxConcurrent:1,gpuSlots:1,allowedKinds:ALL,dataClasses:['public','synthetic']},
  {id:'quar',hostname:'QUAR-HOST',role:'cpu',status:'QUARANTINED',quarantineReason:'security alert not cleared',maxConcurrent:1,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']}]};
 const policy=()=>new FleetPolicy(structuredClone(POLICY),{knownKinds:new Set(FLEET_KIND_NAMES)});
+
+test('Fleet status and placement never reveal another tenant device',()=>{
+ const p=new FleetPolicy({version:1,denylist:{hostnames:['DENIED-HOST']},devices:[
+  {id:'mac',hostname:'mac.local',status:'ACTIVE',maxConcurrent:1,gpuSlots:1,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']},
+  {id:'iso',hostname:'iso.local',status:'ACTIVE',maxConcurrent:1,gpuSlots:0,allowedKinds:['fleet.inventory','fleet.cpu_bench'],dataClasses:['synthetic']}]});
+ const snapshot={host:'mac.local',cpu:{logical:8,load_pct:10},ram:{available_mib:8192,pressure:'normal'},gpus:[]};
+ const queue={fleet:p,devices:()=>[{device:'mac',online:true,last_seen:1900}],
+  latestSucceeded:({deviceId,kind})=>kind==='fleet.inventory'?{finished:1900,result:{ok:true,snapshot:{...snapshot,host:deviceId+'.local'}}}:null,
+  fleetActive:()=>[],fleetThroughput:()=>new Map(),kinds:{get:()=>({ramMiB:64,gpu:false})},limits:{maxOpenPerDevice:5}};
+ const actor={tenantId:'MAC'};
+ assert.deepEqual(fleetStatus(queue,actor,2000).devices.map(d=>d.id),['mac']);
+ const placement=fleetRecommend(queue,actor,{kind:'fleet.cpu_bench'},2000);
+ assert.deepEqual(placement.candidates.map(d=>d.device),['mac']);
+ assert.deepEqual(placement.excluded,[]);
+});
 
 test('SALPION worker kinds keep exact empty params and require one owner approval for start and stop',()=>{
  const kinds=new LongJobKinds({allowFleet:true});

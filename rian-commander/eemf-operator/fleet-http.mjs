@@ -23,9 +23,14 @@ export function fleetToolDefs(queue) {
   ];
 }
 
-function inventories(queue, actor) {
+function ownedIds(queue, actor) {
+  return new Set(queue.devices(actor).map(d => d.device));
+}
+
+function inventories(queue, actor, owned = ownedIds(queue, actor)) {
   const out = new Map();
   for (const id of queue.fleet.ids()) {
+    if (!owned.has(id)) continue;
     const r = queue.latestSucceeded({actor, deviceId: id, kind: 'fleet.inventory'});
     if (r && r.result && r.result.ok) out.set(id, {captured: r.finished, snapshot: r.result.snapshot, job_id: r.job_id});
   }
@@ -38,15 +43,19 @@ export function fleetRecommend(queue, actor, args, now) {
   if (req.ramMiB !== undefined && !Number.isInteger(req.ramMiB)) throw Error('INVALID_REQUIREMENTS');
   // The kind's own memory need is the floor, as at request time.
   const ramMiB = Math.max(spec.ramMiB || 0, req.ramMiB ?? 0) || undefined;
-  return recommend(queue.fleet, {...req, ramMiB, needsGpu: spec.gpu === true || args.kind === 'salpion.worker.start'}, inventories(queue, actor), queue.fleetActive(actor), now,
+  const owned = ownedIds(queue, actor);
+  const tenantPolicy = {ids: () => queue.fleet.ids().filter(id => owned.has(id)),
+    assertDispatchable: (...arguments_) => queue.fleet.assertDispatchable(...arguments_)};
+  return recommend(tenantPolicy, {...req, ramMiB, needsGpu: spec.gpu === true || args.kind === 'salpion.worker.start'}, inventories(queue, actor, owned), queue.fleetActive(actor), now,
     {throughput: queue.fleetThroughput({actor, kind: args.kind}), placement: placement || null, maxOpenPerDevice: queue.limits.maxOpenPerDevice});
 }
 
 export function fleetStatus(queue, actor, now) {
-  const inv = inventories(queue, actor), online = new Map(queue.devices(actor).map((d) => [d.device, d]));
+  const online = new Map(queue.devices(actor).map((d) => [d.device, d]));
+  const inv = inventories(queue, actor, new Set(online.keys()));
   const active = queue.fleetActive(actor);
   const p = queue.fleet.summary();
-  return {denylist_entries: p.denylistEntries, devices: p.devices.map((d) => {
+  return {denylist_entries: p.denylistEntries, devices: p.devices.filter(d => online.has(d.id)).map((d) => {
     const i = inv.get(d.id), s = i && i.snapshot;
     // A stop that finishes in the same clock second as a status read wins conservatively.
     const workerJob = ['salpion.worker.stop','salpion.worker.status','salpion.worker.start']
