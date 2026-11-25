@@ -58,14 +58,14 @@ function tools(kinds){
   const kindNames=kinds.names();
   return [
     {name:'rian_v2_devices',description:'List this tenant\'s registered PCs and whether each V2 agent is online. Read only.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
-    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If no exact-scope standing grant exists, the result contains approval_url for the owner to approve once in a browser. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body and always needs its own approval'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
+    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If no exact-scope standing grant exists, the result contains approval_url for the owner to approve once in a browser. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
       inputSchema:{type:'object',properties:{device:{type:'string'},kind:{type:'string',enum:kindNames},params:{type:'object'},request_key:{type:'string',pattern:'^[A-Za-z0-9_-]{16,80}$'}},required:['device','kind','params'],additionalProperties:false}},
     {name:'rian_v2_job_status',description:'Get state, progress and (when finished) the result of a job. wait_seconds (0-20) waits for a change. Never retry a job whose state is RUNNING or UNKNOWN_DO_NOT_RETRY.',
       inputSchema:{type:'object',properties:{job_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['job_id'],additionalProperties:false}},
     {name:'rian_v2_list_jobs',description:'List recent jobs of this tenant (no results).',inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false}},
     {name:'rian_v2_cancel_job',description:'Cancel a pending approval, a queued job, or request a running job to stop safely.',inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false}},
-    {name:'rian_v2_list_grants',description:'List active exact-scope standing grants (owner pre-approvals) and their remaining runs.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
-    {name:'rian_v2_revoke_grant',description:'Revoke a standing grant immediately.',inputSchema:{type:'object',properties:{grant_id:{type:'string'}},required:['grant_id'],additionalProperties:false}}
+    {name:'rian_v2_list_grants',description:'List active exact-scope standing grants and owner-approved read-only mail review sessions (time/device/OAuth-client restricted), including remaining jobs/reads.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
+    {name:'rian_v2_revoke_grant',description:'Revoke an exact-scope standing grant or read-only mail review session immediately; queued review jobs are cancelled.',inputSchema:{type:'object',properties:{grant_id:{type:'string'}},required:['grant_id'],additionalProperties:false}}
   ];
 }
 const text=v=>({content:[{type:'text',text:JSON.stringify(v)}]});
@@ -159,6 +159,15 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
         '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="1440">'+
         '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="10"></fieldset>'
         :'<p>이 작업은 반복 승인 대상이 아니며 이번 1건만 승인됩니다.</p>')+
+      (preview.clientScopedReviewEligible?
+        '<fieldset><legend>업무메일 연속 검토 (선택, 최초 1회 승인)</legend>'+
+        '<label><input type="checkbox" name="review" value="1" style="width:auto"> 이 PC의 현재 업무메일 계정에서 지정 기간 동기화 + 다양한 제목·발신자 검색을 연속 허용</label>'+
+        '<label for="review_minutes">세션 유효기간 (1~60분)</label><input id="review_minutes" name="review_minutes" type="number" min="1" max="60" value="30">'+
+        '<label for="review_jobs">추가 작업 횟수 (1~60회)</label><input id="review_jobs" name="review_jobs" type="number" min="1" max="60" value="30">'+
+        '<label><input type="checkbox" name="review_body" value="1" style="width:auto"> 선택한 메일 본문도 읽기 허용 (별도 명시 동의)</label>'+
+        '<label for="review_reads">본문 최대 조회 횟수 (1~20회)</label><input id="review_reads" name="review_reads" type="number" min="1" max="20" value="10">'+
+        '<p>범위: 같은 소유자·OAuth 연결·PC, 동기화 최대 '+escapeHtml(String(preview.params.days))+'일 / '+escapeHtml(String(preview.params.maxMessages))+'건. 메일 제목·발신자 검색은 기존 로컬 색인 전체가 대상일 수 있습니다. 본문은 이 세션의 검색 결과에 나온 최근 지정 기간의 메일만 열 수 있습니다. 첨부파일·발송·삭제·이동·읽음표시 변경은 불가합니다. 언제든 철회할 수 있습니다.</p></fieldset>'
+        :'')+
       '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
       '<button type="submit">이 범위로 승인</button></form>');
   }
@@ -183,15 +192,21 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     const approver=approverMap.get(preview.tenantId+'|'+preview.ownerId);
     if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다.');}
     failures.delete(key);
-    let grant=null;
+    let grant=null,review=null;
     if(form.get('standing')==='1'){
       const minutes=Number(form.get('minutes')),maxRuns=Number(form.get('runs'));
       grant={minutes,maxRuns};
     }
+    if(form.get('review')==='1'){
+      if(!preview.clientScopedReviewEligible||grant!==null)return page('<h1>승인 범위 오류</h1><p>연속 검토와 동일 작업 반복 승인은 동시에 선택할 수 없습니다.</p>',400);
+      review={minutes:Number(form.get('review_minutes')),extraJobs:Number(form.get('review_jobs')),
+        bodyReads:form.get('review_body')==='1'?Number(form.get('review_reads')):0};
+    }
     try{
-      const r=queue.approve({approver:{tenantId:preview.tenantId,ownerId:preview.ownerId},jobId,grant});
+      const r=queue.approve({approver:{tenantId:preview.tenantId,ownerId:preview.ownerId},jobId,grant,review});
       return page('<h1>승인 완료</h1><p>작업이 대기열에 들어갔습니다. PC 에이전트가 가져가 실행하며, ChatGPT에서 rian_v2_job_status로 진행률과 결과를 확인할 수 있습니다.</p>'+
-        (r.grantId?'<p>반복 승인 '+escapeHtml(String(grant.maxRuns))+'회 / '+escapeHtml(String(grant.minutes))+'분이 같은 범위에 한해 적용됩니다. ChatGPT의 rian_v2_revoke_grant로 즉시 취소할 수 있습니다.</p>':''));
+        (r.grantId?'<p>반복 승인 '+escapeHtml(String(grant.maxRuns))+'회 / '+escapeHtml(String(grant.minutes))+'분이 같은 범위에 한해 적용됩니다. ChatGPT의 rian_v2_revoke_grant로 즉시 취소할 수 있습니다.</p>':'')+
+        (r.reviewId?'<p>업무메일 읽기 전용 연속 검토 세션을 승인했습니다. 추가 작업 '+escapeHtml(String(review.extraJobs))+'회, '+escapeHtml(String(review.minutes))+'분, 본문 최대 '+escapeHtml(String(review.bodyReads))+'건. 다른 고객·PC·OAuth 연결에는 적용되지 않습니다. rian_v2_revoke_grant로 언제든 철회할 수 있습니다.</p>':''));
     }catch(e){return page('<h1>승인하지 못했습니다</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
   }
 
