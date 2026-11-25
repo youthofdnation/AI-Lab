@@ -8,18 +8,24 @@ import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
+import {FleetPolicy} from './fleet-policy.mjs';
 import {createLongJobHandler,hashApprovalPassword,clientRefFor} from './long-job-http.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const ORIGIN='https://rian-commander-tenant-staging.example.test';
-function fixture(t){
+function fixture(t, withFleet=false){
  const dir=mkdtempSync(join(tmpdir(),'rian-ljhttp-'));
  const tkn=Object.fromEntries(['oa','ob','aa','ab'].map(x=>[x,randomBytes(40).toString('base64url')]));
  const directory=new TenantDirectory({devices:[{id:'pcA',tenantId:'A'},{id:'pcB',tenantId:'B'}],
   principals:[['oa','A','owner'],['ob','B','owner'],['aa','A','agent','pcA'],['ab','B','agent','pcB']]
    .map(([id,tenantId,kind,deviceId])=>({id,tenantId,kind,...(deviceId?{deviceId}:{}),tokenSha256:sha(tkn[id])}))});
  const store=new StagingSqlite({filename:join(dir,'s.db'),encryptionKeyHex:randomBytes(32).toString('hex')});
- const queue=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true})});
+ const kinds=new LongJobKinds({allowDiagnostics:true,allowFleet:withFleet});
+ const fleet=withFleet?new FleetPolicy({version:1,denylist:{hostnames:['DENIED-PC']},devices:[
+  {id:'pcA',hostname:'pcA',status:'QUARANTINED',allowedKinds:['fleet.inventory'],maxConcurrent:1,gpuSlots:0,dataClasses:['synthetic']},
+  {id:'pcB',hostname:'pcB',status:'QUARANTINED',allowedKinds:['fleet.inventory'],maxConcurrent:1,gpuSlots:0,dataClasses:['synthetic']}
+ ]},{knownKinds:new Set(kinds.names())}):null;
+ const queue=new LongJobQueue({directory,store,kinds,fleet});
  const pwA='synthetic-owner-A-password-'+randomBytes(4).toString('hex'),pwB='synthetic-owner-B-password-'+randomBytes(4).toString('hex');
  const approvers=[{tenantId:'A',ownerId:'oa',...hashApprovalPassword(pwA)},{tenantId:'B',ownerId:'ob',...hashApprovalPassword(pwB)}];
  const handler=createLongJobHandler({directory,queue,approvers,publicOrigin:ORIGIN,formSecret:randomBytes(48).toString('hex')});
@@ -65,6 +71,24 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  assert.equal((await f.rpc('aa','tools/list')).status,401,'agent token is not an owner');
  const anon=await f.handler(new Request(ORIGIN+'/v2/mcp',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}));
  assert.equal(anon.status,401,'anonymous MCP call rejected');
+});
+
+test('scoped inventory MCP uses existing approval and rejects other arguments or tenant',async t=>{
+ const f=fixture(t,true);
+ const list=await f.rpc('oa','tools/list');
+ assert.ok(list.body.result.tools.some(x=>x.name==='rian_v2_request_inventory'));
+ const result=await f.tool('oa','rian_v2_request_inventory',{device:'pcA'});
+ assert.equal(result.state,'AWAITING_APPROVAL');
+ assert.equal(result.approval_url,ORIGIN+'/v2/approve/'+result.job_id);
+ assert.equal((await f.tool('oa','rian_v2_request_inventory',{device:'pcA',argv:['cmd']})).error,'INVALID_ARGUMENTS');
+ assert.equal((await f.tool('oa','rian_v2_request_inventory',{device:'auto'})).error,'INVALID_ARGUMENTS');
+ assert.equal((await f.tool('oa','rian_v2_request_inventory',{device:'pcB'})).error,'NOT_FOUND');
+ assert.equal((await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA'})).body.job,null);
+ const page=await f.approvePage(result.job_id);
+ assert.equal((await f.submit(result.job_id,{ticket:page.ticket,password:f.pwA})).status,200);
+ const claim=await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA'});
+ assert.equal(claim.body.job.kind,'fleet.inventory');
+ assert.deepEqual(claim.body.job.params,{});
 });
 
 test('real browsers can submit the approval form (Origin is not nulled by the referrer policy)',async t=>{
