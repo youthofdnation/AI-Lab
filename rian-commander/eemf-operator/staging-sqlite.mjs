@@ -39,6 +39,12 @@ export class StagingSqlite {
         'CREATE INDEX IF NOT EXISTS idx_long_jobs_device ON long_jobs(tenant,device,state,created)',
         'CREATE TABLE IF NOT EXISTS long_job_grants (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, kind TEXT NOT NULL, spec_sha TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, runs_left INTEGER NOT NULL, state TEXT NOT NULL)',
         'CREATE INDEX IF NOT EXISTS idx_long_job_grants ON long_job_grants(tenant,owner,device,kind,spec_sha)',
+        // Read-only mail review: a single owner browser approval scopes successive sync/search/selected reads.
+        // client_ref is the SHA-256-derived OAuth client reference; message IDs are stored as digests only.
+        "CREATE TABLE IF NOT EXISTS mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL)",
+        'CREATE INDEX IF NOT EXISTS idx_mail_review_scope ON mail_review_sessions(tenant,owner,device,client_ref,state,expires)',
+        'CREATE TABLE IF NOT EXISTS mail_review_message_hashes (session_id TEXT NOT NULL REFERENCES mail_review_sessions(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, PRIMARY KEY(session_id,msg_sha))',
+        'CREATE TABLE IF NOT EXISTS mail_review_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES mail_review_sessions(id))',
         'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
       ];
       this.#db.exec(ddl.join(';')+';');
@@ -90,6 +96,8 @@ export class StagingSqlite {
       // Terminal V2 jobs keep their encrypted result for 7 days, then disappear.
       this.db.prepare("DELETE FROM long_jobs WHERE finished IS NOT NULL AND finished < ?").run(now-7*86400);
       this.db.prepare("DELETE FROM long_job_grants WHERE expires < ?").run(now-86400);
+      // Keep review rows longer than the seven-day job retention so audit links stay valid.
+      this.db.prepare("DELETE FROM mail_review_sessions WHERE expires < ?").run(now-9*86400);
     });
   }
   bootSequence() {
