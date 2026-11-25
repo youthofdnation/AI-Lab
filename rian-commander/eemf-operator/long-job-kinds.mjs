@@ -84,7 +84,7 @@ const FLEET_KINDS={
     label:'장비 자원 읽기 (CPU·RAM·GPU·디스크·암호화·실행환경·AI 프로세스 이름, 읽기 전용)',
     lockGroup:'fleet-inventory',maxRuntimeSeconds:180,leaseSeconds:60,grantable:true,ramMiB:128,gpu:false,dataClass:'synthetic',
     validate(p){exactKeys(p,[]);return {};},
-    describe:()=>['CPU·RAM·GPU·디스크 사용량, 디스크 암호화 상태, OS·CUDA·PyTorch 버전, AI 서버 프로세스 이름만 읽음',
+    describe:()=>['CPU·RAM·GPU·디스크 사용량, 디스크 암호화 상태, OS·CUDA·PyTorch 버전, AI 서버 프로세스 이름 및 Windows GPU 엔진의 PID·프로세스 이름·점유율 표본만 읽음',
       '프로세스 명령줄·파일 내용·인증정보는 읽지 않음, 아무것도 바꾸거나 종료하지 않음']
   },
   'fleet.cpu_bench':{
