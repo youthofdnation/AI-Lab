@@ -38,7 +38,7 @@ export function fleetRecommend(queue, actor, args, now) {
   if (req.ramMiB !== undefined && !Number.isInteger(req.ramMiB)) throw Error('INVALID_REQUIREMENTS');
   // The kind's own memory need is the floor, as at request time.
   const ramMiB = Math.max(spec.ramMiB || 0, req.ramMiB ?? 0) || undefined;
-  return recommend(queue.fleet, {...req, ramMiB, needsGpu: spec.gpu === true}, inventories(queue, actor), queue.fleetActive(actor), now,
+  return recommend(queue.fleet, {...req, ramMiB, needsGpu: spec.gpu === true || args.kind === 'salpion.worker.start'}, inventories(queue, actor), queue.fleetActive(actor), now,
     {throughput: queue.fleetThroughput({actor, kind: args.kind}), placement: placement || null, maxOpenPerDevice: queue.limits.maxOpenPerDevice});
 }
 
@@ -48,10 +48,14 @@ export function fleetStatus(queue, actor, now) {
   const p = queue.fleet.summary();
   return {denylist_entries: p.denylistEntries, devices: p.devices.map((d) => {
     const i = inv.get(d.id), s = i && i.snapshot;
+    const workerJob = ['salpion.worker.status','salpion.worker.start','salpion.worker.stop']
+      .map(kind=>queue.latestSucceeded({actor, deviceId:d.id, kind})).filter(Boolean)
+      .sort((a,b)=>b.finished-a.finished)[0];
     return {...d, online: online.get(d.id)?.online === true, last_seen: online.get(d.id)?.last_seen || null,
       inventory: s ? {gpu_engines: s.gpu_engines ?? null, captured: i.captured, age_seconds: now - i.captured, host: s.host, os: s.os, cpu: s.cpu, ram: s.ram,
         gpus: s.gpus, disks: s.disks, encryption: s.encryption, runtimes: s.runtimes, ai_processes: s.ai_processes} : null,
-      reservations: active.filter((a) => a.device === d.id)};
+      reservations: active.filter((a) => a.device === d.id),
+      ai_worker: workerJob?.result ? {captured: workerJob.finished, ...workerJob.result} : null};
   })};
 }
 

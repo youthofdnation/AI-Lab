@@ -42,7 +42,8 @@ _spec.loader.exec_module(_artifact)
 Client, TransferError = _artifact.Client, _artifact.TransferError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-FLEET_KINDS = {"fleet.inventory", "fleet.cpu_bench", "fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"}
+AI_WORKER_KINDS = {"salpion.worker.status", "salpion.worker.start", "salpion.worker.stop"}
+FLEET_KINDS = {"fleet.inventory", "fleet.cpu_bench", "fleet.blob_verify", "dev.test_shard", "fleet.gpu_probe", "youngmin.qlora_probe"} | AI_WORKER_KINDS
 KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "diag.wait"} | FLEET_KINDS
 MAX_OUTPUT = 96 * 1024
 # The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
@@ -116,6 +117,8 @@ def validate_local(kind, params, cfg):
         raise mail.MailError("LOCAL_QUARANTINE_INVENTORY_ONLY")
     if kind not in cfg["allowed_kinds"] or not isinstance(params, dict):
         raise mail.MailError("KIND_NOT_ALLOWED_ON_THIS_PC")
+    if kind in AI_WORKER_KINDS and (sys.platform != "darwin" or not isinstance((cfg.get("fleet") or {}).get("ai_worker"), dict)):
+        raise mail.MailError("MAC_WORKER_NOT_CONFIGURED")
     keys = set(params)
     if kind == "diag.wait":
         if keys != {"seconds"} or not isinstance(params["seconds"], int) or not 1 <= params["seconds"] <= 900:
@@ -136,7 +139,8 @@ def validate_local(kind, params, cfg):
                   "fleet.blob_verify": {"store": "STORE", "shard": (0, 63), "shards": (1, 64)},
                   "dev.test_shard": {"suite": "STORE", "commit": "COMMIT", "shard": (0, 63), "shards": (1, 64)},
                   "fleet.gpu_probe": {"mib": (16, 2048)},
-                  "youngmin.qlora_probe": {"seqLen": (64, 2048), "batch": (1, 8), "steps": (1, 20), "rank": (4, 64), "gradCheckpointing": None}}[kind]
+                  "youngmin.qlora_probe": {"seqLen": (64, 2048), "batch": (1, 8), "steps": (1, 20), "rank": (4, 64), "gradCheckpointing": None},
+                  **{k: {} for k in AI_WORKER_KINDS}}[kind]
         if keys != set(bounds):
             raise mail.MailError("INVALID_PARAMS")
         for k, b in bounds.items():
@@ -183,14 +187,22 @@ def run_job(job_dir, cfg):
         params = job["params"]
         if job["kind"] in FLEET_KINDS:
             import rian_fleet_tasks as fleet  # only fleet installs ship it
+            import rian_ai_worker as ai_worker  # fixed Mac worker lifecycle, no relay-supplied command
             f = cfg.get("fleet") or {}
             if f.get("low_priority", True):
                 fleet.lower_priority()  # the PC's own services win over fleet work
             # Checked here, on the PC, at start: the relay's placement used an inventory that may be minutes old.
-            hold = fleet.memory_hold(job["kind"], int(f.get("min_available_mib", 1024)))
+            hold = fleet.memory_hold(job["kind"], int(f.get("min_available_mib", 1024))) if job["kind"] not in ("salpion.worker.status", "salpion.worker.stop") else None
             try:
                 if hold:
                     output = hold
+                elif job["kind"] in AI_WORKER_KINDS:
+                    if job["kind"] == "salpion.worker.status":
+                        output = ai_worker.status(f)
+                    elif job["kind"] == "salpion.worker.start":
+                        output = ai_worker.start(f, progress, cancelled)
+                    else:
+                        output = ai_worker.stop(f)
                 elif job["kind"] == "fleet.inventory":
                     output = fleet.inventory(progress)
                 elif job["kind"] == "fleet.cpu_bench":
@@ -207,6 +219,8 @@ def run_job(job_dir, cfg):
                     output = fleet.gpu_probe(params["mib"], f, progress, cancelled)
                 else:
                     output = fleet.qlora_probe(params, f, progress, cancelled)
+            except ai_worker.WorkerError as err:
+                raise mail.MailError(str(err))
             except fleet.FleetCancelled:
                 raise mail.MailCancelled("CANCELLED")
             except fleet.FleetError as err:

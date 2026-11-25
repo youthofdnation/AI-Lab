@@ -20,8 +20,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 LABEL = "company.rian.commander.v2.agent"
-FILES = ("rian-v2-agent.py", "rian_mail_index.py", "tenant-artifact-agent.py", "rian_fleet_tasks.py", "youngmin_qlora_measure.py")
-KINDS = {"diag.wait", "mail.sync", "mail.search", "mail.read"}
+FILES = ("rian-v2-agent.py", "rian_mail_index.py", "tenant-artifact-agent.py", "rian_fleet_tasks.py", "rian_ai_worker.py", "youngmin_qlora_measure.py")
+AI_KINDS = {"salpion.worker.status", "salpion.worker.start", "salpion.worker.stop"}
+KINDS = {"diag.wait", "mail.sync", "mail.search", "mail.read", "fleet.inventory"} | AI_KINDS
 # launchd respawn delay. The agent heartbeats every <=15 s against a 45 s lease, so a
 # double restart costs at most ~15 s + THROTTLE_SECONDS; 30 s left almost no margin.
 THROTTLE_SECONDS = 10
@@ -89,7 +90,7 @@ def atomic_bytes(path, data, mode=0o600):
             os.unlink(temp)
 
 
-def validate_config(config_path, pp, allow_mail=False):
+def validate_config(config_path, pp, allow_mail=False, allow_ai_worker=False):
     file = Path(config_path).expanduser()
     if file.is_symlink() or not file.is_file():
         raise RuntimeError("CONFIG_FILE_REQUIRED")
@@ -110,6 +111,19 @@ def validate_config(config_path, pp, allow_mail=False):
         raise RuntimeError("INVALID_ALLOWED_KINDS")
     if not allow_mail and (any(k.startswith("mail.") for k in kinds) or cfg.get("mail")):
         raise RuntimeError("MAIL_DISABLED_FOR_MAC_PILOT")
+    if set(kinds) & AI_KINDS:
+        if not allow_ai_worker:
+            raise RuntimeError("AI_WORKER_REQUIRES_EXPLICIT_OPT_IN")
+        if not AI_KINDS <= set(kinds):
+            raise RuntimeError("AI_WORKER_LIFECYCLE_KINDS_REQUIRED")
+        fleet = cfg.get("fleet")
+        if not isinstance(fleet, dict) or not isinstance(fleet.get("denied_hosts"), list) or not fleet["denied_hosts"]:
+            raise RuntimeError("AI_WORKER_FLEET_DENYLIST_REQUIRED")
+        import rian_ai_worker
+        try:
+            rian_ai_worker._spec(fleet, verify_artifacts=True)
+        except rian_ai_worker.WorkerError as exc:
+            raise RuntimeError(str(exc)) from None
     if cfg.get("allow_test_loopback"):
         raise RuntimeError("TEST_LOOPBACK_DENIED")
     state_dir = cfg.get("state_dir")
@@ -167,12 +181,12 @@ def status(pp):
     return state
 
 
-def prepare(config_path, allow_mail=False):
+def prepare(config_path, allow_mail=False, allow_ai_worker=False):
     ensure_macos()
     pp = paths()
     if active_jobs(pp):
         raise RuntimeError("ACTIVE_JOB_JOURNAL_PRESENT_DO_NOT_RESTART")
-    cfg = validate_config(config_path, pp, allow_mail=allow_mail)
+    cfg = validate_config(config_path, pp, allow_mail=allow_mail, allow_ai_worker=allow_ai_worker)
     source = Path(__file__).resolve().parent
     for f in FILES:
         if not (source / f).is_file():
@@ -204,12 +218,13 @@ def prepare(config_path, allow_mail=False):
     # 'prepare' must NOT place a plist in ~/Library/LaunchAgents:
     # launchd would otherwise start it automatically at the next login.
     atomic_bytes(pp["prepared_plist"], plistlib.dumps(plist))
-    return {"prepared": True, "device": cfg["device_id"], "launchd_started": False, "mail_enabled": allow_mail}
+    return {"prepared": True, "device": cfg["device_id"], "launchd_started": False,
+            "mail_enabled": allow_mail, "ai_worker_enabled": bool(set(cfg["allowed_kinds"]) & AI_KINDS)}
 
 
-def install(config_path, allow_mail=False):
+def install(config_path, allow_mail=False, allow_ai_worker=False):
     pp = paths()
-    prepared = prepare(config_path, allow_mail=allow_mail)
+    prepared = prepare(config_path, allow_mail=allow_mail, allow_ai_worker=allow_ai_worker)
     # LaunchAgents is a shared per-user folder; never chmod an existing folder
     # belonging to other applications. Only the RIAN plist is managed here.
     if pp["plist"].parent.is_symlink():
@@ -245,6 +260,7 @@ def main(argv=None):
     parser.add_argument("action", nargs="?", default="status", choices=["status", "prepare", "install", "uninstall"])
     parser.add_argument("--config")
     parser.add_argument("--allow-mail", action="store_true", help="Requires separate owner approval; never use for a diagnostics pilot")
+    parser.add_argument("--allow-ai-worker", action="store_true", help="Opt in to fixed SALPION worker lifecycle kinds; requires local pinned configuration")
     args = parser.parse_args(argv)
     try:
         if args.action == "status":
@@ -254,9 +270,9 @@ def main(argv=None):
         elif not args.config:
             raise RuntimeError("OWNER_CONFIG_REQUIRED")
         elif args.action == "prepare":
-            result = prepare(args.config, args.allow_mail)
+            result = prepare(args.config, args.allow_mail, args.allow_ai_worker)
         else:
-            result = install(args.config, args.allow_mail)
+            result = install(args.config, args.allow_mail, args.allow_ai_worker)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:

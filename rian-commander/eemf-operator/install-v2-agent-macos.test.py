@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """macOS-only tests: no launchd service is started, no network or mailbox is touched."""
 import importlib.util
+import hashlib
 import json
 import os
 import plistlib
@@ -136,6 +137,37 @@ class MacInstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "MAIL_DISABLED_FOR_MAC_PILOT"):
             installer.prepare(self.config)
         self.assertFalse(self.pp["plist"].exists())
+
+    def test_rejects_ai_worker_without_explicit_opt_in_and_local_config(self):
+        self.cfg["allowed_kinds"] = list(installer.AI_KINDS)
+        self.save()
+        with self.assertRaisesRegex(RuntimeError, "AI_WORKER_REQUIRES_EXPLICIT_OPT_IN"):
+            installer.prepare(self.config)
+        with self.assertRaisesRegex(RuntimeError, "AI_WORKER_FLEET_DENYLIST_REQUIRED"):
+            installer.prepare(self.config, allow_ai_worker=True)
+        self.assertFalse(self.pp["plist"].exists())
+
+    def test_ai_worker_opt_in_prepares_only_with_pinned_local_artifacts(self):
+        worker_dir = self.home / "worker"
+        worker_dir.mkdir(mode=0o700)
+        script, weights, bearer = (worker_dir / x for x in ("detector.py", "nano.pth", "bearer"))
+        script.write_text("pass", encoding="utf-8")
+        weights.write_bytes(b"synthetic model fixture")
+        bearer.write_text("b" * 40, encoding="utf-8")
+        bearer.chmod(0o600)
+        digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        self.cfg["allowed_kinds"] = ["fleet.inventory", *sorted(installer.AI_KINDS)]
+        self.cfg["fleet"] = {"denied_hosts": ["DENIED-HOST"], "ai_worker": {
+            "python": sys.executable, "script": str(script), "script_sha256": digest(script),
+            "weights": str(weights), "weights_sha256": digest(weights), "token_file": str(bearer),
+            "state_file": str(worker_dir / "state.json"), "record_file": str(worker_dir / "record.json"),
+            "log_file": str(worker_dir / "worker.log")}}
+        self.save()
+        result = installer.prepare(self.config, allow_ai_worker=True)
+        self.assertTrue(result["ai_worker_enabled"])
+        self.assertFalse(result["launchd_started"])
+        self.assertFalse(self.pp["plist"].exists())
+        self.assertIn("rian_ai_worker.py", {p.name for p in self.pp["agent"].iterdir()})
 
     def test_rejects_insecure_device_token(self):
         self.secret.chmod(0o644)
