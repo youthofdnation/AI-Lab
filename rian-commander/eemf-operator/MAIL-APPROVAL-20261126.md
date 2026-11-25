@@ -35,6 +35,13 @@ deployment of the older staging image therefore does not prove the mail flow.
 - The OAuth gateway forwards only the six named mail methods in addition to
   its existing `rian_v2_*` tools. The original production source and deployed
   service have not been changed.
+- The V2 local agent can select `source.type=outlook_bridge_v1` with an owner-set
+  absolute `root` for the installed Outlook Bridge. It reuses the Bridge's
+  validated ECOUNT configuration and Windows Credential Manager secret in the
+  local process. Neither credential nor raw mailbox batch is returned to the
+  gateway. The agent's `mail.account_fingerprint` must match the Bridge account;
+  `legacy_index` can point to the Bridge's existing local index for seeding.
+  A partial folder fetch fails the sync instead of activating a review grant.
 
 ## Release gates
 
@@ -46,8 +53,10 @@ deployment of the older staging image therefore does not prove the mail flow.
    Mac agent and its existing volume; take a database backup before migration.
 3. Confirm employer approval for ECOUNT mailbox processing and retention.
    Install the V2 agent on EEMFO3L with a device-specific token and mailbox
-   configuration after owner review. Proton requires a separate mailbox profile
-   and authorization; this change does not claim Proton parity.
+   configuration after owner review. The local Outlook Bridge adapter was
+   instantiated on EEMFO3L without reading mail or exposing its credential,
+   but no V2 agent has yet run against that account. Proton requires a separate
+   mailbox profile and authorization; this change does not claim Proton parity.
 4. Deploy the reviewed gateway and V2 server with a recorded rollback deployment,
    reconnect the ChatGPT MCP so the six names appear, and execute the actual
    sync → recent/search → selected read → sent comparison workflow without

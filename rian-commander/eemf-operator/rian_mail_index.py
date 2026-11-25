@@ -23,6 +23,7 @@ import email
 import email.policy
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
@@ -328,10 +329,61 @@ class ImapSource:
         return out[:limit]
 
 
+class OutlookBridgeSource:
+    """Reuse an owner-installed local Bridge and its Windows vault entry; no secret crosses the relay."""
+
+    def __init__(self, root):
+        path = Path(root)
+        if not path.is_absolute() or not path.is_dir() or path.is_symlink():
+            raise MailError("OUTLOOK_BRIDGE_PATH_INVALID")
+        script = path / "outlook_bridge.py"
+        if not script.is_file() or script.is_symlink():
+            raise MailError("OUTLOOK_BRIDGE_PATH_INVALID")
+        spec = importlib.util.spec_from_file_location("rian_owner_outlook_bridge", script)
+        if spec is None or spec.loader is None:
+            raise MailError("OUTLOOK_BRIDGE_PATH_INVALID")
+        bridge = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(bridge)
+            config = bridge.validate_config(bridge.load_json(bridge.CONFIG, {}))
+        except Exception:
+            raise MailError("OUTLOOK_BRIDGE_CONFIG_INVALID") from None
+        if not bridge.secret_present():
+            raise MailError("MAIL_CREDENTIALS_MISSING")
+        self.account = config["username"]
+        self._bridge = bridge
+        self._host, self._port = config["host"], config["port"]
+
+    def fetch_since(self, since, limit):
+        days = min(MAX_SYNC_DAYS, max(1, int((utcnow() - since).total_seconds() // 86400)))
+        try:
+            with self._bridge.imaplib.IMAP4_SSL(self._host, self._port, timeout=25) as imap:
+                imap.login(self.account, self._bridge.get_secret())
+                rows, errors = self._bridge.fetch_imap_messages(imap, days, limit)
+                imap.logout()
+        except Exception:
+            raise MailError("OUTLOOK_BRIDGE_FETCH_FAILED") from None
+        if errors:
+            raise MailError("OUTLOOK_BRIDGE_PARTIAL_FETCH")
+        results = []
+        for row in rows:
+            when = parse_iso(row.get("date"))
+            if when is None or when < since:
+                continue
+            results.append({"message_id": row.get("id"), "date": when, "from": row.get("from"),
+                            "to": row.get("to"), "subject": row.get("subject"), "folder": row.get("folder"),
+                            "body": row.get("body"), "attachments": int(bool(row.get("has_attachments")))})
+        return results[:limit]
+
+
 def source_from_config(cfg):
     kind = (cfg or {}).get("type")
     if kind == "fixture":
         return FixtureSource(cfg["path"], cfg.get("account"))
+    if kind == "outlook_bridge_v1":
+        if set(cfg) != {"type", "root"}:
+            raise MailError("OUTLOOK_BRIDGE_CONFIG_INVALID")
+        return OutlookBridgeSource(cfg["root"])
     if kind == "imap":
         password = None
         if cfg.get("password_env"):

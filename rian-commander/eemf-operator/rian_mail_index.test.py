@@ -201,6 +201,41 @@ class ReadSearchTests(Fixture):
         self.assertEqual(match["reply_check"], "POSSIBLE_REPLY_FOUND")
 
 
+class BridgeAdapterTests(Fixture):
+    def test_local_bridge_adapter_reuses_bounded_read_only_fetch_without_returning_credential(self):
+        bridge_dir = self.root / "bridge"
+        bridge_dir.mkdir()
+        (bridge_dir / "outlook_bridge.py").write_text('''
+from pathlib import Path
+import datetime as dt
+CONFIG = Path(__file__).with_name("config.json")
+def load_json(path, default): return {"username":"synthetic.user@example.test", "host":"mail.example.test", "port":993}
+def validate_config(cfg): return cfg
+def secret_present(): return True
+def get_secret(): return "synthetic-password"
+class FakeImap:
+    def __init__(self, host, port, timeout): self.host=host
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def login(self, user, password): assert password == "synthetic-password"
+    def logout(self): pass
+class imaplib:
+    IMAP4_SSL = FakeImap
+def fetch_imap_messages(imap, days, limit):
+    assert 1 <= days <= 14 and limit <= 1000
+    return ([{"id":"local-id", "date":dt.datetime.now(dt.timezone.utc).isoformat(),
+             "from":"sender@example.test", "to":"synthetic.user@example.test",
+             "subject":"synthetic", "folder":"INBOX", "body":"synthetic body", "has_attachments":False}], [])
+''', "utf-8")
+        source = mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir)})
+        self.assertEqual(source.account, ACCOUNT)
+        result = source.fetch_since(mail.utcnow() - dt.timedelta(days=2), 20)
+        self.assertEqual(len(result), 1)
+        self.assertNotIn("synthetic-password", json.dumps(result, default=str))
+        with self.assertRaisesRegex(mail.MailError, "OUTLOOK_BRIDGE_CONFIG_INVALID"):
+            mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir), "password": "bad"})
+
+
 class FakeImap:
     def __init__(self, raw_messages):
         self.raw, self.calls = raw_messages, []
