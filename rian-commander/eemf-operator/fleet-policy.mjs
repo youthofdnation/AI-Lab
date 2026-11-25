@@ -48,6 +48,7 @@ export class FleetPolicy {
     this.#deniedHosts = new Set(hosts.map(norm));
     this.#deniedIds = new Set(ids.map(norm));
     this.#quarantineKinds = new Set(strList(raw.quarantineKinds || ['fleet.inventory'], /^[a-z][a-z0-9_.]{0,63}$/, 'FLEET_POLICY_INVALID'));
+    if ([...this.#quarantineKinds].some(k => k !== 'fleet.inventory')) throw Error('FLEET_POLICY_QUARANTINE_INVENTORY_ONLY');
     if (!Array.isArray(raw.devices) || !raw.devices.length || raw.devices.length > 32) throw Error('FLEET_POLICY_DEVICES_REQUIRED');
     for (const x of raw.devices) {
       if (!x || typeof x !== 'object' || !ID.test(x.id || '') || !HOST.test(x.hostname || '')) throw Error('FLEET_POLICY_DEVICE_INVALID');
