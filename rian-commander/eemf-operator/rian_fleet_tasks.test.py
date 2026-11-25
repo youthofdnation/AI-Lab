@@ -31,6 +31,17 @@ class CpuBench(unittest.TestCase):
 
 
 class Inventory(unittest.TestCase):
+    def test_windows_gpu_engine_names_and_bounded_samples(self):
+        from unittest.mock import patch
+        rows = [{"pid": 3432, "process": "synthetic-worker", "engine": "cuda", "samples": 4, "peak_pct": 89.6, "path": "not returned"},
+                {"pid": 55, "process": "bad-sample", "engine": "cuda", "samples": 5, "peak_pct": 176.7}]
+        with patch.object(F, "_ps", return_value={"rows": rows, "sampled": 10}):
+            result = F.windows_gpu_engines()
+        self.assertEqual(result["status"], "MEASURED")
+        self.assertEqual(result["rows"], [{"pid": 3432, "process": "synthetic-worker", "engine": "cuda", "samples": 4, "peak_pct": 89.6}])
+        with patch.object(F, "_ps", return_value=None):
+            self.assertEqual(F.windows_gpu_engines()["status"], "UNAVAILABLE")
+
     def test_nvidia_reports_measured_free_memory_not_a_guess(self):
         from unittest.mock import patch
         rows = "0, Test GPU, 6144, 2000, 4000, 12, 55, 572.83\n1, Unknown GPU, 8192, N/A, N/A, N/A, N/A, 572.83\n"
@@ -81,6 +92,15 @@ class AgentConfig(unittest.TestCase):
         p = Path(d) / "agent.json"
         p.write_text(json.dumps(c), "utf-8")
         return p
+
+    def test_local_quarantine_never_runs_non_inventory(self):
+        fleet = {"denied_hosts": ["SOME-OTHER-PC"], "quarantined": True}
+        with self.assertRaisesRegex(SystemExit, "CONFIG_QUARANTINE_INVENTORY_ONLY"):
+            A.load_config(self.cfg(fleet=fleet, allowed_kinds=["fleet.inventory", "diag.wait"]))
+        cfg = A.load_config(self.cfg(fleet=fleet))
+        A.validate_local("fleet.inventory", {}, cfg)
+        with self.assertRaisesRegex(A.mail.MailError, "LOCAL_QUARANTINE_INVENTORY_ONLY"):
+            A.validate_local("diag.wait", {"seconds": 1}, dict(cfg, allowed_kinds=["diag.wait"]))
 
     def test_fleet_kinds_need_this_pcs_own_denylist(self):
         with self.assertRaises(SystemExit) as e:
