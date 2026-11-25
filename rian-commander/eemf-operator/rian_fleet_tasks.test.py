@@ -42,9 +42,22 @@ class Inventory(unittest.TestCase):
         with patch.object(F, "_ps", return_value=None):
             self.assertEqual(F.windows_gpu_engines()["status"], "UNAVAILABLE")
 
+    def test_two_gpu_processes_are_not_attributed_to_gpu_zero(self):
+        from unittest.mock import patch
+        rows = "0, A100 test, 81920, 70000, 11000, 95, 70, 560.94, GPU-a\n1, A100 test, 81920, 1000, 80000, 2, 30, 560.94, GPU-b\n"
+        apps = "GPU-a, 42, protected-service, 70000\nGPU-b, 43, research-worker, 1000\n"
+        with patch.object(F.shutil, "which", return_value="nvidia-smi"), patch.object(F, "_run", side_effect=[rows, apps, "CUDA Version: 12.6"]):
+            result = F.nvidia_gpus()
+        first, second = result["gpus"]
+        self.assertEqual(first["compute_processes"], ["protected-service"])
+        self.assertEqual(second["compute_processes"], ["research-worker"])
+        self.assertTrue(first["compute_processes_known"] and second["compute_processes_known"])
+        with patch.object(F.shutil, "which", return_value="nvidia-smi"), patch.object(F, "_run", side_effect=[rows, None, ""]):
+            self.assertTrue(all(not g["compute_processes_known"] for g in F.nvidia_gpus()["gpus"]))
+
     def test_nvidia_reports_measured_free_memory_not_a_guess(self):
         from unittest.mock import patch
-        rows = "0, Test GPU, 6144, 2000, 4000, 12, 55, 572.83\n1, Unknown GPU, 8192, N/A, N/A, N/A, N/A, 572.83\n"
+        rows = "0, Test GPU, 6144, 2000, 4000, 12, 55, 572.83, GPU-test0\n1, Unknown GPU, 8192, N/A, N/A, N/A, N/A, 572.83, GPU-test1\n"
         with patch.object(F.shutil, "which", return_value="nvidia-smi"), patch.object(F, "_run", side_effect=[rows, "", "CUDA Version: 12.8"]) as run:
             result = F.nvidia_gpus()
         self.assertIn("memory.free", run.call_args_list[0].args[0][1])
