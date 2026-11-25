@@ -15,6 +15,7 @@ export function fleetToolDefs(queue) {
     ramMiB: {type: 'integer', minimum: 0}, vramMiB: {type: 'integer', minimum: 0}, dataClass: {type: 'string', enum: ['public', 'synthetic', 'private']}},
   required: ['kind'], additionalProperties: false};
   return [
+    {name: 'rian_v2_request_inventory', description: 'Request a fixed read-only CPU/RAM/GPU and Windows GPU-engine process inventory for one registered PC. Returns job ID and browser approval URL unless an exact-scope grant already exists. No arbitrary commands, no files, no process termination.', inputSchema: {type:'object', properties:{device:{type:'string',minLength:1,maxLength:80},request_key:{type:'string',pattern:'^[A-Za-z0-9_-]{16,80}$'}},required:['device'],additionalProperties:false}},
     {name: 'rian_v2_fleet_status', description: 'RIAN AI Fleet: every pool PC with its status (ACTIVE / QUARANTINED), online state, the latest read-only inventory (CPU, RAM, GPU, disk, encryption, runtimes) and the jobs currently reserving it. Denylisted PCs never appear. Read only.',
       inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
     {name: 'rian_v2_fleet_recommend', description: 'RIAN AI Fleet: rank the PCs that could take a job of this kind and size right now (fresh inventory minus reservations, concurrency, GPU slots, protected GPU processes, data class), with the reason each other PC was skipped. Starts nothing.',
@@ -48,7 +49,7 @@ export function fleetStatus(queue, actor, now) {
   return {denylist_entries: p.denylistEntries, devices: p.devices.map((d) => {
     const i = inv.get(d.id), s = i && i.snapshot;
     return {...d, online: online.get(d.id)?.online === true, last_seen: online.get(d.id)?.last_seen || null,
-      inventory: s ? {captured: i.captured, age_seconds: now - i.captured, host: s.host, os: s.os, cpu: s.cpu, ram: s.ram,
+      inventory: s ? {gpu_engines: s.gpu_engines ?? null, captured: i.captured, age_seconds: now - i.captured, host: s.host, os: s.os, cpu: s.cpu, ram: s.ram,
         gpus: s.gpus, disks: s.disks, encryption: s.encryption, runtimes: s.runtimes, ai_processes: s.ai_processes} : null,
       reservations: active.filter((a) => a.device === d.id)};
   })};

@@ -105,6 +105,12 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   async function callTool(actor,name,args,clientRef){
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('INVALID_ARGUMENTS');
     if(name==='rian_v2_devices'){exact(args,[]);return {devices:queue.devices(actor)};}
+    if(name==='rian_v2_request_inventory'){
+      if(!queue.fleet)throw Error('UNKNOWN_TOOL');
+      exact(args,['device','request_key'],['device']);
+      if(typeof args.device!=='string'||args.device==='auto'||!args.device.length||args.device.length>80)throw Error('INVALID_ARGUMENTS');
+      return withApproval(queue.request({actor,deviceId:args.device,kind:'fleet.inventory',params:{},requestKey:args.request_key,clientRef}));
+    }
     if(name==='rian_v2_start_job'){
       exact(args,['device','kind','params','request_key',...(queue.fleet?['fleet']:[])],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');

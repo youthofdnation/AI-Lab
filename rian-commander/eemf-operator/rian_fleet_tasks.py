@@ -79,29 +79,35 @@ def nvidia_gpus():
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
-    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version",
+    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version,uuid",
                 "--format=csv,noheader,nounits"])
     if out is None:
         return None
-    apps = _run([exe, "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"]) or ""
+    apps = _run([exe, "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"])
     head = _run([exe]) or ""
     cuda = re.search(r"CUDA Version:\s*([\d.]+)", head)
     gpus = []
+    by_uuid = {}
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) < 8 or not f[0].isdigit():
+        if len(f) != 9 or not f[0].isdigit():
             continue
         gpus.append({"index": int(f[0]), "name": f[1], "vram_total_mib": _num(f[2]), "vram_used_mib": _num(f[3]),
                      "vram_free_mib": _num(f[4]), "util_pct": _num(f[5]), "temp_c": _num(f[6]), "driver": f[7], "cuda_driver_api": cuda.group(1) if cuda else None,
-                     "compute_processes": []})
+                     "compute_processes": [], "compute_processes_known": apps is not None})
+        by_uuid[f[8]] = gpus[-1]
     pids = []
-    for line in apps.strip().splitlines():
+    for line in (apps or "").strip().splitlines():
         f = [x.strip() for x in line.split(",")]
         if len(f) >= 3:
             name = re.split(r"[\\/]", f[2])[-1] if f[2] and "[" not in f[2] else "UNREADABLE"
             pids.append(f[1])
-            for g in gpus[:1]:
-                g["compute_processes"].append(name)
+            if f[0] in by_uuid:
+                by_uuid[f[0]]["compute_processes"].append(name)
+            else:
+                # Unknown association: never pretend it belongs to GPU 0.
+                for g in gpus:
+                    g["compute_processes_known"] = False
     return {"gpus": gpus, "pids": pids}
 
 
@@ -171,6 +177,44 @@ def _encryption(disks):
     return {}
 
 
+# Windows WDDM can omit active CUDA jobs from nvidia-smi's process table.
+GPU_ENGINE_PS = r"""
+$ErrorActionPreference = 'Stop'
+$samples = @(Get-Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 5 |
+  ForEach-Object { $_.CounterSamples })
+$rows = @($samples | Where-Object { $_.CookedValue -ge 1 -and $_.CookedValue -le 100 } |
+  Group-Object InstanceName | ForEach-Object {
+    $n = $_.Name
+    if ($n -match '^pid_(\d+)_.*_engtype_(.+)$') {
+      $processId = [int]$Matches[1]; $engine = $Matches[2]
+      $p = Get-Process -Id $processId -ErrorAction SilentlyContinue
+      [ordered]@{ pid = $processId; process = if ($p) { $p.ProcessName } else { $null }
+        engine = $engine; samples = $_.Count; peak_pct = [math]::Round(($_.Group | Measure-Object CookedValue -Maximum).Maximum, 1) }
+    }
+  } | Sort-Object peak_pct -Descending | Select-Object -First 20)
+[ordered]@{ rows = $rows; sampled = $samples.Count }
+"""
+
+
+def windows_gpu_engines():
+    """Fixed, bounded read-only query; no caller-provided command, path or PID."""
+    data = _ps(GPU_ENGINE_PS, timeout=20)
+    if not isinstance(data, dict) or not isinstance(data.get("rows"), list) or not isinstance(data.get("sampled"), int) or data["sampled"] < 1:
+        return {"status": "UNAVAILABLE", "rows": []}
+    rows = []
+    for row in data["rows"][:20]:
+        if not isinstance(row, dict):
+            continue
+        pid, peak, count = row.get("pid"), _num(row.get("peak_pct")), row.get("samples")
+        if type(pid) is not int or pid < 0 or peak is None or not 1 <= peak <= 100 or type(count) is not int or not 1 <= count <= 5:
+            continue
+        name, engine = row.get("process"), row.get("engine")
+        rows.append({"pid": pid, "process": name[:128] if isinstance(name, str) else None,
+                     "engine": engine[:64] if isinstance(engine, str) else None,
+                     "samples": count, "peak_pct": peak})
+    return {"status": "MEASURED", "rows": rows, "sampled": data["sampled"]}
+
+
 def inventory(progress):
     progress(stage="cpu", percent=5)
     snap = {"host": socket.gethostname(), "os": {"system": platform.system(), "release": platform.release(),
@@ -208,6 +252,8 @@ def inventory(progress):
                         for i in items]
     else:
         snap["gpus"] = []
+    if WIN:
+        snap["gpu_engines"] = windows_gpu_engines()
     progress(stage="disk", percent=60)
     snap["disks"] = _disks()
     snap["encryption"] = _encryption(snap["disks"])
