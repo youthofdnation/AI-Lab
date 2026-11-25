@@ -79,29 +79,35 @@ def nvidia_gpus():
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
-    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version",
+    out = _run([exe, "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version,uuid",
                 "--format=csv,noheader,nounits"])
     if out is None:
         return None
-    apps = _run([exe, "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"]) or ""
+    apps = _run([exe, "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"])
     head = _run([exe]) or ""
     cuda = re.search(r"CUDA Version:\s*([\d.]+)", head)
     gpus = []
+    by_uuid = {}
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) < 8 or not f[0].isdigit():
+        if len(f) != 9 or not f[0].isdigit():
             continue
         gpus.append({"index": int(f[0]), "name": f[1], "vram_total_mib": _num(f[2]), "vram_used_mib": _num(f[3]),
                      "vram_free_mib": _num(f[4]), "util_pct": _num(f[5]), "temp_c": _num(f[6]), "driver": f[7], "cuda_driver_api": cuda.group(1) if cuda else None,
-                     "compute_processes": []})
+                     "compute_processes": [], "compute_processes_known": apps is not None})
+        by_uuid[f[8]] = gpus[-1]
     pids = []
-    for line in apps.strip().splitlines():
+    for line in (apps or "").strip().splitlines():
         f = [x.strip() for x in line.split(",")]
         if len(f) >= 3:
             name = re.split(r"[\\/]", f[2])[-1] if f[2] and "[" not in f[2] else "UNREADABLE"
             pids.append(f[1])
-            for g in gpus[:1]:
-                g["compute_processes"].append(name)
+            if f[0] in by_uuid:
+                by_uuid[f[0]]["compute_processes"].append(name)
+            else:
+                # Unknown association: never pretend it belongs to GPU 0.
+                for g in gpus:
+                    g["compute_processes_known"] = False
     return {"gpus": gpus, "pids": pids}
 
 
