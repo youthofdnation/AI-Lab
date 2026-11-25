@@ -80,6 +80,8 @@ def load_config(path):
         # Fleet work needs this PC's own copy of the denylist: fail closed without one.
         if not isinstance(f, dict) or not isinstance(f.get("denied_hosts"), list) or not f["denied_hosts"]:
             raise SystemExit("CONFIG_FLEET_DENYLIST_REQUIRED")
+    if (cfg.get("fleet") or {}).get("quarantined") is True and set(cfg["allowed_kinds"]) != {"fleet.inventory"}:
+        raise SystemExit("CONFIG_QUARANTINE_INVENTORY_ONLY")
     assert_host_allowed(cfg)
     return cfg
 
@@ -110,6 +112,8 @@ def device_token(cfg):
 
 def validate_local(kind, params, cfg):
     """Second, independent allowlist on the PC (defence against a compromised relay)."""
+    if (cfg.get("fleet") or {}).get("quarantined") is True and kind != "fleet.inventory":
+        raise mail.MailError("LOCAL_QUARANTINE_INVENTORY_ONLY")
     if kind not in cfg["allowed_kinds"] or not isinstance(params, dict):
         raise mail.MailError("KIND_NOT_ALLOWED_ON_THIS_PC")
     keys = set(params)
