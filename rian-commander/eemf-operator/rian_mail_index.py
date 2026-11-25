@@ -409,14 +409,14 @@ def _legacy_entries(data):
     return data
 
 
-def seed_from_legacy(path, account_fp, expected_account_field=None):
+def seed_from_legacy(path, account_fp, expected_account_field=None, bodies=None):
     """Read-only import of an older JSON index. Returns {id: metadata}. Never writes the legacy file."""
     try:
         data = json.loads(Path(path).read_text("utf-8"))
     except (OSError, UnicodeError, ValueError):
         raise MailError("LEGACY_INDEX_UNREADABLE") from None
-    if expected_account_field and isinstance(data, dict) and data.get("account"):
-        if account_fingerprint(str(data["account"])) != account_fp:
+    if expected_account_field:
+        if not isinstance(data, dict) or not data.get("account") or account_fingerprint(str(data["account"])) != account_fp:
             raise MailError("ACCOUNT_MISMATCH")
     out = {}
     for entry in _legacy_entries(data):
@@ -433,7 +433,10 @@ def seed_from_legacy(path, account_fp, expected_account_field=None):
             continue
         key = message_key(account_fp, pick["id"], when, pick["from"], pick["subject"])
         out[key] = {"date": iso(when), "from": _clip(pick["from"], 200), "subject": _clip(pick["subject"], 300),
-                    "folder": _clip(entry.get("folder", "INBOX"), 100), "size": 0, "attachments": 0, "legacy": True}
+                    "folder": _clip(entry.get("folder", "INBOX"), 100), "to": _clip(entry.get("to"), 300),
+                    "size": 0, "attachments": 0, "legacy": True}
+        if bodies is not None and isinstance(entry.get("body"), str) and entry["body"]:
+            bodies[key] = entry["body"]
     return out
 
 
@@ -459,11 +462,20 @@ def sync(data_dir, source, days, max_messages, *, now=None, legacy_index=None, p
         seeded = 0
         if index is not None and index["account"] != account_fp:
             raise MailError("ACCOUNT_MISMATCH")
+        legacy_bodies = {}
+        legacy_meta = seed_from_legacy(legacy_index, account_fp, expected_account_field=True,
+                                       bodies=legacy_bodies) if legacy_index else {}
         if index is None:
             index = {"version": INDEX_VERSION, "account": account_fp, "created_at": iso(now), "messages": {}}
-            if legacy_index:
-                index["messages"] = seed_from_legacy(legacy_index, account_fp, expected_account_field=True)
-                seeded = len(index["messages"])
+            index["messages"] = legacy_meta
+            seeded = len(legacy_meta)
+        else:
+            # Older V2 imports omitted recipients. Restore only missing metadata
+            # from the same-account local legacy index, including older messages
+            # outside this sync window.
+            for key, old in legacy_meta.items():
+                if key in index["messages"] and not index["messages"][key].get("to") and old.get("to"):
+                    index["messages"][key]["to"] = old["to"]
         before = len(index["messages"])
         progress(stage="fetching", percent=5)
         fetched = source.fetch_since(now - dt.timedelta(days=days), max_messages)
@@ -472,13 +484,19 @@ def sync(data_dir, source, days, max_messages, *, now=None, legacy_index=None, p
             if should_cancel():
                 raise MailCancelled("CANCELLED")
             key = message_key(account_fp, m.get("message_id"), m["date"], m.get("from"), m.get("subject"))
+            body = m.get("body") or legacy_bodies.get(key, "")
             if key in index["messages"]:
                 unchanged += 1
-                if not store.has_body(key):
-                    store.put_body(key, m.get("body", ""))
+                if not index["messages"][key].get("to"):
+                    recipient = _clip(m.get("to"), 300)
+                    if recipient:
+                        index["messages"][key]["to"] = recipient
+                body_path = store.body_path(key)
+                if not body_path.is_file() or (body and body_path.stat().st_size == 0):
+                    store.put_body(key, body)
                     backfilled += 1
             else:
-                store.put_body(key, m.get("body", ""))
+                store.put_body(key, body)
                 index["messages"][key] = {"date": iso(m["date"]), "from": _clip(m.get("from"), 200), "subject": _clip(m.get("subject"), 300),
                                           "folder": _clip(m.get("folder", "INBOX"), 100), "to": _clip(m.get("to"), 300), "size": int(m.get("size", 0)),
                                           "attachments": int(m.get("attachments", 0))}

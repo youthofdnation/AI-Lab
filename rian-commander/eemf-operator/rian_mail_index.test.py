@@ -79,6 +79,32 @@ class SyncTests(Fixture):
             with self.assertRaises(mail.MailError):
                 mail.sync(self.data, self.source([]), *bad, now=NOW)
 
+    def test_legacy_recipient_and_body_repair_without_changing_legacy_index(self):
+        entry = {"id": "<legacy-1@example.test>", "date": mail.iso(NOW), "from": "sender@example.test",
+                 "to": ACCOUNT, "subject": "합성 점검 요청", "folder": "INBOX", "body": "LEGACY SYNTHETIC BODY"}
+        legacy_path = self.root / "legacy-index.json"
+        legacy_path.write_text(json.dumps({"account": ACCOUNT, "messages": [entry]}), "utf-8")
+        legacy_before = legacy_path.read_bytes()
+        fetched = [{"message_id": None, "date": entry["date"], "from": entry["from"],
+                    "to": "", "subject": entry["subject"], "folder": "INBOX", "body": ""}]
+        source = self.source(fetched)
+        mail.sync(self.data, source, 14, 10, now=NOW, legacy_index=legacy_path)
+        store = mail.MailStore(self.data)
+        key = next(iter(store.load()["messages"]))
+        self.assertEqual(store.load()["messages"][key]["to"], ACCOUNT)
+        self.assertEqual(mail.read_message(self.data, key)["body"], entry["body"])
+        # Simulate the already-deployed V2 index that lost both fields.
+        index = store.load()
+        index["messages"][key].pop("to")
+        store.save(index)
+        store.put_body(key, "")
+        repaired = mail.sync(self.data, source, 14, 10, now=NOW + dt.timedelta(hours=1), legacy_index=legacy_path)
+        self.assertEqual(repaired["bodies_backfilled"], 1)
+        self.assertEqual(store.load()["messages"][key]["to"], ACCOUNT)
+        self.assertEqual(mail.read_message(self.data, key)["body"], entry["body"])
+        self.assertEqual(len(mail.search(self.data, "점검", recipient=ACCOUNT)["results"]), 1)
+        self.assertEqual(legacy_path.read_bytes(), legacy_before)
+
     def test_account_mismatch_stops_before_any_write(self):
         mail.sync(self.data, self.source(synthetic_mailbox(5, 1)), 14, 100, now=NOW)
         before = (self.data / "index.json").read_bytes()
@@ -92,9 +118,10 @@ class SyncTests(Fixture):
 
     def test_legacy_index_for_other_account_is_refused(self):
         legacy = self.root / "legacy.json"
-        legacy.write_text(json.dumps({"account": "other@example.test", "messages": []}), "utf-8")
-        with self.assertRaisesRegex(mail.MailError, "ACCOUNT_MISMATCH"):
-            mail.sync(self.data, self.source([]), 14, 10, now=NOW, legacy_index=legacy)
+        for data in ({"account": "other@example.test", "messages": []}, {"messages": []}):
+            legacy.write_text(json.dumps(data), "utf-8")
+            with self.assertRaisesRegex(mail.MailError, "ACCOUNT_MISMATCH"):
+                mail.sync(self.data, self.source([]), 14, 10, now=NOW, legacy_index=legacy)
         self.assertFalse((self.data / "index.json").exists())
 
     def test_cancel_leaves_previous_index_intact(self):
