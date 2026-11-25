@@ -52,6 +52,13 @@ class Base(unittest.TestCase):
 
 
 class AllowlistTests(Base):
+    def test_outlook_bridge_requires_local_account_pin_for_every_mail_kind(self):
+        self.cfg["mail"]["source"] = {"type": "outlook_bridge_v1", "root": str(self.root)}
+        with self.assertRaisesRegex(agent.mail.MailError, "MAIL_ACCOUNT_PIN_REQUIRED"):
+            agent.validate_local("mail.search", {"query": "invoice"}, self.cfg)
+        self.cfg["mail"]["account_fingerprint"] = "a" * 64
+        agent.validate_local("mail.search", {"query": "invoice"}, self.cfg)
+
     def test_local_allowlist_is_independent_of_the_relay(self):
         for kind, params in [("mail.sync", {"days": 1, "maxMessages": 1}), ("diag.wait", {"seconds": 0}), ("diag.wait", {"seconds": 5, "argv": ["cmd"]}),
                              ("mail.search", {"query": "x", "cwd": "C:/"}), ("shell", {}), ("mail.read", {"messageId": "a" * 40})]:

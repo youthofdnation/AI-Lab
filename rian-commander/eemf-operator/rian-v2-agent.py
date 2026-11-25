@@ -89,6 +89,11 @@ def validate_local(kind, params, cfg):
     """Second, independent allowlist on the PC (defence against a compromised relay)."""
     if kind not in cfg["allowed_kinds"] or not isinstance(params, dict):
         raise mail.MailError("KIND_NOT_ALLOWED_ON_THIS_PC")
+    mcfg = cfg.get("mail") or {}
+    source = mcfg.get("source") or {}
+    if kind.startswith("mail.") and isinstance(source, dict) and source.get("type") == "outlook_bridge_v1":
+        if not re.fullmatch(r"[a-f0-9]{64}", str(mcfg.get("account_fingerprint", ""))):
+            raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
     keys = set(params)
     if kind == "diag.wait":
         if keys != {"seconds"} or not isinstance(params["seconds"], int) or not 1 <= params["seconds"] <= 900:
