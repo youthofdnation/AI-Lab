@@ -449,19 +449,50 @@ def sync(data_dir, source, days, max_messages, *, now=None, legacy_index=None, p
         store.release()
 
 
-def search(data_dir, query, limit=20):
+def validate_search_params(query, limit=20, offset=0, since=None, until=None, sender=None, recipient=None, folder=None):
     if not isinstance(query, str) or not query.strip() or len(query) > 120 or query.startswith("-") or re.search(r"[\x00-\x1f\x7f]", query):
         raise MailError("INVALID_SEARCH")
-    limit = _bounded_int(limit, 1, 20, "INVALID_LIMIT")
-    index = MailStore(data_dir).load()
+    _bounded_int(limit, 1, 20, "INVALID_LIMIT")
+    _bounded_int(offset, 0, 500, "INVALID_OFFSET")
+    for value in (sender, recipient, folder):
+        if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 120 or re.search(r"[\x00-\x1f\x7f]", value)):
+            raise MailError("INVALID_FILTER")
+    for value in (since, until):
+        if value is not None and (not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d)", value) or parse_iso(value) is None):
+            raise MailError("INVALID_DATE")
+    if since is not None and until is not None and parse_iso(since) > parse_iso(until):
+        raise MailError("INVALID_DATE")
+
+
+def search(data_dir, query, limit=20, offset=0, since=None, until=None, sender=None, recipient=None, folder=None, *, expected_account_fingerprint=None):
+    validate_search_params(query, limit, offset, since, until, sender, recipient, folder)
+    index = verify_mail_account(data_dir, expected_account_fingerprint) if expected_account_fingerprint is not None else MailStore(data_dir).load()
     if index is None:
         raise MailError("INDEX_NOT_FOUND")
     needle = query.strip().lower()
-    hits = [(k, v) for k, v in index["messages"].items() if needle in (v.get("subject", "") + " " + v.get("from", "")).lower()]
+    hits = []
+    for key, meta in index["messages"].items():
+        if needle not in (str(meta.get("subject", "")) + " " + str(meta.get("from", ""))).lower():
+            continue
+        date = parse_iso(meta.get("date"))
+        if since is not None and (date is None or date < parse_iso(since)):
+            continue
+        if until is not None and (date is None or date > parse_iso(until)):
+            continue
+        if sender is not None and sender.casefold() not in str(meta.get("from", "")).casefold():
+            continue
+        if recipient is not None and recipient.casefold() not in str(meta.get("to", "")).casefold():
+            continue
+        if folder is not None and folder.casefold() != str(meta.get("folder", "")).casefold():
+            continue
+        hits.append((key, meta))
     hits.sort(key=lambda kv: kv[1].get("date", ""), reverse=True)
-    return {"ok": True, "query": query, "count": len(hits), "results": [
-        {"message_id": k, "date": v.get("date"), "from": v.get("from"), "subject": v.get("subject"), "folder": v.get("folder")}
-        for k, v in hits[:limit]], "bodies_included": False}
+    return {"ok": True, "query": query, "count": len(hits), "offset": offset,
+            "next_offset": offset + limit if offset + limit < len(hits) and offset + limit <= 500 else None,
+            "results": [{"message_id": k, "date": v.get("date"), "from": v.get("from"), "to": v.get("to"),
+                         "subject": v.get("subject"), "folder": v.get("folder")} for k, v in hits[offset:offset + limit]],
+            "updated_at": index.get("updated_at"), "synced_at": index.get("updated_at"),
+            "bodies_included": False, "mailbox_modified": False}
 
 
 def _mail_direction(folder):
@@ -503,6 +534,7 @@ def status(data_dir, *, expected_account_fingerprint):
         counts[_mail_direction(meta.get("folder"))] += 1
     return {"ok": True, "index_exists": index is not None, "messages": len(messages),
             "updated_at": index.get("updated_at") if index is not None else None,
+            "synced_at": index.get("updated_at") if index is not None else None,
             "folder_counts": counts, "recipient_metadata_available": sum(bool(v.get("to")) for v in messages.values()),
             "mailbox_modified": False, "bodies_included": False}
 
@@ -541,9 +573,40 @@ def recent(data_dir, days, limit=20, offset=0, folder="all", sender=None, recipi
     return {"ok": True, "days": days, "count": len(matches), "offset": offset,
             "next_offset": offset + limit if offset + limit < len(matches) and offset + limit <= 1000 else None,
             "results": [item[2] for item in page], "updated_at": index.get("updated_at"),
+            "synced_at": index.get("updated_at"),
             "unknown_recipient_count": unknown_recipient, "unknown_folder_count": unknown_folder,
             "pagination_limit": 1000, "bodies_included": False, "mailbox_modified": False,
             "pending_status": "NOT_DETERMINED_METADATA_ONLY"}
+
+
+def review_pending(data_dir, days, limit=20, offset=0, *, expected_account_fingerprint, now=None):
+    validate_recent_params(days, limit, offset)
+    index = verify_mail_account(data_dir, expected_account_fingerprint)
+    sent = []
+    for meta in index["messages"].values():
+        if _mail_direction(meta.get("folder")) == "sent":
+            sent.append((parse_iso(meta.get("date")), str(meta.get("subject", "")).casefold()))
+    def subject(value):
+        return re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", str(value or "").strip(), flags=re.I).casefold()
+    # This is only a candidate list: matching subjects do not prove a reply.
+    matches = []
+    for key, meta in index["messages"].items():
+        if _mail_direction(meta.get("folder")) != "inbox":
+            continue
+        received = parse_iso(meta.get("date"))
+        current = now or utcnow()
+        if received is None or not current - dt.timedelta(days=days) <= received <= current + dt.timedelta(minutes=5):
+            continue
+        matched = bool(sent) and any(d is not None and d >= received and subject(s) == subject(meta.get("subject")) for d, s in sent)
+        matches.append((received, key, {"message_id": key, "date": meta.get("date"), "from": meta.get("from"),
+                                       "to": meta.get("to"), "subject": meta.get("subject"),
+                                       "reply_check": "POSSIBLE_REPLY_FOUND" if matched else "REVIEW_CANDIDATE" if sent else "SENT_NOT_INDEXED"}))
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return {"ok": True, "count": len(matches), "offset": offset,
+            "next_offset": offset + limit if offset + limit < len(matches) and offset + limit <= 1000 else None,
+            "results": [item[2] for item in matches[offset:offset + limit]], "sent_folder_indexed": bool(sent),
+            "updated_at": index.get("updated_at"), "bodies_included": False, "mailbox_modified": False,
+            "heuristic_only": True, "pending_status": "CANDIDATES_ONLY" if sent else "SENT_NOT_INDEXED"}
 
 
 def read_message(data_dir, message_id, max_bytes=MAX_BODY_RETURN_BYTES):

@@ -56,7 +56,16 @@ export function hashApprovalPassword(password,saltHex=randomBytes(16).toString('
 
 function tools(kinds){
   const kindNames=kinds.names();
-  return [
+  const mailTools=[
+    {name:'mail_status',description:'Check the selected PC local mail index count, folders and latest sync time. Returns a job ID; approval depends on the device grant.',inputSchema:{type:'object',properties:{device:{type:'string'},request_key:{type:'string'}},required:['device'],additionalProperties:false}},
+    {name:'mail_sync',description:'Sync the approved work mailbox read only, then poll rian_v2_job_status. A bounded review approval can cover subsequent mail queries.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},max_messages:{type:'integer'},request_key:{type:'string'}},required:['device','days','max_messages'],additionalProperties:false}},
+    {name:'mail_search',description:'Search local work mail metadata with pagination, date range and sender/recipient filters. No body is returned.',inputSchema:{type:'object',properties:{device:{type:'string'},query:{type:'string'},limit:{type:'integer'},offset:{type:'integer'},since:{type:'string'},until:{type:'string'},sender:{type:'string'},recipient:{type:'string'},folder:{type:'string'},request_key:{type:'string'}},required:['device','query'],additionalProperties:false}},
+    {name:'mail_read',description:'Read one selected local message body; requires its own approval unless the current bounded review grant explicitly includes recent searched messages.',inputSchema:{type:'object',properties:{device:{type:'string'},message_id:{type:'string'},request_key:{type:'string'}},required:['device','message_id'],additionalProperties:false}},
+    {name:'mail_recent',description:'Page through recent local work mail metadata, with folder, sender, recipient and query filters. No body is returned.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},limit:{type:'integer'},offset:{type:'integer'},folder:{type:'string'},sender:{type:'string'},recipient:{type:'string'},query:{type:'string'},request_key:{type:'string'}},required:['device','days'],additionalProperties:false}},
+    {name:'mail_review_pending',description:'Compare recent Inbox subjects with indexed Sent subjects. Returns review candidates only; an absent Sent index is reported as unknown.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},limit:{type:'integer'},offset:{type:'integer'},request_key:{type:'string'}},required:['device','days'],additionalProperties:false}}
+  ];
+  const kindForTool={mail_status:'mail.status',mail_sync:'mail.sync',mail_search:'mail.search',mail_read:'mail.read',mail_recent:'mail.recent',mail_review_pending:'mail.review_pending'};
+  return [...mailTools.filter(t=>kindNames.includes(kindForTool[t.name])),
     {name:'rian_v2_devices',description:'List this tenant\'s registered PCs and whether each V2 agent is online. Read only.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
     {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If no exact-scope standing grant exists, the result contains approval_url for the owner to approve once in a browser. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
       inputSchema:{type:'object',properties:{device:{type:'string'},kind:{type:'string',enum:kindNames},params:{type:'object'},request_key:{type:'string',pattern:'^[A-Za-z0-9_-]{16,80}$'}},required:['device','kind','params'],additionalProperties:false}},
@@ -103,6 +112,18 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   async function callTool(actor,name,args,clientRef){
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('INVALID_ARGUMENTS');
     if(name==='rian_v2_devices'){exact(args,[]);return {devices:queue.devices(actor)};}
+    const mailSpec={mail_status:['mail.status',[]],mail_sync:['mail.sync',['days','max_messages']],
+      mail_search:['mail.search',['query','limit','offset','since','until','sender','recipient','folder']],
+      mail_read:['mail.read',['message_id']],mail_recent:['mail.recent',['days','limit','offset','folder','sender','recipient','query']],
+      mail_review_pending:['mail.review_pending',['days','limit','offset']]}[name];
+    if(mailSpec){
+      const [kind,fields]=mailSpec;
+      if(!queue.kinds.names().includes(kind))throw Error('UNKNOWN_TOOL');
+      exact(args,['device','request_key',...fields],['device',...({mail_sync:['days','max_messages'],mail_search:['query'],mail_read:['message_id'],mail_recent:['days'],mail_review_pending:['days']}[name]||[])]);
+      if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
+      const params=Object.fromEntries(fields.filter(k=>args[k]!==undefined).map(k=>[k==='max_messages'?'maxMessages':k==='message_id'?'messageId':k,args[k]]));
+      return withApproval(queue.request({actor,deviceId:args.device,kind,params,requestKey:args.request_key,clientRef}));
+    }
     if(name==='rian_v2_start_job'){
       exact(args,['device','kind','params','request_key'],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');

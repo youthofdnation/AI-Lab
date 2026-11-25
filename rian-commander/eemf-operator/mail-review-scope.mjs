@@ -11,7 +11,7 @@ import {createHash} from 'node:crypto';
 export const REVIEW_LIMITS=Object.freeze({
   maxMinutes:60,maxExtraJobs:60,maxBodyReads:20,maxSyncDays:14,maxSyncMessages:1000,maxSearchHits:20
 });
-export const MAIL_REVIEW_KINDS=Object.freeze(['mail.sync','mail.search','mail.read','mail.status','mail.recent']);
+export const MAIL_REVIEW_KINDS=Object.freeze(['mail.sync','mail.search','mail.read','mail.status','mail.recent','mail.review_pending']);
 const HEXID=/^[a-f0-9]{20,64}$/;
 const CLIENT=/^[a-f0-9]{16,64}$/;
 const within=(v,lower,upper)=>Number.isInteger(v)&&v>=lower&&v<=upper;
@@ -33,7 +33,8 @@ export function reviewAllows(session,kind,params,readIdWasSearched=false){
   if(kind==='mail.sync')return within(params.days,1,session.max_days)&&within(params.maxMessages,1,session.max_messages);
   if(kind==='mail.status')return Object.keys(params).length===0;
   if(kind==='mail.recent')return within(params.days,1,session.max_days)&&within(params.limit,1,REVIEW_LIMITS.maxSearchHits)&&within(params.offset,0,1000);
-  if(kind==='mail.search')return typeof params.query==='string'&&within(params.limit,1,REVIEW_LIMITS.maxSearchHits);
+  if(kind==='mail.review_pending')return within(params.days,1,session.max_days)&&within(params.limit,1,REVIEW_LIMITS.maxSearchHits)&&within(params.offset,0,1000);
+  if(kind==='mail.search')return typeof params.query==='string'&&within(params.limit,1,REVIEW_LIMITS.maxSearchHits)&&within(params.offset,0,500);
   return typeof params.messageId==='string'&&HEXID.test(params.messageId)&&
     session.reads_left>0&&readIdWasSearched===true;
 }

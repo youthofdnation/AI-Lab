@@ -140,6 +140,21 @@ class ReadSearchTests(Fixture):
             with self.assertRaises(mail.MailError):
                 mail.search(self.data, bad)
 
+    def test_search_pagination_date_and_sender_filters(self):
+        first = mail.search(self.data, "견적", 5, sender="sender1@example.test", since=mail.iso(NOW - dt.timedelta(days=3)))
+        self.assertEqual(first["count"], 3)
+        self.assertEqual(len(first["results"]), 3)
+        self.assertIsNone(first["next_offset"])
+        self.assertEqual(first["synced_at"], mail.iso(NOW))
+        page = mail.search(self.data, "견적", 2, offset=2)
+        self.assertEqual(page["next_offset"], 4)
+        self.assertNotEqual(page["results"][0]["message_id"], mail.search(self.data, "견적", 2)["results"][0]["message_id"])
+        for params in ({"offset": -1}, {"offset": 501}, {"since": "invalid"},
+                       {"since": mail.iso(NOW), "until": mail.iso(NOW - dt.timedelta(days=1))},
+                       {"sender": "a\nb"}):
+            with self.assertRaises(mail.MailError):
+                mail.search(self.data, "견적", **params)
+
     def test_read_exactly_one_selected_message(self):
         target = mail.search(self.data, "견적 2-1", 1)["results"][0]["message_id"]
         r = mail.read_message(self.data, target)
@@ -158,6 +173,32 @@ class ReadSearchTests(Fixture):
         r = mail.read_message(self.data, target, max_bytes=1000)
         self.assertTrue(r["truncated"])
         self.assertLessEqual(len(r["body"].encode("utf-8")), 1000)
+
+    def test_recent_and_pending_report_uncertainty_when_sent_is_not_indexed(self):
+        pin = mail.account_fingerprint(ACCOUNT)
+        recent = mail.recent(self.data, 3, 2, expected_account_fingerprint=pin, now=NOW)
+        self.assertEqual(len(recent["results"]), 2)
+        self.assertIsNotNone(recent["next_offset"])
+        review = mail.review_pending(self.data, 3, 2, expected_account_fingerprint=pin, now=NOW)
+        self.assertTrue(review["heuristic_only"])
+        self.assertFalse(review["sent_folder_indexed"])
+        self.assertEqual(review["results"][0]["reply_check"], "SENT_NOT_INDEXED")
+
+    def test_recipient_filter_and_sent_subject_reply_hint(self):
+        messages = [
+            {"message_id": "<in-1@example.test>", "date": mail.iso(NOW - dt.timedelta(hours=2)),
+             "from": "partner@example.test", "to": "owner@example.test", "subject": "견적 검토", "folder": "INBOX", "body": "request"},
+            {"message_id": "<out-1@example.test>", "date": mail.iso(NOW - dt.timedelta(hours=1)),
+             "from": "owner@example.test", "to": "partner@example.test", "subject": "Re: 견적 검토", "folder": "Sent", "body": "reply"},
+        ]
+        mail.sync(self.data, self.source(messages), 14, 100, now=NOW)
+        by_recipient = mail.search(self.data, "견적", recipient="owner@example.test")
+        self.assertEqual(len(by_recipient["results"]), 1)
+        self.assertEqual(by_recipient["results"][0]["folder"], "INBOX")
+        review = mail.review_pending(self.data, 2, expected_account_fingerprint=mail.account_fingerprint(ACCOUNT), now=NOW)
+        self.assertTrue(review["sent_folder_indexed"])
+        match = next(row for row in review["results"] if row["subject"] == "견적 검토")
+        self.assertEqual(match["reply_check"], "POSSIBLE_REPLY_FOUND")
 
 
 class FakeImap:

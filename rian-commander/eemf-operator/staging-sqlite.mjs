@@ -41,13 +41,22 @@ export class StagingSqlite {
         'CREATE INDEX IF NOT EXISTS idx_long_job_grants ON long_job_grants(tenant,owner,device,kind,spec_sha)',
         // Read-only mail review: a single owner browser approval scopes successive sync/search/selected reads.
         // client_ref is the SHA-256-derived OAuth client reference; message IDs are stored as digests only.
-        "CREATE TABLE IF NOT EXISTS mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, initial_job_id TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL)",
         'CREATE INDEX IF NOT EXISTS idx_mail_review_scope ON mail_review_sessions(tenant,owner,device,client_ref,state,expires)',
         'CREATE TABLE IF NOT EXISTS mail_review_message_hashes (session_id TEXT NOT NULL REFERENCES mail_review_sessions(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, PRIMARY KEY(session_id,msg_sha))',
         'CREATE TABLE IF NOT EXISTS mail_review_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES mail_review_sessions(id))',
         'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
       ];
       this.#db.exec(ddl.join(';')+';');
+      // PR #13 has not been deployed, but keep local/staging databases made by
+      // earlier review-session builds readable without discarding their jobs.
+      const reviewColumns=this.#db.prepare('PRAGMA table_info(mail_review_sessions)').all().map(c=>c.name);
+      if(!reviewColumns.includes('initial_job_id')){
+        this.#db.exec("ALTER TABLE mail_review_sessions ADD COLUMN initial_job_id TEXT NOT NULL DEFAULT '';");
+        // Older grants were active before their first sync finished. Fail closed
+        // on upgrade; the owner can approve a new bounded scope explicitly.
+        this.#db.exec("UPDATE mail_review_sessions SET state='REVOKED',runs_left=0,reads_left=0 WHERE state IN ('ACTIVE','PENDING_SYNC');");
+      }
       if (version!==2) this.#db.exec('PRAGMA user_version=2;');
       const sentinel=this.#db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('storage-sentinel');
       if (sentinel) {

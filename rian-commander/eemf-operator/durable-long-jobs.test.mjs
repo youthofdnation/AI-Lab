@@ -4,6 +4,7 @@ import {randomBytes,createHash} from 'node:crypto';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {DatabaseSync} from 'node:sqlite';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
@@ -24,6 +25,18 @@ function fixture(t){
  return {open,close,actors,file,advance:s=>{ms+=s*1000;},store:()=>store,owner:{A:{tenantId:'A',ownerId:'oa'},B:{tenantId:'B',ownerId:'ob'}}};
 }
 const start=(q,actor,device,kind,params,requestKey)=>q.request({actor,deviceId:device,kind,params,requestKey});
+
+test('review schema upgrade revokes grants created before initial-sync gating',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rian-review-upgrade-')),file=join(dir,'state.db');
+ const old=new DatabaseSync(file);
+ old.exec("CREATE TABLE mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL);");
+ old.prepare("INSERT INTO mail_review_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run('old','A','owner','pc','a'.repeat(32),1,9999999999,14,100,10,2,'ACTIVE');
+ old.close();
+ const store=new StagingSqlite({filename:file,encryptionKeyHex:randomBytes(32).toString('hex')});
+ t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+ assert.equal(store.db.prepare("SELECT state,runs_left,reads_left,initial_job_id FROM mail_review_sessions WHERE id='old'").get().state,'REVOKED');
+ assert.equal(store.db.prepare("SELECT runs_left FROM mail_review_sessions WHERE id='old'").get().runs_left,0);
+});
 
 test('request returns a job id immediately and nothing runs before owner approval',t=>{
  const f=fixture(t),q=f.open();
@@ -226,7 +239,12 @@ test('mail scope reuses reviewed Outlook bounds and blocks send/delete/oversized
    ['mail.search',{query:'--all'}],['mail.send',{to:'x'}],['mail.delete',{messageId:'a'.repeat(40)}],['shell',{argv:['powershell']}],['mail.sync',{days:1,maxMessages:1,argv:['x']}]])
   assert.throws(()=>start(q,f.actors.oa,'pcA',kind,params),/MAIL_SCOPE_DENIED|UNKNOWN_JOB_KIND|INVALID_PARAMS/);
  const prod=new LongJobKinds();
- assert.deepEqual(prod.names().sort(),['mail.read','mail.search','mail.sync'],'synthetic diag kind is opt-in only');
+ assert.deepEqual(prod.names().sort(),['mail.read','mail.search','mail.sync'],'new metadata tools and diagnostics are opt-in only');
+ const page=prod.canonical('pcA','mail.search',{query:'견적',limit:5,offset:10,sender:'supplier@example.test'});
+ assert.equal(page.params.offset,10);
+ for(const params of [{query:'견적',offset:-1},{query:'견적',sender:'x\ny'},
+   {query:'견적',since:'2026-11-26T00:00:00Z',until:'2026-11-25T00:00:00Z'}])
+   assert.throws(()=>prod.canonical('pcA','mail.search',params),/MAIL_SCOPE_DENIED/);
 });
 
 test('encrypted params/results at rest and audit rows without content',t=>{
