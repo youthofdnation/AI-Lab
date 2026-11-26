@@ -7,8 +7,8 @@
  * Proves: OAuth -> MCP start -> browser-password approval -> > 28 s job with
  * progress -> staging server hard kill + restart -> agent hard kill + restart ->
  * result collected exactly once; duplicate prevention; tenant A/B isolation;
- * 120-day index kept + 14-day merge via standing grant (no 2nd password);
- * one selected message body read.
+ * 120-day index kept + 14-day merge; one approved mail-review grant covers
+ * varied searches, recent/pending metadata and one selected body read.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -61,8 +61,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const principals=[['oa','A','owner'],['ob','B','owner'],['aa','A','agent','E2E-PC-A'],['ab','B','agent','E2E-PC-B']]
     .map(([id,tenantId,kind,deviceId])=>({id,tenantId,kind,...(deviceId?{deviceId}:{}),tokenSha256:sha(tokens[id])}));
   const serverEnv={RIAN_V2_E2E:'1',PORT:String(port),RIAN_E2E_DB_PATH:join(dir,'staging.db'),RIAN_STAGE_STORAGE_KEY:randomBytes(32).toString('hex'),
-    RIAN_STAGE_JOBS_ENABLED:'1',RIAN_STAGE_ALLOW_DIAGNOSTICS:'1',RIAN_STAGE_PUBLIC_URL:relay,RIAN_STAGE_FORM_SECRET:randomBytes(48).toString('hex'),
-    RIAN_STAGE_PRINCIPALS_JSON:JSON.stringify(principals),RIAN_STAGE_DEVICES_JSON:JSON.stringify([{id:'E2E-PC-A',tenantId:'A'},{id:'E2E-PC-B',tenantId:'B'}]),
+    RIAN_STAGE_JOBS_ENABLED:'1',RIAN_STAGE_ALLOW_DIAGNOSTICS:'1',RIAN_STAGE_MAIL_REVIEW_TOOLS:'1',RIAN_STAGE_PUBLIC_URL:relay,RIAN_STAGE_FORM_SECRET:randomBytes(48).toString('hex'),
+    RIAN_STAGE_PRINCIPALS_JSON:JSON.stringify(principals),RIAN_STAGE_DEVICES_JSON:JSON.stringify([{id:'E2E-PC-A',tenantId:'A',allowedKinds:['diag.wait','mail.sync','mail.search','mail.read','mail.status','mail.recent','mail.review_pending']},{id:'E2E-PC-B',tenantId:'B'}]),
     RIAN_STAGE_APPROVERS_JSON:JSON.stringify([{tenantId:'A',ownerId:'oa',...hashApprovalPassword(pwA)},{tenantId:'B',ownerId:'ob',...hashApprovalPassword(pwB)}])};
   const startServer=async()=>{const s=launch('staging','node',['v2-e2e-server.mjs'],serverEnv);await waitLine(s,/RIAN_V2_E2E_READY/);return s;};
   let server=await startServer();
@@ -77,8 +77,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const agentCfg=join(dir,'agentA.json');
   writeFileSync(join(dir,'agentA.token'),tokens.aa);
   writeFileSync(agentCfg,JSON.stringify({relay_url:relay,device_id:'E2E-PC-A',token_file:join(dir,'agentA.token'),state_dir:join(dir,'agentA-state'),
-    allowed_kinds:['diag.wait','mail.sync','mail.search','mail.read'],allow_test_loopback:true,poll_seconds:1,
-    mail:{data_dir:join(dir,'rian-mail-v2'),legacy_index:join(dir,'legacy-index.json'),source:{type:'fixture',path:join(dir,'mailbox.json')}}}));
+    allowed_kinds:['diag.wait','mail.status','mail.sync','mail.search','mail.read','mail.recent','mail.review_pending'],allow_test_loopback:true,poll_seconds:1,
+    mail:{data_dir:join(dir,'rian-mail-v2'),account_fingerprint:sha('rian-mail-account-v2|e2e.user@example.test'),account_type:'outlook',legacy_index:join(dir,'legacy-index.json'),source:{type:'fixture',path:join(dir,'mailbox.json')}}}));
   const startAgent=async()=>{const a=launch('agentA',PYTHON,['rian-v2-agent.py','run','--config',agentCfg],{});await waitLine(a,/AGENT_STARTED/);return a;};
 
   // ---- OAuth Owner Gateway (real gateway.ts) --------------------------------------------------
@@ -108,7 +108,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const call=async(name,args,bearer,url)=>{const {status,body}=await mcp('tools/call',{name,arguments:args},bearer,url);assert.equal(status,200);const x=body.result.content[0].text;return body.result.isError?{error:x}:JSON.parse(x);};
   assert.equal((await mcp('tools/list',{},'not-a-token')).status,401,'gateway requires OAuth');
   const names=(await mcp('tools/list',{})).body.result.tools.map(x=>x.name);
-  assert.ok(names.includes('rian_v2_start_job')&&names.includes('rian_v2_job_status'),'V2 tools exposed through OAuth gateway');
+  assert.ok(names.includes('rian_v2_start_job')&&names.includes('rian_v2_job_status')&&
+    ['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending','rian_v2_request_read_policy','rian_v2_policy_status'].every(n=>names.includes(n)),'V2 mail tools exposed through OAuth gateway');
   assert.ok(!names.some(n=>/approve/.test(n)));
 
   const browserApprove=async(approvalUrl,password,extra={})=>{
@@ -134,7 +135,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const started=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'diag.wait',params:{seconds:40},request_key:'e2e-long-job-0001'});
   assert.equal(started.state,'AWAITING_APPROVAL');
   mark('job requested, id returned immediately',started.job_id);
-  const ok=await browserApprove(started.approval_url,pwA);
+  assert.equal(started.management_url,relay+'/v2/permissions');
+  const ok=await browserApprove(relay+'/v2/approve/'+started.job_id,pwA);
   assert.equal(ok.status,200);
   const running=await waitState(started.job_id,['RUNNING']);
   mark('RUNNING on agent; progress',JSON.stringify(running.progress));
@@ -182,39 +184,83 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   assert.equal(executed.filter(x=>x===started.job_id).length,1);
   mark('audit:',events.join(' > '));
 
-  // ---- C: mail sync with standing grant, then search + one-message read ----------------------
-  const sync1=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'mail.sync',params:{days:14,maxMessages:1000}});
-  const sApprove=await browserApprove(sync1.approval_url,pwA,{standing:'1',minutes:'60',runs:'2'});
+  // ---- C: one browser approval across the read-only mail workflow ---------------------------
+  const sync1=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
+  const sApprove=await browserApprove(relay+'/v2/approve/'+sync1.job_id,pwA,{review:'1',review_minutes:'60',review_jobs:'10',review_body:'1',review_reads:'2'});
   assert.match(sApprove.preview,/최근 14일, 최대 1000건/);assert.equal(sApprove.status,200);
   const s1=await waitState(sync1.job_id,['SUCCEEDED','FAILED']);
   assert.equal(s1.state,'SUCCEEDED',JSON.stringify(s1));
   assert.deepEqual([s1.result.legacy_seeded,s1.result.added,s1.result.unchanged,s1.result.total,s1.result.removed],[240,12,28,252,0]);
   mark('mail.sync #1: 120-day legacy index kept (240) + 14-day merge, total',s1.result.total);
-  const sync2=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'mail.sync',params:{days:14,maxMessages:1000}});
-  assert.equal(sync2.state,'QUEUED','standing grant: no second password');assert.equal(sync2.approval_url,undefined);
+  const sync2=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
+  assert.equal(sync2.state,'QUEUED','mail review: no second password');assert.equal(sync2.approval_url,undefined);
   const s2=await waitState(sync2.job_id,['SUCCEEDED','FAILED']);
   assert.deepEqual([s2.result.added,s2.result.total,s2.result.before],[0,252,252]);
   assert.ok(s2.result.backup&&existsSync(join(dir,'rian-mail-v2','backups',s2.result.backup)),'previous index backed up before write');
-  mark('mail.sync #2 via standing grant without password: added 0, total 252, backup',s2.result.backup);
-  const search=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'mail.search',params:{query:'new-1-2',limit:5}});
-  await browserApprove(search.approval_url,pwA);
+  mark('mail.sync #2 via review grant without password: added 0, total 252, backup',s2.result.backup);
+  const status=await call('mail_status',{device:'E2E-PC-A'});
+  assert.equal(status.state,'QUEUED');
+  const st=await waitState(status.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(st.result.messages,252);assert.ok(st.result.synced_at);
+  const recentJob=await call('mail_recent',{device:'E2E-PC-A',days:14,limit:5,offset:0});
+  assert.equal(recentJob.state,'QUEUED');
+  const recentResult=await waitState(recentJob.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(recentResult.result.results.length,5);assert.equal(recentResult.result.next_offset,5);
+  const search=await call('mail_search',{device:'E2E-PC-A',query:'new-1-2',limit:5,offset:0});
+  assert.equal(search.state,'QUEUED');assert.equal(search.approval_url,undefined);
   const sr=await waitState(search.job_id,['SUCCEEDED','FAILED']);
   assert.equal(sr.result.count,1);assert.equal(sr.result.bodies_included,false);
   assert.ok(!JSON.stringify(sr.result).includes('SYNTHETIC BODY'));
   const messageId=sr.result.results[0].message_id;
-  const read=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'mail.read',params:{messageId}});
-  assert.equal(read.state,'AWAITING_APPROVAL','each body read needs its own approval');
-  const rp=await browserApprove(read.approval_url,pwA);
-  assert.match(rp.preview,new RegExp(messageId));
+  const read=await call('mail_read',{device:'E2E-PC-A',message_id:messageId});
+  assert.equal(read.state,'QUEUED','a searched recent body uses the explicit review consent');
+  assert.equal(read.approval_url,undefined);
   const rr=await waitState(read.job_id,['SUCCEEDED','FAILED']);
   assert.equal(rr.result.messages_returned,1);
   assert.equal(rr.result.body,'SYNTHETIC BODY new-1-2');
-  mark('mail.read returned exactly one selected message body');
+  const changed=await call('mail_search',{device:'E2E-PC-A',query:'new-2',limit:5});
+  assert.equal(changed.state,'QUEUED','different search query uses the same approval');
+  const changedResult=await waitState(changed.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(changedResult.result.count,4);
+  const pending=await call('mail_review_pending',{device:'E2E-PC-A',days:14,limit:5});
+  assert.equal(pending.state,'QUEUED');
+  const pendingResult=await waitState(pending.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(pendingResult.result.sent_folder_indexed,false);
+  assert.equal(pendingResult.result.results[0].reply_check,'SENT_NOT_INDEXED');
+  mark('one approval covered sync, status, recent, varied searches, selected read and pending review');
   const grants=await call('rian_v2_list_grants',{});
-  assert.equal(grants.grants.length,1);assert.equal(grants.grants[0].runs_left,1,'one of two pre-approved runs used');
+  assert.equal(grants.grants.length,1);assert.equal(grants.grants[0].runs_left,3,'seven of ten approved follow-up jobs used');
   assert.equal((await call('rian_v2_revoke_grant',{grant_id:grants.grants[0].grant_id})).state,'REVOKED');
-  const sync3=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'mail.sync',params:{days:14,maxMessages:1000}});
+  const sync3=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
   assert.equal(sync3.state,'AWAITING_APPROVAL','revoked grant no longer skips approval');
   assert.equal((await call('rian_v2_cancel_job',{job_id:sync3.job_id})).state,'APPROVAL_CANCELLED');
-  mark('standing grant revoked; approval required again; pending approval cancelled');
+  mark('mail review grant revoked; approval required again; pending approval cancelled');
+  const requested=await call('rian_v2_request_read_policy',{device:'E2E-PC-A',account:'e2e.user@example.test',account_type:'outlook',
+    features:['mail.status','mail.sync','mail.search','mail.recent','mail.read','mail.review_pending'],duration:'day'});
+  assert.equal(requested.state,'PENDING');
+  assert.equal(requested.management_url,relay+'/v2/permissions');
+  const policyApproved=await browserApprove(relay+'/v2/policy/'+requested.request_id,pwA);
+  assert.equal(policyApproved.status,200);assert.match(policyApproved.html,/grant_id/);
+  const policyStatus=await call('mail_status',{device:'E2E-PC-A'});
+  assert.equal(policyStatus.state,'QUEUED');assert.equal(policyStatus.approval_url,undefined);
+  assert.equal((await waitState(policyStatus.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const policySync=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
+  assert.equal(policySync.state,'QUEUED');assert.equal(policySync.approval_url,undefined);
+  assert.equal((await waitState(policySync.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const policySearch=await call('mail_search',{device:'E2E-PC-A',query:'합성',limit:5});
+  assert.equal(policySearch.state,'QUEUED');
+  const policySearchResult=await waitState(policySearch.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(policySearchResult.state,'SUCCEEDED');
+  const policyRead=await call('mail_read',{device:'E2E-PC-A',message_id:policySearchResult.result.results[0].message_id});
+  assert.equal(policyRead.state,'QUEUED');assert.equal(policyRead.approval_url,undefined);
+  assert.equal((await waitState(policyRead.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  await hardKill(server);server=await startServer();
+  const afterRestart=await call('mail_status',{device:'E2E-PC-A'});
+  assert.equal(afterRestart.state,'QUEUED','read policy persists across process restart');
+  assert.equal((await waitState(afterRestart.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const current=(await call('rian_v2_list_grants',{})).grants.find(g=>g.grant_id===requested.request_id);
+  assert.equal(current.state,'ACTIVE');
+  assert.equal((await call('rian_v2_revoke_grant',{grant_id:requested.request_id})).state,'REVOKED');
+  assert.equal((await call('mail_status',{device:'E2E-PC-A'})).state,'AWAITING_APPROVAL');
+  mark('persistent read policy: one owner approval, sync/search/body, restart, then revocation');
 });

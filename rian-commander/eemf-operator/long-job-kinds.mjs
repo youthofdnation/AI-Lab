@@ -21,6 +21,14 @@ function exactKeys(params,allowed,required=allowed){
 function plan(request){
   try{return planOutlookOperation(request);}catch(e){throw Error('MAIL_SCOPE_DENIED:'+String(e.message).slice(0,40));}
 }
+function recentParams(p,{folder=false}={}){
+  exactKeys(p,folder?['days','limit','offset','folder']:['days','limit','offset'],['days']);
+  const limit=p.limit===undefined?20:p.limit,offset=p.offset===undefined?0:p.offset;
+  if(!Number.isInteger(p.days)||p.days<1||p.days>14||!Number.isInteger(limit)||limit<1||limit>20||
+    !Number.isInteger(offset)||offset<0||offset>500)throw Error('MAIL_SCOPE_DENIED');
+  if(p.folder!==undefined&&(typeof p.folder!=='string'||!p.folder.trim()||p.folder.length>120||/[\x00-\x1f\x7f]/.test(p.folder)))throw Error('MAIL_SCOPE_DENIED');
+  return {days:p.days,limit,offset,...(p.folder===undefined?{}:{folder:p.folder})};
+}
 
 const MAIL_KINDS={
   'mail.sync':{
@@ -39,10 +47,17 @@ const MAIL_KINDS={
     label:'업무메일 메타데이터 검색 (제목·보낸사람·날짜만)',
     lockGroup:null,maxRuntimeSeconds:120,leaseSeconds:60,grantable:true,
     validate(p){
-      exactKeys(p,['query','limit'],['query']);
+      exactKeys(p,['query','limit','offset','since','until','sender','recipient','folder'],['query']);
       const limit=p.limit===undefined?20:p.limit;
       plan({kind:'search',query:p.query,limit});
-      return {query:p.query,limit};
+      const offset=p.offset===undefined?0:p.offset;
+      if(!Number.isInteger(offset)||offset<0||offset>500)throw Error('MAIL_SCOPE_DENIED');
+      for(const key of ['sender','recipient','folder'])if(p[key]!==undefined&&
+        (typeof p[key]!=='string'||!p[key].trim()||p[key].length>120||/[\x00-\x1f\x7f]/.test(p[key])))throw Error('MAIL_SCOPE_DENIED');
+      for(const key of ['since','until'])if(p[key]!==undefined&&
+        (typeof p[key]!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d)$/.test(p[key])||!Number.isFinite(Date.parse(p[key]))))throw Error('MAIL_SCOPE_DENIED');
+      if(p.since!==undefined&&p.until!==undefined&&Date.parse(p.since)>Date.parse(p.until))throw Error('MAIL_SCOPE_DENIED');
+      return {query:p.query,limit,offset,...Object.fromEntries(['since','until','sender','recipient','folder'].filter(k=>p[k]!==undefined).map(k=>[k,p[k]]))};
     },
     describe:p=>['검색어와 일치하는 메일의 제목·보낸사람·날짜·메시지 ID만 최대 '+p.limit+'건','본문은 반환하지 않음']
   },
@@ -62,6 +77,13 @@ const MAIL_KINDS={
 const bounded=(v,min,max)=>Number.isInteger(v)&&v>=min&&v<=max;
 const filterText=v=>typeof v==='string'&&v.length>=1&&v.length<=120&&!/[\x00-\x1f\x7f]/.test(v);
 const RECENT_KINDS={
+  'mail.review_pending':{
+    label:'회신 대조 후보 조회',lockGroup:null,maxRuntimeSeconds:120,leaseSeconds:60,grantable:true,
+    validate(p){exactKeys(p,['days','limit','offset'],['days']);const {days,limit=20,offset=0}=p;
+      if(!bounded(days,1,14)||!bounded(limit,1,20)||!bounded(offset,0,1000))throw Error('INVALID_PARAMS');
+      return {days,limit,offset};},
+    describe:p=>['최근 '+p.days+'일 받은메일과 로컬 발신 색인의 제목 대조 후보','발신 폴더가 없으면 미확인으로 표시','본문·첨부파일 없음']
+  },
   'mail.status':{
     label:'업무메일 로컬 색인 상태 (본문 없음)',lockGroup:null,maxRuntimeSeconds:120,leaseSeconds:60,grantable:true,
     validate(p){exactKeys(p,[]);return {};},

@@ -57,6 +57,12 @@ export class TenantDirectory {
     }
     denied();
   }
+  /** Trusted server adapter only, after a password or passkey session was verified. */
+  ownerFromVerifiedSession(tenantId,ownerId) {
+    const p=this.#principals.find(x=>x.actor.kind==='owner'&&x.actor.tenantId===tenantId&&x.actor.id===ownerId);
+    if(!p)denied();
+    return p.actor;
+  }
   assertActor(actor) { if (!actor || typeof actor !== 'object' || !this.#authentic.has(actor)) denied(); }
   assertOwner(actor) { this.assertActor(actor); if (actor.kind !== 'owner') denied(); }
   assertDevice(tenantId, deviceId) {

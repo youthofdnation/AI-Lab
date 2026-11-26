@@ -21,7 +21,7 @@ export class StagingSqlite {
     try {
       this.#db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
       const version=Number(this.#db.prepare('PRAGMA user_version').get().user_version);
-      if (version!==0 && version!==1 && version!==2) throw Error('UNSUPPORTED_SCHEMA_VERSION');
+      if (version!==0 && version!==1 && version!==2 && version!==3) throw Error('UNSUPPORTED_SCHEMA_VERSION');
       const ddl=[
         'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, cipher BLOB NOT NULL, iv BLOB NOT NULL, tag BLOB NOT NULL)',
         'CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, filename TEXT NOT NULL, size INTEGER NOT NULL CHECK (size>0), sha TEXT NOT NULL, chunks_total INTEGER NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL)',
@@ -41,14 +41,39 @@ export class StagingSqlite {
         'CREATE INDEX IF NOT EXISTS idx_long_job_grants ON long_job_grants(tenant,owner,device,kind,spec_sha)',
         // Read-only mail review: a single owner browser approval scopes successive sync/search/selected reads.
         // client_ref is the SHA-256-derived OAuth client reference; message IDs are stored as digests only.
-        "CREATE TABLE IF NOT EXISTS mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, initial_job_id TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL)",
         'CREATE INDEX IF NOT EXISTS idx_mail_review_scope ON mail_review_sessions(tenant,owner,device,client_ref,state,expires)',
         'CREATE TABLE IF NOT EXISTS mail_review_message_hashes (session_id TEXT NOT NULL REFERENCES mail_review_sessions(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, PRIMARY KEY(session_id,msg_sha))',
         'CREATE TABLE IF NOT EXISTS mail_review_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES mail_review_sessions(id))',
-        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
+        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))',
+        // Separate from short mail-review sessions: a policy is approved independently of a sync.
+        'CREATE TABLE IF NOT EXISTS read_policy_requests (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, account_cipher BLOB NOT NULL, account_iv BLOB NOT NULL, account_tag BLOB NOT NULL, account_fp TEXT NOT NULL, account_type TEXT NOT NULL, features TEXT NOT NULL, duration TEXT NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, created INTEGER NOT NULL, approval_expires INTEGER NOT NULL, state TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS read_policies (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, account_fp TEXT NOT NULL, account_type TEXT NOT NULL, features TEXT NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, calls_used INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL)',
+        'CREATE INDEX IF NOT EXISTS idx_read_policies_scope ON read_policies(tenant,owner,device,client_ref,state,expires)',
+        'CREATE TABLE IF NOT EXISTS read_policy_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, policy_id TEXT NOT NULL REFERENCES read_policies(id))',
+        'CREATE TABLE IF NOT EXISTS read_policy_message_hashes (policy_id TEXT NOT NULL REFERENCES read_policies(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(policy_id,msg_sha))',
+        // Additive owner-center data. Keeping user_version=3 lets the previous
+        // staging image read the volume during rollback; it ignores these tables.
+        'CREATE TABLE IF NOT EXISTS owner_center_sessions (sha TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, method TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS owner_login_failures (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS passkey_credentials (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, rp_id TEXT NOT NULL, public_key_cipher BLOB NOT NULL, public_key_iv BLOB NOT NULL, public_key_tag BLOB NOT NULL, counter INTEGER NOT NULL, transports TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL)',
+        'CREATE INDEX IF NOT EXISTS idx_passkeys_owner ON passkey_credentials(tenant,owner,status)',
+        'CREATE TABLE IF NOT EXISTS passkey_challenges (id TEXT PRIMARY KEY, kind TEXT NOT NULL, challenge TEXT NOT NULL, tenant TEXT, owner TEXT, session_sha TEXT, flow_sha TEXT, request_id TEXT, scope_hash TEXT, scope_json TEXT, created INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)',
+        'CREATE TABLE IF NOT EXISTS owner_identity_bindings (tenant TEXT NOT NULL, owner TEXT NOT NULL, provider TEXT NOT NULL, subject_sha TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(tenant,owner,provider), UNIQUE(provider,subject_sha))'
       ];
       this.#db.exec(ddl.join(';')+';');
-      if (version!==2) this.#db.exec('PRAGMA user_version=2;');
+      const policyRequestColumns=this.#db.prepare('PRAGMA table_info(read_policy_requests)').all().map(c=>c.name);
+      if(!policyRequestColumns.includes('replace_policy_id'))this.#db.exec('ALTER TABLE read_policy_requests ADD COLUMN replace_policy_id TEXT;');
+      // PR #13 has not been deployed, but keep local/staging databases made by
+      // earlier review-session builds readable without discarding their jobs.
+      const reviewColumns=this.#db.prepare('PRAGMA table_info(mail_review_sessions)').all().map(c=>c.name);
+      if(!reviewColumns.includes('initial_job_id')){
+        this.#db.exec("ALTER TABLE mail_review_sessions ADD COLUMN initial_job_id TEXT NOT NULL DEFAULT '';");
+        // Older grants were active before their first sync finished. Fail closed
+        // on upgrade; the owner can approve a new bounded scope explicitly.
+        this.#db.exec("UPDATE mail_review_sessions SET state='REVOKED',runs_left=0,reads_left=0 WHERE state IN ('ACTIVE','PENDING_SYNC');");
+      }
+      if (version!==3) this.#db.exec('PRAGMA user_version=3;');
       const sentinel=this.#db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('storage-sentinel');
       if (sentinel) {
         const plaintext=this.decrypt(sentinel,'riancmd:v1:sentinel');
@@ -92,6 +117,9 @@ export class StagingSqlite {
     this.transaction(()=>{
       this.db.prepare('DELETE FROM transfers WHERE expires <= ?').run(now);
       this.db.prepare('DELETE FROM approval_nonces WHERE expires <= ?').run(now);
+      this.db.prepare('DELETE FROM owner_center_sessions WHERE expires <= ?').run(now);
+      this.db.prepare('DELETE FROM owner_login_failures WHERE until <= ?').run(now);
+      this.db.prepare('DELETE FROM passkey_challenges WHERE expires <= ? OR (used=1 AND created < ?)').run(now,now-86400);
       this.db.prepare("DELETE FROM jobs WHERE deadline < ? AND state IN ('DONE','CANCELLED','EXPIRED','UNKNOWN_DO_NOT_RETRY')").run(now-86400);
       // Terminal V2 jobs keep their encrypted result for 7 days, then disappear.
       this.db.prepare("DELETE FROM long_jobs WHERE finished IS NOT NULL AND finished < ?").run(now-7*86400);

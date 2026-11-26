@@ -614,7 +614,7 @@ async function relay(name,args,ownerApproved=false){
  return parsed;
 }
 /* V2 durable long-job MCP bridge. The isolated staging service owns jobs, approval and results;
-   this gateway only adds OAuth and forwards rian_v2_* calls with a tenant-owner token. */
+   this gateway only adds OAuth and forwards reviewed V2 job and mail tools with a tenant-owner token. */
 const v2Url=env.RIAN_V2_MCP_URL||"",v2Key=env.RIAN_V2_OWNER_TOKEN||"";
 export const v2Ready=v2Key.length>=40&&(/^https:\/\/[a-z0-9.-]+\/v2\/mcp$/.test(v2Url)||env.RIAN_V2_ALLOW_LOOPBACK==="1"&&/^http:\/\/127\.0\.0\.1:\d+\/v2\/mcp$/.test(v2Url));
 let v2Cache=null;
@@ -624,8 +624,10 @@ export async function v2Rpc(method,params,clientId){
  const v=await r.json();if(v.error||!v.result)throw Error("RIAN_V2_PROTOCOL_REJECTED");
  return v.result;
 }
+const v2MailTools=new Set(["mail_status","mail_sync","mail_search","mail_read","mail_recent","mail_review_pending"]);
+function v2ToolAllowed(name){return typeof name==="string"&&(/^rian_v2_[a-z_]+$/.test(name)||v2MailTools.has(name))}
 async function v2Tools(clientId){
- if(!v2Cache||v2Cache.exp<now())v2Cache={exp:now()+300,tools:((await v2Rpc("tools/list",{},clientId)).tools||[]).filter(t=>/^rian_v2_[a-z_]+$/.test(t?.name))};
+ if(!v2Cache||v2Cache.exp<now())v2Cache={exp:now()+300,tools:((await v2Rpc("tools/list",{},clientId)).tools||[]).filter(t=>v2ToolAllowed(t?.name))};
  return v2Cache.tools;
 }
 function sessionReply(value){return {content:[{type:"text",text:JSON.stringify(value)}]}}
@@ -1127,7 +1129,7 @@ if(p==="/oauth/register"&&m==="POST"){
   if(x.method==="initialize")result={protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"rian-eemf-owner",version:"1.0.0"}};
   else if(x.method==="tools/list")result={tools:[...(bridgeReady?tools:[]),...(v2Ready?await v2Tools(token.client_id).catch(()=>[]):[])]};
   else if(x.method==="ping")result={};
-  else if(x.method==="tools/call"){try{let name=x.params?.name;if(v2Ready&&/^rian_v2_[a-z_]+$/.test(name))result=await v2Rpc("tools/call",{name,arguments:x.params?.arguments||{}},token.client_id);else{if(!bridgeReady)throw Error("Backend unavailable");let args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args,token.client_id)}}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
+  else if(x.method==="tools/call"){try{let name=x.params?.name;if(v2Ready&&v2ToolAllowed(name))result=await v2Rpc("tools/call",{name,arguments:x.params?.arguments||{}},token.client_id);else{if(!bridgeReady)throw Error("Backend unavailable");let args=safeArgs(name,x.params?.arguments||{});result=await sendBackend(name,args,token.client_id)}}catch(err){result={isError:true,content:[{type:"text",text:String(err.message).slice(0,180)}]}}}
   else return res({jsonrpc:"2.0",id,error:{code:-32601,message:"Unknown method"}});
   return res({jsonrpc:"2.0",id,result});
  }

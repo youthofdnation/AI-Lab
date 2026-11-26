@@ -79,6 +79,35 @@ class SyncTests(Fixture):
             with self.assertRaises(mail.MailError):
                 mail.sync(self.data, self.source([]), *bad, now=NOW)
 
+    def test_legacy_recipient_and_body_repair_without_changing_legacy_index(self):
+        entry = {"id": "<legacy-1@example.test>", "date": mail.iso(NOW), "from": "sender@example.test",
+                 "to": ACCOUNT, "subject": "합성 점검 요청", "folder": "INBOX", "body": "LEGACY SYNTHETIC BODY"}
+        legacy_path = self.root / "legacy-index.json"
+        legacy_path.write_text(json.dumps({"account": ACCOUNT, "messages": [entry]}), "utf-8")
+        legacy_before = legacy_path.read_bytes()
+        fetched = [{"message_id": None, "date": entry["date"], "from": entry["from"],
+                    "to": "", "subject": entry["subject"], "folder": "INBOX", "body": ""}]
+        source = self.source(fetched)
+        mail.sync(self.data, source, 14, 10, now=NOW, legacy_index=legacy_path)
+        store = mail.MailStore(self.data)
+        key = next(iter(store.load()["messages"]))
+        self.assertEqual(store.load()["messages"][key]["to"], ACCOUNT)
+        self.assertEqual(mail.read_message(self.data, key)["body"], entry["body"])
+        # Simulate the already-deployed V2 index that lost both fields.
+        index = store.load()
+        index["messages"][key].pop("to")
+        store.save(index)
+        store.put_body(key, "")
+        self.assertFalse(store.has_body(key))
+        with self.assertRaisesRegex(mail.MailError, "BODY_NOT_CACHED"):
+            mail.read_message(self.data, key)
+        repaired = mail.sync(self.data, source, 14, 10, now=NOW + dt.timedelta(hours=1), legacy_index=legacy_path)
+        self.assertEqual(repaired["bodies_backfilled"], 1)
+        self.assertEqual(store.load()["messages"][key]["to"], ACCOUNT)
+        self.assertEqual(mail.read_message(self.data, key)["body"], entry["body"])
+        self.assertEqual(len(mail.search(self.data, "점검", recipient=ACCOUNT)["results"]), 1)
+        self.assertEqual(legacy_path.read_bytes(), legacy_before)
+
     def test_account_mismatch_stops_before_any_write(self):
         mail.sync(self.data, self.source(synthetic_mailbox(5, 1)), 14, 100, now=NOW)
         before = (self.data / "index.json").read_bytes()
@@ -92,9 +121,10 @@ class SyncTests(Fixture):
 
     def test_legacy_index_for_other_account_is_refused(self):
         legacy = self.root / "legacy.json"
-        legacy.write_text(json.dumps({"account": "other@example.test", "messages": []}), "utf-8")
-        with self.assertRaisesRegex(mail.MailError, "ACCOUNT_MISMATCH"):
-            mail.sync(self.data, self.source([]), 14, 10, now=NOW, legacy_index=legacy)
+        for data in ({"account": "other@example.test", "messages": []}, {"messages": []}):
+            legacy.write_text(json.dumps(data), "utf-8")
+            with self.assertRaisesRegex(mail.MailError, "ACCOUNT_MISMATCH"):
+                mail.sync(self.data, self.source([]), 14, 10, now=NOW, legacy_index=legacy)
         self.assertFalse((self.data / "index.json").exists())
 
     def test_cancel_leaves_previous_index_intact(self):
@@ -140,6 +170,21 @@ class ReadSearchTests(Fixture):
             with self.assertRaises(mail.MailError):
                 mail.search(self.data, bad)
 
+    def test_search_pagination_date_and_sender_filters(self):
+        first = mail.search(self.data, "견적", 5, sender="sender1@example.test", since=mail.iso(NOW - dt.timedelta(days=3)))
+        self.assertEqual(first["count"], 3)
+        self.assertEqual(len(first["results"]), 3)
+        self.assertIsNone(first["next_offset"])
+        self.assertEqual(first["synced_at"], mail.iso(NOW))
+        page = mail.search(self.data, "견적", 2, offset=2)
+        self.assertEqual(page["next_offset"], 4)
+        self.assertNotEqual(page["results"][0]["message_id"], mail.search(self.data, "견적", 2)["results"][0]["message_id"])
+        for params in ({"offset": -1}, {"offset": 501}, {"since": "invalid"},
+                       {"since": mail.iso(NOW), "until": mail.iso(NOW - dt.timedelta(days=1))},
+                       {"sender": "a\nb"}):
+            with self.assertRaises(mail.MailError):
+                mail.search(self.data, "견적", **params)
+
     def test_read_exactly_one_selected_message(self):
         target = mail.search(self.data, "견적 2-1", 1)["results"][0]["message_id"]
         r = mail.read_message(self.data, target)
@@ -158,6 +203,102 @@ class ReadSearchTests(Fixture):
         r = mail.read_message(self.data, target, max_bytes=1000)
         self.assertTrue(r["truncated"])
         self.assertLessEqual(len(r["body"].encode("utf-8")), 1000)
+
+    def test_recent_and_pending_report_uncertainty_when_sent_is_not_indexed(self):
+        pin = mail.account_fingerprint(ACCOUNT)
+        recent = mail.recent(self.data, 3, 2, expected_account_fingerprint=pin, now=NOW)
+        self.assertEqual(len(recent["results"]), 2)
+        self.assertIsNotNone(recent["next_offset"])
+        review = mail.review_pending(self.data, 3, 2, expected_account_fingerprint=pin, now=NOW)
+        self.assertTrue(review["heuristic_only"])
+        self.assertFalse(review["sent_folder_indexed"])
+        self.assertEqual(review["results"][0]["reply_check"], "SENT_NOT_INDEXED")
+
+    def test_recipient_filter_and_sent_subject_reply_hint(self):
+        messages = [
+            {"message_id": "<in-1@example.test>", "date": mail.iso(NOW - dt.timedelta(hours=2)),
+             "from": "partner@example.test", "to": "owner@example.test", "subject": "견적 검토", "folder": "INBOX", "body": "request"},
+            {"message_id": "<out-1@example.test>", "date": mail.iso(NOW - dt.timedelta(hours=1)),
+             "from": "owner@example.test", "to": "partner@example.test", "subject": "Re: 견적 검토", "folder": "Sent", "body": "reply"},
+        ]
+        mail.sync(self.data, self.source(messages), 14, 100, now=NOW)
+        by_recipient = mail.search(self.data, "견적", recipient="owner@example.test")
+        self.assertEqual(len(by_recipient["results"]), 1)
+        self.assertEqual(by_recipient["results"][0]["folder"], "INBOX")
+        review = mail.review_pending(self.data, 2, expected_account_fingerprint=mail.account_fingerprint(ACCOUNT), now=NOW)
+        self.assertTrue(review["sent_folder_indexed"])
+        match = next(row for row in review["results"] if row["subject"] == "견적 검토")
+        self.assertEqual(match["reply_check"], "POSSIBLE_REPLY_FOUND")
+
+
+class BridgeAdapterTests(Fixture):
+    def test_local_bridge_html_only_mail_gets_bounded_plain_text(self):
+        bridge_dir = self.root / "html-bridge"
+        bridge_dir.mkdir()
+        (bridge_dir / "outlook_bridge.py").write_text('''
+from pathlib import Path
+from email.message import EmailMessage
+import datetime as dt
+CONFIG = Path(__file__).with_name("config.json")
+def load_json(path, default): return {"username":"synthetic.user@example.test", "host":"mail.example.test", "port":993}
+def validate_config(cfg): return cfg
+def secret_present(): return True
+def get_secret(): return "synthetic-password"
+def safe_text(msg): return ""  # legacy Bridge ignores HTML-only mail
+class FakeImap:
+    def __init__(self, host, port, timeout): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def login(self, user, password): assert password == "synthetic-password"
+    def logout(self): pass
+class imaplib:
+    IMAP4_SSL = FakeImap
+def fetch_imap_messages(imap, days, limit):
+    msg = EmailMessage()
+    msg.set_content("<p>확인 <b>요청</b></p><script>secret()</script>", subtype="html")
+    return ([{"id":"html-id", "date":dt.datetime.now(dt.timezone.utc).isoformat(),
+             "from":"sender@example.test", "to":"synthetic.user@example.test",
+             "subject":"synthetic", "folder":"INBOX", "body":safe_text(msg), "has_attachments":False}], [])
+''', "utf-8")
+        source = mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir)})
+        result = source.fetch_since(mail.utcnow() - dt.timedelta(days=2), 20)
+        self.assertIn("확인", result[0]["body"])
+        self.assertIn("요청", result[0]["body"])
+        self.assertNotIn("secret()", result[0]["body"])
+        self.assertNotIn("<", result[0]["body"])
+
+    def test_local_bridge_adapter_reuses_bounded_read_only_fetch_without_returning_credential(self):
+        bridge_dir = self.root / "bridge"
+        bridge_dir.mkdir()
+        (bridge_dir / "outlook_bridge.py").write_text('''
+from pathlib import Path
+import datetime as dt
+CONFIG = Path(__file__).with_name("config.json")
+def load_json(path, default): return {"username":"synthetic.user@example.test", "host":"mail.example.test", "port":993}
+def validate_config(cfg): return cfg
+def secret_present(): return True
+def get_secret(): return "synthetic-password"
+class FakeImap:
+    def __init__(self, host, port, timeout): self.host=host
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def login(self, user, password): assert password == "synthetic-password"
+    def logout(self): pass
+class imaplib:
+    IMAP4_SSL = FakeImap
+def fetch_imap_messages(imap, days, limit):
+    assert 1 <= days <= 14 and limit <= 1000
+    return ([{"id":"local-id", "date":dt.datetime.now(dt.timezone.utc).isoformat(),
+             "from":"sender@example.test", "to":"synthetic.user@example.test",
+             "subject":"synthetic", "folder":"INBOX", "body":"synthetic body", "has_attachments":False}], [])
+''', "utf-8")
+        source = mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir)})
+        self.assertEqual(source.account, ACCOUNT)
+        result = source.fetch_since(mail.utcnow() - dt.timedelta(days=2), 20)
+        self.assertEqual(len(result), 1)
+        self.assertNotIn("synthetic-password", json.dumps(result, default=str))
+        with self.assertRaisesRegex(mail.MailError, "OUTLOOK_BRIDGE_CONFIG_INVALID"):
+            mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir), "password": "bad"})
 
 
 class FakeImap:

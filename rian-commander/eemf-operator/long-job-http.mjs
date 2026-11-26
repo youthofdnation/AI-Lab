@@ -20,6 +20,36 @@ const JSON_HEADERS={'cache-control':'no-store','content-type':'application/json;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:JSON_HEADERS});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// A failed approval stays on the same page. The HTML form still works when
+// JavaScript is unavailable; CSP permits only this pinned inline script.
+const APPROVAL_SCRIPT=`document.addEventListener('submit',async(event)=>{
+  const form=event.target;
+  if(!(form instanceof HTMLFormElement)||form.dataset.ownerApproval!=='1')return;
+  const target=new URL(form.action,location.href);
+  if(target.origin!==location.origin||!/^\\/v2\\/(?:approve|policy)\\/[0-9a-f-]{36}$/.test(target.pathname))return;
+  event.preventDefault();
+  const button=form.querySelector('button[type="submit"]');
+  const label=button?.textContent;
+  if(button){button.disabled=true;button.textContent='확인 중…';}
+  try{
+    const body=new URLSearchParams(new FormData(form));
+    const response=await fetch(target.pathname,{method:'POST',credentials:'same-origin',
+      headers:{'content-type':'application/x-www-form-urlencoded'},body:body.toString()});
+    const documentFromServer=new DOMParser().parseFromString(await response.text(),'text/html');
+    const next=documentFromServer.querySelector('main');
+    if(!next)throw Error('INVALID_APPROVAL_RESPONSE');
+    document.querySelector('main').replaceWith(next);
+    document.title=documentFromServer.title;
+    const notice=next.querySelector('[role="alert"], [role="status"], h1');
+    if(notice){notice.setAttribute('tabindex','-1');notice.focus({preventScroll:true});}
+  }catch{
+    if(button){button.disabled=false;button.textContent=label;}
+    let notice=form.querySelector('[role="alert"]');
+    if(!notice){notice=document.createElement('p');notice.setAttribute('role','alert');form.prepend(notice);}
+    notice.textContent='연결 오류로 승인 결과를 확인하지 못했습니다. 새 요청을 만들지 말고 이 링크를 다시 열어 상태를 확인하세요.';
+  }
+});`;
+const APPROVAL_SCRIPT_HASH=createHash('sha256').update(APPROVAL_SCRIPT).digest('base64');
 const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function readBody(request,max=MAX_BODY){
@@ -56,15 +86,26 @@ export function hashApprovalPassword(password,saltHex=randomBytes(16).toString('
 
 function tools(kinds){
   const kindNames=kinds.names();
-  return [
+  const mailTools=[
+    {name:'mail_status',description:'Check the selected PC local mail index count, folders and latest sync time. Returns a job ID; approval depends on the device grant.',inputSchema:{type:'object',properties:{device:{type:'string'},request_key:{type:'string'}},required:['device'],additionalProperties:false}},
+    {name:'mail_sync',description:'Sync the approved work mailbox read only, then poll rian_v2_job_status. A bounded review approval can cover subsequent mail queries.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},max_messages:{type:'integer'},request_key:{type:'string'}},required:['device','days','max_messages'],additionalProperties:false}},
+    {name:'mail_search',description:'Search local work mail metadata with pagination, date range and sender/recipient filters. No body is returned.',inputSchema:{type:'object',properties:{device:{type:'string'},query:{type:'string'},limit:{type:'integer'},offset:{type:'integer'},since:{type:'string'},until:{type:'string'},sender:{type:'string'},recipient:{type:'string'},folder:{type:'string'},request_key:{type:'string'}},required:['device','query'],additionalProperties:false}},
+    {name:'mail_read',description:'Read one selected local message body; requires its own approval unless the current bounded review grant explicitly includes recent searched messages.',inputSchema:{type:'object',properties:{device:{type:'string'},message_id:{type:'string'},request_key:{type:'string'}},required:['device','message_id'],additionalProperties:false}},
+    {name:'mail_recent',description:'Page through recent local work mail metadata, with folder, sender, recipient and query filters. No body is returned.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},limit:{type:'integer'},offset:{type:'integer'},folder:{type:'string'},sender:{type:'string'},recipient:{type:'string'},query:{type:'string'},request_key:{type:'string'}},required:['device','days'],additionalProperties:false}},
+    {name:'mail_review_pending',description:'Compare recent Inbox subjects with indexed Sent subjects. Returns review candidates only; an absent Sent index is reported as unknown.',inputSchema:{type:'object',properties:{device:{type:'string'},days:{type:'integer'},limit:{type:'integer'},offset:{type:'integer'},request_key:{type:'string'}},required:['device','days'],additionalProperties:false}}
+  ];
+  const kindForTool={mail_status:'mail.status',mail_sync:'mail.sync',mail_search:'mail.search',mail_read:'mail.read',mail_recent:'mail.recent',mail_review_pending:'mail.review_pending'};
+  return [...mailTools.filter(t=>kindNames.includes(kindForTool[t.name])),
     {name:'rian_v2_devices',description:'List this tenant\'s registered PCs and whether each V2 agent is online. Read only.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
-    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If no exact-scope standing grant exists, the result contains approval_url for the owner to approve once in a browser. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
+    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If approval is required, the result points to one fixed permission center for the owner to review and approve with a passkey. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
       inputSchema:{type:'object',properties:{device:{type:'string'},kind:{type:'string',enum:kindNames},params:{type:'object'},request_key:{type:'string',pattern:'^[A-Za-z0-9_-]{16,80}$'}},required:['device','kind','params'],additionalProperties:false}},
     {name:'rian_v2_job_status',description:'Get state, progress and (when finished) the result of a job. wait_seconds (0-20) waits for a change. Never retry a job whose state is RUNNING or UNKNOWN_DO_NOT_RETRY.',
       inputSchema:{type:'object',properties:{job_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['job_id'],additionalProperties:false}},
     {name:'rian_v2_list_jobs',description:'List recent jobs of this tenant (no results).',inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false}},
     {name:'rian_v2_cancel_job',description:'Cancel a pending approval, a queued job, or request a running job to stop safely.',inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false}},
-    {name:'rian_v2_list_grants',description:'List active exact-scope standing grants and owner-approved read-only mail review sessions (time/device/OAuth-client restricted), including remaining jobs/reads.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
+    ...(kindNames.includes('mail.status')?[{name:'rian_v2_request_read_policy',description:'Prepare or reuse a persistent, per-device/account/OAuth-client read-only Outlook mail policy. The owner approves at one fixed RIAN permission center using a passkey. First passkey enrollment uses the configured owner identity login (Google on EEMFO3L staging) or the recovery password. No sync runs during registration. Durations: day, week, month, until_revoked. Proton needs its own adapter and is currently blocked.',inputSchema:{type:'object',properties:{device:{type:'string'},account:{type:'string'},account_type:{type:'string',enum:['outlook']},features:{type:'array',items:{type:'string'}},duration:{type:'string',enum:['day','week','month','until_revoked']},max_sync_days:{type:'integer'},max_sync_messages:{type:'integer'}},required:['device','account','account_type','features','duration'],additionalProperties:false}},
+      {name:'rian_v2_policy_status',description:'Check a policy request from this same owner and OAuth connection, optionally waiting up to 20 seconds while the conversation remains active. Return its current grant state and the fixed permission center URL. A closed ChatGPT session does not auto-resume.',inputSchema:{type:'object',properties:{request_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['request_id'],additionalProperties:false}}]:[]),
+    {name:'rian_v2_list_grants',description:'List active exact-scope, short review and read-only policies, scoped to owner/device/OAuth client.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
     {name:'rian_v2_revoke_grant',description:'Revoke an exact-scope standing grant or read-only mail review session immediately; queued review jobs are cancelled.',inputSchema:{type:'object',properties:{grant_id:{type:'string'}},required:['grant_id'],additionalProperties:false}}
   ];
 }
@@ -93,20 +134,54 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(!approver||typeof password!=='string'||password.length<16||password.length>256)return false;
     return timingSafeEqual(scryptSync(password,Buffer.from(approver.salt,'hex'),32),Buffer.from(approver.hash,'hex'));
   };
-  const page=(body,status=200)=>new Response('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RIAN Commander V2 승인</title><style>body{background:#0b1423;color:#e3ebfa;font:16px system-ui;margin:0}main{max-width:560px;margin:6vh auto;padding:28px;background:#172840;border:1px solid #334965;border-radius:16px}li,p{color:#c4d0e3;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;font:inherit}button{background:#367afa;color:#fff;border:0;margin-top:16px;font-weight:600}fieldset{border:1px solid #334965;border-radius:10px;margin-top:14px}code{overflow-wrap:anywhere}</style><main>'+body+'</main></html>',
+  const page=(body,status=200)=>new Response('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RIAN Commander V2 승인</title><style>body{background:#0b1423;color:#e3ebfa;font:16px system-ui;margin:0}main{max-width:560px;margin:6vh auto;padding:28px;background:#172840;border:1px solid #334965;border-radius:16px}li,p{color:#c4d0e3;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;font:inherit}button{background:#367afa;color:#fff;border:0;margin-top:16px;font-weight:600}fieldset{border:1px solid #334965;border-radius:10px;margin-top:14px}code{overflow-wrap:anywhere}button:disabled{opacity:.6}[role=alert]{border-left:3px solid #ffb36b;padding:8px 12px;background:#382b2f}[role=status]{border-left:3px solid #74d8a2;padding:8px 12px;background:#1b3b38}</style><main>'+body+'</main><script>'+APPROVAL_SCRIPT+'</script></html>',
     // 'same-origin', not 'no-referrer': with no-referrer browsers send "Origin: null" on the
     // approval form POST (Fetch spec), so the Origin check below rejected every real browser.
-    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
-  const approvalUrl=id=>publicOrigin+'/v2/approve/'+id;
-  const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:approvalUrl(s.job_id)}:s;
+    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-"+APPROVAL_SCRIPT_HASH+"'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+  const managementUrl=publicOrigin+'/v2/permissions';
+  const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:managementUrl,management_url:managementUrl}:s;
 
   async function callTool(actor,name,args,clientRef){
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('INVALID_ARGUMENTS');
     if(name==='rian_v2_devices'){exact(args,[]);return {devices:queue.devices(actor)};}
+    const mailSpec={mail_status:['mail.status',[]],mail_sync:['mail.sync',['days','max_messages']],
+      mail_search:['mail.search',['query','limit','offset','since','until','sender','recipient','folder']],
+      mail_read:['mail.read',['message_id']],mail_recent:['mail.recent',['days','limit','offset','folder','sender','recipient','query']],
+      mail_review_pending:['mail.review_pending',['days','limit','offset']]}[name];
+    if(mailSpec){
+      const [kind,fields]=mailSpec;
+      if(!queue.kinds.names().includes(kind))throw Error('UNKNOWN_TOOL');
+      exact(args,['device','request_key',...fields],['device',...({mail_sync:['days','max_messages'],mail_search:['query'],mail_read:['message_id'],mail_recent:['days'],mail_review_pending:['days']}[name]||[])]);
+      if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
+      const params=Object.fromEntries(fields.filter(k=>args[k]!==undefined).map(k=>[k==='max_messages'?'maxMessages':k==='message_id'?'messageId':k,args[k]]));
+      return withApproval(queue.request({actor,deviceId:args.device,kind,params,requestKey:args.request_key,clientRef}));
+    }
     if(name==='rian_v2_start_job'){
       exact(args,['device','kind','params','request_key'],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
       return withApproval(queue.request({actor,deviceId:args.device,kind:args.kind,params:args.params,requestKey:args.request_key,clientRef}));
+    }
+    if(name==='rian_v2_request_read_policy'){
+      exact(args,['device','account','account_type','features','duration','max_sync_days','max_sync_messages'],['device','account','account_type','features','duration']);
+      const request=queue.prepareReadPolicy({actor,deviceId:args.device,clientRef,scope:{account:args.account,accountType:args.account_type,
+        features:args.features,duration:args.duration,maxSyncDays:args.max_sync_days??14,maxSyncMessages:args.max_sync_messages??1000}});
+      return {...request,...(request.request_id?{approval_url:managementUrl,management_url:managementUrl}:{management_url:managementUrl})};
+    }
+    if(name==='rian_v2_policy_status'){
+      exact(args,['request_id','wait_seconds'],['request_id']);
+      const wait=args.wait_seconds??0;
+      if(!Number.isInteger(wait)||wait<0||wait>20)throw Error('INVALID_ARGUMENTS');
+      const preview=()=>{
+        const p=queue.readPolicyPreview(args.request_id);
+        if(p.tenant!==actor.tenantId||p.owner!==actor.id||p.client_ref!==clientRef)throw Error('POLICY_REQUEST_NOT_FOUND');
+        return p;
+      };
+      let p=preview();const before=JSON.stringify([p.state,p.grant]),until=Date.now()+wait*1000;
+      while(p.state!=='APPROVED'&&p.renewable&&Date.now()<until){
+        await sleep(Math.min(1000,until-Date.now()));p=preview();if(JSON.stringify([p.state,p.grant])!==before)break;
+      }
+      return {request_id:p.request_id,state:p.state,renewable:p.renewable,grant:p.grant,
+        management_url:managementUrl};
     }
     if(name==='rian_v2_job_status'){
       exact(args,['job_id','wait_seconds'],['job_id']);
@@ -145,27 +220,35 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     return json({jsonrpc:'2.0',id,result});
   }
 
-  function approvalPage(preview,msg=''){
-    const exp=nowS()+600,ticket=formTicket(preview.jobId,exp);
+  function approvalPage(preview,msg='',values=null){
+    const ticket=formTicket(preview.jobId,preview.renewableUntilAt);
     const when=t=>new Date(t*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'});
+    // A failed password must not silently turn an opted-in review into a single-job approval.
+    // Restore only bounded scope controls; never echo or retain the submitted password.
+    const checked=name=>values?.get(name)==='1'?' checked':'';
+    const numberValue=(name,fallback,min,max)=>{
+      const n=Number(values?.get(name));return Number.isInteger(n)&&n>=min&&n<=max?n:fallback;
+    };
     return page('<h1>RIAN Commander V2 작업 승인</h1>'+
       '<p>대상 PC: <strong>'+escapeHtml(preview.device)+'</strong><br>작업: <strong>'+escapeHtml(preview.label)+'</strong></p>'+
       '<ul>'+preview.lines.map(l=>'<li>'+escapeHtml(l)+'</li>').join('')+'</ul>'+
-      '<p>정확한 매개변수: <code>'+escapeHtml(JSON.stringify(preview.params))+'</code><br>최대 실행 시간: '+Math.round(preview.maxRuntimeSeconds/60)+'분 · 승인 요청 만료: '+escapeHtml(when(preview.approvalExpiresAt))+' (한국시간)</p>'+
+      '<p>정확한 매개변수: <code>'+escapeHtml(JSON.stringify(preview.params))+'</code><br>최대 실행 시간: '+Math.round(preview.maxRuntimeSeconds/60)+'분'+
+      (preview.renewable?' · 기존 요청이 만료됐습니다. 같은 링크에서 소유자 암호로 다시 승인할 수 있습니다.':
+        ' · 승인 요청 만료: '+escapeHtml(when(preview.approvalExpiresAt))+' (한국시간)')+'</p>'+
       '<p>임의 명령, PowerShell, 다른 PC, 메일 발송·삭제는 포함되지 않습니다. 승인 전에는 아무것도 실행되지 않습니다.</p>'+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
-      '<form method="POST" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
-      (preview.grantable?'<fieldset><legend>반복 승인 (선택)</legend><label><input type="checkbox" name="standing" value="1" style="width:auto"> 같은 PC·같은 작업·같은 매개변수에 한해 아래 기간·횟수 동안 암호 없이 다시 실행 허용</label>'+
-        '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="1440">'+
-        '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="10"></fieldset>'
+      '<form method="POST" data-owner-approval="1" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
+      (preview.grantable?'<fieldset><legend>반복 승인 (선택)</legend><label><input type="checkbox" name="standing" value="1" style="width:auto"'+checked('standing')+'> 같은 PC·같은 작업·같은 매개변수에 한해 아래 기간·횟수 동안 암호 없이 다시 실행 허용</label>'+
+        '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="'+numberValue('minutes',1440,1,1440)+'">'+
+        '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="'+numberValue('runs',10,1,50)+'"></fieldset>'
         :'<p>이 작업은 반복 승인 대상이 아니며 이번 1건만 승인됩니다.</p>')+
       (preview.clientScopedReviewEligible?
         '<fieldset><legend>업무메일 연속 검토 (선택, 최초 1회 승인)</legend>'+
-        '<label><input type="checkbox" name="review" value="1" style="width:auto"> 이 PC의 현재 업무메일 계정에서 지정 기간 동기화 + 다양한 제목·발신자 검색을 연속 허용</label>'+
-        '<label for="review_minutes">세션 유효기간 (1~60분)</label><input id="review_minutes" name="review_minutes" type="number" min="1" max="60" value="30">'+
-        '<label for="review_jobs">추가 작업 횟수 (1~60회)</label><input id="review_jobs" name="review_jobs" type="number" min="1" max="60" value="30">'+
-        '<label><input type="checkbox" name="review_body" value="1" style="width:auto"> 선택한 메일 본문도 읽기 허용 (별도 명시 동의)</label>'+
-        '<label for="review_reads">본문 최대 조회 횟수 (1~20회)</label><input id="review_reads" name="review_reads" type="number" min="1" max="20" value="10">'+
+        '<label><input type="checkbox" name="review" value="1" style="width:auto"'+checked('review')+'> 이 PC의 현재 업무메일 계정에서 지정 기간 동기화 + 다양한 제목·발신자 검색을 연속 허용</label>'+
+        '<label for="review_minutes">세션 유효기간 (1~60분)</label><input id="review_minutes" name="review_minutes" type="number" min="1" max="60" value="'+numberValue('review_minutes',30,1,60)+'">'+
+        '<label for="review_jobs">추가 작업 횟수 (1~60회)</label><input id="review_jobs" name="review_jobs" type="number" min="1" max="60" value="'+numberValue('review_jobs',30,1,60)+'">'+
+        '<label><input type="checkbox" name="review_body" value="1" style="width:auto"'+checked('review_body')+'> 선택한 메일 본문도 읽기 허용 (별도 명시 동의)</label>'+
+        '<label for="review_reads">본문 최대 조회 횟수 (1~20회)</label><input id="review_reads" name="review_reads" type="number" min="1" max="20" value="'+numberValue('review_reads',10,1,20)+'">'+
         '<p>범위: 같은 소유자·OAuth 연결·PC, 동기화 최대 '+escapeHtml(String(preview.params.days))+'일 / '+escapeHtml(String(preview.params.maxMessages))+'건. 메일 제목·발신자 검색은 기존 로컬 색인 전체가 대상일 수 있습니다. 본문은 이 세션의 검색 결과에 나온 최근 지정 기간의 메일만 열 수 있습니다. 첨부파일·발송·삭제·이동·읽음표시 변경은 불가합니다. 언제든 철회할 수 있습니다.</p></fieldset>'
         :'')+
       '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
@@ -181,8 +264,8 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let preview;try{preview=queue.approvalPreview(jobId);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
-    if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
-    if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 다시 입력하세요.');
+    if(preview.state!=='AWAITING_APPROVAL'&&!preview.renewable)return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
+    if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 선택 범위를 유지했습니다. 암호를 다시 입력하세요.',form);
     const ip=(request.headers.get('x-forwarded-for')||'local').split(',')[0].trim().slice(0,60),key=preview.tenantId+'|'+ip;
     // Per client and per job: a spoofed X-Forwarded-For cannot buy unlimited guesses for one job.
     const jobKey='job|'+jobId;
@@ -190,7 +273,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     let g=failures.get(jobKey);if(!g||g.until<nowS())g={count:0,until:nowS()+900};
     if(f.count>=5||g.count>=10)return page('<h1>암호 시도 횟수 초과</h1><p>잠시 뒤 다시 시도하세요.</p>',429);
     const approver=approverMap.get(preview.tenantId+'|'+preview.ownerId);
-    if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다.');}
+    if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다. 선택 범위를 유지했습니다. 암호를 다시 입력하세요.',form);}
     failures.delete(key);
     let grant=null,review=null;
     if(form.get('standing')==='1'){
@@ -204,16 +287,81 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     }
     try{
       const r=queue.approve({approver:{tenantId:preview.tenantId,ownerId:preview.ownerId},jobId,grant,review});
-      return page('<h1>승인 완료</h1><p>작업이 대기열에 들어갔습니다. PC 에이전트가 가져가 실행하며, ChatGPT에서 rian_v2_job_status로 진행률과 결과를 확인할 수 있습니다.</p>'+
-        (r.grantId?'<p>반복 승인 '+escapeHtml(String(grant.maxRuns))+'회 / '+escapeHtml(String(grant.minutes))+'분이 같은 범위에 한해 적용됩니다. ChatGPT의 rian_v2_revoke_grant로 즉시 취소할 수 있습니다.</p>':'')+
-        (r.reviewId?'<p>업무메일 읽기 전용 연속 검토 세션을 승인했습니다. 추가 작업 '+escapeHtml(String(review.extraJobs))+'회, '+escapeHtml(String(review.minutes))+'분, 본문 최대 '+escapeHtml(String(review.bodyReads))+'건. 다른 고객·PC·OAuth 연결에는 적용되지 않습니다. rian_v2_revoke_grant로 언제든 철회할 수 있습니다.</p>':''));
+      const g=r.approvedGrant;
+      const title=r.reviewId?'업무메일 연속 검토 승인 완료':r.grantId?'동일 작업 반복 승인 완료':'이번 작업 1건 승인 완료';
+      const details=g?'<p>grant_id: <code>'+escapeHtml(g.grant_id)+'</code><br>권한 상태: '+escapeHtml(g.state)+
+        (g.state==='PENDING_SYNC'?' (첫 동기화 성공 후 ACTIVE)':'')+'<br>만료: '+escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+
+        ' (한국시간)<br>남은 호출: '+escapeHtml(String(g.runs_left))+
+        (g.body_reads_left===null?'':'<br>남은 본문 조회: '+escapeHtml(String(g.body_reads_left)))+'</p>':
+        '<p>연속 권한은 생성되지 않았습니다. 후속 작업에는 별도 승인이 필요합니다.</p>';
+      return page('<h1>'+title+'</h1><p role="status">작업 ID: <code>'+escapeHtml(r.jobId)+'</code><br>작업 상태: '+escapeHtml(r.state)+
+        '</p><p>PC 에이전트가 대기열의 작업을 실행합니다. ChatGPT에서 rian_v2_job_status로 완료를 확인하세요.</p>'+details+
+        (g?'<p>같은 소유자·장치·OAuth 연결과 승인된 범위에만 적용됩니다. rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>':''));
     }catch(e){return page('<h1>승인하지 못했습니다</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
+  }
+
+  function policyPage(p,msg=''){
+    const ticket=formTicket(p.request_id,p.renewable_until_at);
+    return page('<h1>읽기 전용 사전 승인 정책 등록</h1><p>장치: <strong>'+escapeHtml(p.device)+
+      '</strong><br>계정: <strong>'+escapeHtml(p.account)+'</strong> ('+escapeHtml(p.account_type)+
+      ')<br>OAuth 연결: 현재 요청 연결로만 제한</p><p>허용 기능:</p><ul>'+p.features.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+
+      '</ul><p>기간: '+escapeHtml(p.duration)+'<br>동기화 한도: 최근 '+escapeHtml(String(p.max_days))+'일, 최대 '+
+      escapeHtml(String(p.max_messages))+'건</p><p>메일 발송·삭제·이동, 임의 셸과 파일 쓰기는 허용되지 않습니다. 이 정책은 동기화 작업 승인과 별개이며 언제든 철회할 수 있습니다.</p>'+
+      (p.state==='EXPIRED'&&p.renewable?'<p>첫 15분의 요청 시간이 지났습니다. 이 요청은 실행되지 않았으며, 같은 링크에서 소유자 암호로 등록할 수 있습니다. 재승인 가능 기한: '+
+        escapeHtml(new Date(p.renewable_until_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간).</p>':'')+
+      (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
+      '<form method="POST" data-owner-approval="1" action="/v2/policy/'+escapeHtml(p.request_id)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
+      '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
+      '<button type="submit">이 읽기 전용 정책 등록</button></form>');
+  }
+
+  function policyResultPage(p){
+    const g=p.grant;
+    if(!g)return page('<h1>정책 상태를 확인하지 못했습니다</h1><p role="alert">권한을 추정하지 마세요. ChatGPT에서 권한 목록을 확인하세요.</p>',409);
+    const active=g.state==='ACTIVE';
+    return page('<h1>'+(active?'읽기 전용 사전 승인 정책 등록 완료':'읽기 전용 정책 권한 종료')+'</h1>'+
+      '<p role="status">grant_id: <code>'+escapeHtml(g.grant_id)+'</code><br>권한 상태: '+escapeHtml(g.state)+
+      '<br>만료: '+(g.expires_at===null?'직접 철회 시까지':
+        escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간)')+
+      '<br>사용 호출: '+escapeHtml(String(g.calls_used))+'</p><p>장치: '+escapeHtml(p.device)+
+      '<br>계정: '+escapeHtml(p.account)+' ('+escapeHtml(p.account_type)+')'+
+      '<br>OAuth 연결: 이 요청의 연결로만 제한<br>동기화 한도: 최근 '+escapeHtml(String(p.max_days))+
+      '일, 최대 '+escapeHtml(String(p.max_messages))+'건</p><p>허용 기능:</p><ul>'+
+      p.features.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+'</ul><p>이 페이지를 다시 열어도 권한이 중복 등록되지 않습니다. '+
+      'rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>');
+  }
+
+  async function approvePolicy(request,id){
+    const origin=request.headers.get('origin');
+    if(origin!==publicOrigin&&!(origin==='null'&&request.headers.get('sec-fetch-site')==='same-origin'))return page('<h1>다른 출처의 승인 요청 차단</h1>',403);
+    if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
+    let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
+    let p;try{p=queue.readPolicyPreview(id);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+    if(p.state==='APPROVED')return policyResultPage(p);
+    if(p.state!=='PENDING'&&!p.renewable)return page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+    if(!ticketOK(form.get('ticket'),id))return policyPage(p,'제출된 양식의 보안 서명이 만료되었습니다. 권한은 등록되지 않았습니다. 같은 링크의 새 양식에서 암호를 다시 입력하세요.');
+    const key='policy|'+id,f=failures.get(key)||{count:0,until:nowS()+900};
+    if(f.count>=5&&f.until>nowS())return page('<h1>암호 시도 횟수 초과</h1>',429);
+    const approver=approverMap.get(p.tenant+'|'+p.owner);
+    if(!passwordOK(approver,form.get('password')||'')){
+      failures.set(key,{count:f.until>nowS()?f.count+1:1,until:nowS()+900});
+      return policyPage(p,'승인 암호가 일치하지 않습니다. 정책 범위는 변경되지 않았습니다.');
+    }
+    failures.delete(key);
+    try{queue.approveReadPolicy({id,tenant:p.tenant,owner:p.owner});
+      return policyResultPage(queue.readPolicyPreview(id));
+    }catch(e){return page('<h1>정책 등록 실패</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
   }
 
   async function agent(request,path){
     const actor=authenticate(request,'agent');
     const body=await jsonBody(request);
-    if(path==='/v2/agent/claim'){exact(body,['deviceId'],['deviceId']);return json(queue.claim({actor,deviceId:body.deviceId}));}
+    if(path==='/v2/agent/claim'){
+      exact(body,['deviceId','accountFingerprint','accountType'],['deviceId']);
+      if(body.accountFingerprint!==undefined&&!/^[a-f0-9]{64}$/.test(body.accountFingerprint))throw Error('INVALID_ACCOUNT_FINGERPRINT');
+      if(body.accountType!==undefined&&!['outlook','proton'].includes(body.accountType))throw Error('INVALID_ACCOUNT_TYPE');
+      return json(queue.claim({actor,deviceId:body.deviceId,accountFp:body.accountFingerprint??null,accountType:body.accountType??null}));
+    }
     const m=/^\/v2\/agent\/jobs\/([0-9a-f-]{36})\/(heartbeat|complete)$/.exec(path);
     if(!m)return json({error:'NOT_FOUND'},404);
     if(m[2]==='heartbeat'){exact(body,['leaseToken','progress'],['leaseToken']);return json(queue.heartbeat({actor,jobId:m[1],leaseToken:body.leaseToken,progress:body.progress??{}}));}
@@ -224,15 +372,29 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   return async function handle(request){
     const url=new URL(request.url),path=url.pathname,method=request.method.toUpperCase();
     try{
-      if(url.search||url.hash)return json({error:'NOT_FOUND'},404);
       const approveMatch=/^\/v2\/approve\/([0-9a-f-]{36})$/.exec(path);
+      const policyMatch=/^\/v2\/policy\/([0-9a-f-]{36})$/.exec(path);
+      // ChatGPT adds this tracking parameter when the owner opens an approval
+      // link. Accept it only on the read-only approval preview, never on POST
+      // or an authenticated API route.
+      const chatgptApprovalLink=method==='GET'&&(approveMatch||policyMatch)&&
+        url.searchParams.size===1&&url.searchParams.get('utm_source')==='chatgpt.com';
+      if(url.hash||(url.search&&!chatgptApprovalLink))return json({error:'NOT_FOUND'},404);
       if(approveMatch&&UUID.test(approveMatch[1])){
         if(method==='GET'){
           let preview;try{preview=queue.approvalPreview(approveMatch[1]);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
-          if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
+          if(preview.state!=='AWAITING_APPROVAL'&&!preview.renewable)return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
           return approvalPage(preview);
         }
         if(method==='POST')return await approve(request,approveMatch[1]);
+      }
+      if(policyMatch&&UUID.test(policyMatch[1])){
+        if(method==='GET'){
+          let p;try{p=queue.readPolicyPreview(policyMatch[1]);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+          if(p.state==='APPROVED')return policyResultPage(p);
+          return p.state==='PENDING'||p.renewable?policyPage(p):page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+        }
+        if(method==='POST')return await approvePolicy(request,policyMatch[1]);
       }
       if(method==='POST'&&path==='/v2/mcp')return await mcp(request);
       if(method==='POST'&&path.startsWith('/v2/agent/'))return await agent(request,path);

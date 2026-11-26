@@ -41,7 +41,7 @@ _spec.loader.exec_module(_artifact)
 Client, TransferError = _artifact.Client, _artifact.TransferError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "mail.status", "mail.recent", "diag.wait"}
+KNOWN_KINDS = {"mail.sync", "mail.search", "mail.read", "mail.status", "mail.recent", "mail.review_pending", "diag.wait"}
 MAX_OUTPUT = 96 * 1024
 # The result travels as an ASCII-escaped JSON string (Korean = 6 bytes/char) inside a
 # request the relay caps at 110,000 bytes, so bound the *wire* size, not the UTF-8 size.
@@ -89,6 +89,11 @@ def validate_local(kind, params, cfg):
     """Second, independent allowlist on the PC (defence against a compromised relay)."""
     if kind not in cfg["allowed_kinds"] or not isinstance(params, dict):
         raise mail.MailError("KIND_NOT_ALLOWED_ON_THIS_PC")
+    mcfg = cfg.get("mail") or {}
+    source = mcfg.get("source") or {}
+    if kind.startswith("mail.") and isinstance(source, dict) and source.get("type") == "outlook_bridge_v1":
+        if not re.fullmatch(r"[a-f0-9]{64}", str(mcfg.get("account_fingerprint", ""))):
+            raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
     keys = set(params)
     if kind == "diag.wait":
         if keys != {"seconds"} or not isinstance(params["seconds"], int) or not 1 <= params["seconds"] <= 900:
@@ -99,8 +104,9 @@ def validate_local(kind, params, cfg):
         mail._bounded_int(params["days"], 1, mail.MAX_SYNC_DAYS, "SYNC_SCOPE_EXCEEDED")
         mail._bounded_int(params["maxMessages"], 1, mail.MAX_SYNC_MESSAGES, "SYNC_SCOPE_EXCEEDED")
     elif kind == "mail.search":
-        if not keys <= {"query", "limit"} or "query" not in keys:
+        if not keys <= {"query", "limit", "offset", "since", "until", "sender", "recipient", "folder"} or "query" not in keys:
             raise mail.MailError("INVALID_PARAMS")
+        mail.validate_search_params(**params)
     elif kind == "mail.status":
         if keys:
             raise mail.MailError("INVALID_PARAMS")
@@ -108,6 +114,12 @@ def validate_local(kind, params, cfg):
             raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
     elif kind == "mail.recent":
         if not keys <= {"days", "limit", "offset", "folder", "sender", "recipient", "query"} or "days" not in keys:
+            raise mail.MailError("INVALID_PARAMS")
+        if not re.fullmatch(r"[a-f0-9]{64}", str((cfg.get("mail") or {}).get("account_fingerprint", ""))):
+            raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
+        mail.validate_recent_params(**params)
+    elif kind == "mail.review_pending":
+        if not keys <= {"days", "limit", "offset"} or "days" not in keys:
             raise mail.MailError("INVALID_PARAMS")
         if not re.fullmatch(r"[a-f0-9]{64}", str((cfg.get("mail") or {}).get("account_fingerprint", ""))):
             raise mail.MailError("MAIL_ACCOUNT_PIN_REQUIRED")
@@ -160,6 +172,9 @@ def run_job(job_dir, cfg):
             if not data_dir:
                 raise mail.MailError("MAIL_DATA_DIR_REQUIRED")
             account_pin = mcfg.get("account_fingerprint")
+            if job.get("policyAccountFp") is not None:
+                if job.get("policyAccountFp") != account_pin or job.get("policyAccountType") != mcfg.get("account_type"):
+                    raise mail.MailError("READ_POLICY_ACCOUNT_MISMATCH")
             if account_pin is not None:
                 mail.verify_mail_account(data_dir, account_pin)
             if job["kind"] == "mail.sync":
@@ -172,8 +187,10 @@ def run_job(job_dir, cfg):
                 output = mail.status(data_dir, expected_account_fingerprint=account_pin)
             elif job["kind"] == "mail.recent":
                 output = mail.recent(data_dir, expected_account_fingerprint=account_pin, **params)
+            elif job["kind"] == "mail.review_pending":
+                output = mail.review_pending(data_dir, expected_account_fingerprint=account_pin, **params)
             elif job["kind"] == "mail.search":
-                output = mail.search(data_dir, params["query"], params.get("limit", 20))
+                output = mail.search(data_dir, expected_account_fingerprint=account_pin, **params)
             else:
                 limit = mail.MAX_BODY_RETURN_BYTES
                 output = mail.read_message(data_dir, params["messageId"], max_bytes=limit)
@@ -297,7 +314,11 @@ class Supervisor:
         return proc
 
     def claim(self):
-        reply = self.client.request("POST", "/v2/agent/claim", {"deviceId": self.cfg["device_id"]})
+        mcfg = self.cfg.get("mail") or {}
+        request = {"deviceId": self.cfg["device_id"]}
+        if mcfg.get("account_fingerprint") and mcfg.get("account_type") == "outlook":
+            request.update(accountFingerprint=mcfg["account_fingerprint"], accountType=mcfg["account_type"])
+        reply = self.client.request("POST", "/v2/agent/claim", request)
         job = reply.get("job")
         if not job:
             return None

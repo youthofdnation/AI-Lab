@@ -4,6 +4,7 @@ import {randomBytes,createHash} from 'node:crypto';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {DatabaseSync} from 'node:sqlite';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
@@ -21,9 +22,73 @@ function fixture(t){
  const open=(extra={})=>{store=new StagingSqlite({filename:file,encryptionKeyHex:key});return new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true}),clock:()=>ms,...extra});};
  const close=()=>{if(store){store.close();store=null;}};
  t.after(()=>{close();rmSync(dir,{recursive:true,force:true});});
- return {open,close,actors,file,advance:s=>{ms+=s*1000;},store:()=>store,owner:{A:{tenantId:'A',ownerId:'oa'},B:{tenantId:'B',ownerId:'ob'}}};
+ return {open,close,actors,file,advance:s=>{ms+=s*1000;},now:()=>ms,store:()=>store,owner:{A:{tenantId:'A',ownerId:'oa'},B:{tenantId:'B',ownerId:'ob'}}};
 }
 const start=(q,actor,device,kind,params,requestKey)=>q.request({actor,deviceId:device,kind,params,requestKey});
+
+test('read policy persists across restart, survives sync failure, and expires searched body proofs',t=>{
+ const f=fixture(t),opts={kinds:new LongJobKinds({allowDiagnostics:true,allowMailReviewTools:true}),
+   deviceKinds:{pcA:['mail.status','mail.sync','mail.search','mail.read']}};
+ let q=f.open(opts);
+ const account='owner@example.test',fp=sha('rian-mail-account-v2|'+account),ref='a'.repeat(32);
+ const requested=q.prepareReadPolicy({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,scope:{account,accountType:'outlook',
+   features:['mail.status','mail.sync','mail.search','mail.read'],duration:'until_revoked'}});
+ const policy=q.approveReadPolicy({id:requested.request_id,tenant:'A',owner:'oa'});
+ assert.equal(policy.state,'ACTIVE');assert.equal(policy.expires_at,null);
+ let sync=q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.sync',params:{days:14,maxMessages:100}});
+ assert.equal(sync.approval_required,false);
+ let claimed=q.claim({actor:f.actors.aa,deviceId:'pcA',accountFp:fp,accountType:'outlook'}).job;
+ assert.equal(claimed.policyAccountFp,fp);
+ q.complete({actor:f.actors.aa,jobId:claimed.jobId,leaseToken:claimed.leaseToken,outcome:'FAILED',exitCode:1,output:'{"ok":false}'});
+ assert.equal(q.listGrants(f.actors.oa).find(g=>g.grant_id===policy.grant_id).state,'ACTIVE');
+ f.close();q=f.open(opts);
+ assert.equal(q.listGrants(f.actors.oa).find(g=>g.grant_id===policy.grant_id).state,'ACTIVE');
+ const search=q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.search',params:{query:'meeting',limit:2}});
+ assert.equal(search.approval_required,false);
+ claimed=q.claim({actor:f.actors.aa,deviceId:'pcA',accountFp:fp,accountType:'outlook'}).job;
+ const id='a'.repeat(40),date=new Date(f.now()).toISOString();
+ q.complete({actor:f.actors.aa,jobId:claimed.jobId,leaseToken:claimed.leaseToken,outcome:'SUCCEEDED',exitCode:0,
+   output:JSON.stringify({ok:true,results:[{message_id:id,date}]})});
+ const read=q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.read',params:{messageId:id}});
+ assert.equal(read.approval_required,false);
+ claimed=q.claim({actor:f.actors.aa,deviceId:'pcA',accountFp:fp,accountType:'outlook'}).job;
+ q.complete({actor:f.actors.aa,jobId:claimed.jobId,leaseToken:claimed.leaseToken,outcome:'SUCCEEDED',exitCode:0,output:'{"ok":true}'});
+ q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.search',params:{query:'meeting again',limit:2}});
+ claimed=q.claim({actor:f.actors.aa,deviceId:'pcA',accountFp:fp,accountType:'outlook'}).job;
+ q.complete({actor:f.actors.aa,jobId:claimed.jobId,leaseToken:claimed.leaseToken,outcome:'SUCCEEDED',exitCode:0,
+   output:JSON.stringify({ok:true,results:[{message_id:id,date}]})});
+ f.advance(14*86400+1);
+ assert.equal(q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.read',params:{messageId:id}}).approval_required,true);
+ const queued=q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.status',params:{}});
+ assert.equal(q.revokeGrant({actor:f.actors.oa,grantId:policy.grant_id}).state,'REVOKED');
+ assert.equal(q.get({actor:f.actors.oa,jobId:queued.job_id}).state,'CANCELLED');
+ assert.equal(q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.status',params:{}}).approval_required,true);
+});
+
+test('read policy duration and account isolation fail closed',t=>{
+ const f=fixture(t),q=f.open({kinds:new LongJobKinds({allowDiagnostics:true,allowMailReviewTools:true}),
+   deviceKinds:{pcA:['mail.status']}}),ref='b'.repeat(32);
+ const request=q.prepareReadPolicy({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,scope:{account:'owner@example.test',accountType:'outlook',
+   features:['mail.status'],duration:'day'}});
+ q.approveReadPolicy({id:request.request_id,tenant:'A',owner:'oa'});
+ assert.equal(q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.status',params:{}}).approval_required,false);
+ assert.deepEqual(q.claim({actor:f.actors.aa,deviceId:'pcA',accountFp:'f'.repeat(64),accountType:'proton'}),{job:null});
+ assert.equal(q.listGrants(f.actors.oa).some(g=>g.grant_id===request.request_id),false);
+ f.advance(86401);
+ assert.equal(q.request({actor:f.actors.oa,deviceId:'pcA',clientRef:ref,kind:'mail.status',params:{}}).approval_required,true);
+});
+
+test('review schema upgrade revokes grants created before initial-sync gating',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rian-review-upgrade-')),file=join(dir,'state.db');
+ const old=new DatabaseSync(file);
+ old.exec("CREATE TABLE mail_review_sessions (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, runs_left INTEGER NOT NULL, reads_left INTEGER NOT NULL, state TEXT NOT NULL);");
+ old.prepare("INSERT INTO mail_review_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run('old','A','owner','pc','a'.repeat(32),1,9999999999,14,100,10,2,'ACTIVE');
+ old.close();
+ const store=new StagingSqlite({filename:file,encryptionKeyHex:randomBytes(32).toString('hex')});
+ t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
+ assert.equal(store.db.prepare("SELECT state,runs_left,reads_left,initial_job_id FROM mail_review_sessions WHERE id='old'").get().state,'REVOKED');
+ assert.equal(store.db.prepare("SELECT runs_left FROM mail_review_sessions WHERE id='old'").get().runs_left,0);
+});
 
 test('request returns a job id immediately and nothing runs before owner approval',t=>{
  const f=fixture(t),q=f.open();
@@ -153,7 +218,7 @@ test('approval expiry, approval cancel, queued cancel and running cancel signal'
  const e=start(q,f.actors.oa,'pcA','diag.wait',{seconds:5});
  f.advance(901);
  assert.equal(q.get({actor:f.actors.oa,jobId:e.job_id}).state,'APPROVAL_EXPIRED');
- assert.throws(()=>q.approve({approver:f.owner.A,jobId:e.job_id}),/APPROVAL_NOT_PENDING/);
+ assert.equal(q.approvalPreview(e.job_id).renewable,true,'expired, unexecuted link requires a fresh browser ticket and owner password');
  const c=start(q,f.actors.oa,'pcA','diag.wait',{seconds:6});
  assert.equal(q.cancel({actor:f.actors.oa,jobId:c.job_id}).state,'APPROVAL_CANCELLED');
  assert.throws(()=>q.approve({approver:f.owner.A,jobId:c.job_id}),/APPROVAL_NOT_PENDING/);
@@ -226,7 +291,12 @@ test('mail scope reuses reviewed Outlook bounds and blocks send/delete/oversized
    ['mail.search',{query:'--all'}],['mail.send',{to:'x'}],['mail.delete',{messageId:'a'.repeat(40)}],['shell',{argv:['powershell']}],['mail.sync',{days:1,maxMessages:1,argv:['x']}]])
   assert.throws(()=>start(q,f.actors.oa,'pcA',kind,params),/MAIL_SCOPE_DENIED|UNKNOWN_JOB_KIND|INVALID_PARAMS/);
  const prod=new LongJobKinds();
- assert.deepEqual(prod.names().sort(),['mail.read','mail.search','mail.sync'],'synthetic diag kind is opt-in only');
+ assert.deepEqual(prod.names().sort(),['mail.read','mail.search','mail.sync'],'new metadata tools and diagnostics are opt-in only');
+ const page=prod.canonical('pcA','mail.search',{query:'견적',limit:5,offset:10,sender:'supplier@example.test'});
+ assert.equal(page.params.offset,10);
+ for(const params of [{query:'견적',offset:-1},{query:'견적',sender:'x\ny'},
+   {query:'견적',since:'2026-11-26T00:00:00Z',until:'2026-11-25T00:00:00Z'}])
+   assert.throws(()=>prod.canonical('pcA','mail.search',params),/MAIL_SCOPE_DENIED/);
 });
 
 test('encrypted params/results at rest and audit rows without content',t=>{
@@ -248,9 +318,9 @@ test('encrypted params/results at rest and audit rows without content',t=>{
 test('v1 short-job restart semantics stay unchanged next to the V2 tables',t=>{
  const f=fixture(t);let q=f.open();
  const db=f.store().db;
- assert.equal(db.prepare('PRAGMA user_version').get().user_version,2);
+ assert.equal(db.prepare('PRAGMA user_version').get().user_version,3);
  f.close();q=f.open();
- assert.equal(f.store().db.prepare('PRAGMA user_version').get().user_version,2);
+ assert.equal(f.store().db.prepare('PRAGMA user_version').get().user_version,3);
 });
 
 test('a selected mail body is purged from the server one hour after the read finished',t=>{
