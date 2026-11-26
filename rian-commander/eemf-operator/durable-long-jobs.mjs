@@ -303,7 +303,12 @@ export class LongJobQueue {
       const changed=db.prepare("UPDATE long_jobs SET state='QUEUED',approved_at=?,queue_deadline=?,approval_expires=NULL WHERE id=? AND state='AWAITING_APPROVAL'").run(now,now+this.#limits.queueTtlSeconds,j.id);
       if(changed.changes!==1)throw Error('APPROVAL_NOT_PENDING');
       this.#audit(j,approver.ownerId,'LONG_JOB_APPROVED');
-      return {jobId:j.id,state:'QUEUED',grantId,reviewId};
+      const approvedGrant=reviewId
+        ?db.prepare('SELECT id,state,expires,runs_left,reads_left FROM mail_review_sessions WHERE id=?').get(reviewId)
+        :grantId?db.prepare('SELECT id,state,expires,runs_left FROM long_job_grants WHERE id=?').get(grantId):null;
+      return {jobId:j.id,state:'QUEUED',grantId,reviewId,approvedGrant:approvedGrant?{
+        grant_id:approvedGrant.id,state:approvedGrant.state,expires_at:approvedGrant.expires,
+        runs_left:approvedGrant.runs_left,body_reads_left:approvedGrant.reads_left??null}:null};
     });
   }
   cancel({actor,jobId}){

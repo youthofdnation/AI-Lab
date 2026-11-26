@@ -166,9 +166,15 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     return json({jsonrpc:'2.0',id,result});
   }
 
-  function approvalPage(preview,msg=''){
+  function approvalPage(preview,msg='',values=null){
     const exp=nowS()+600,ticket=formTicket(preview.jobId,exp);
     const when=t=>new Date(t*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'});
+    // A failed password must not silently turn an opted-in review into a single-job approval.
+    // Restore only bounded scope controls; never echo or retain the submitted password.
+    const checked=name=>values?.get(name)==='1'?' checked':'';
+    const numberValue=(name,fallback,min,max)=>{
+      const n=Number(values?.get(name));return Number.isInteger(n)&&n>=min&&n<=max?n:fallback;
+    };
     return page('<h1>RIAN Commander V2 작업 승인</h1>'+
       '<p>대상 PC: <strong>'+escapeHtml(preview.device)+'</strong><br>작업: <strong>'+escapeHtml(preview.label)+'</strong></p>'+
       '<ul>'+preview.lines.map(l=>'<li>'+escapeHtml(l)+'</li>').join('')+'</ul>'+
@@ -176,17 +182,17 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       '<p>임의 명령, PowerShell, 다른 PC, 메일 발송·삭제는 포함되지 않습니다. 승인 전에는 아무것도 실행되지 않습니다.</p>'+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
       '<form method="POST" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
-      (preview.grantable?'<fieldset><legend>반복 승인 (선택)</legend><label><input type="checkbox" name="standing" value="1" style="width:auto"> 같은 PC·같은 작업·같은 매개변수에 한해 아래 기간·횟수 동안 암호 없이 다시 실행 허용</label>'+
-        '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="1440">'+
-        '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="10"></fieldset>'
+      (preview.grantable?'<fieldset><legend>반복 승인 (선택)</legend><label><input type="checkbox" name="standing" value="1" style="width:auto"'+checked('standing')+'> 같은 PC·같은 작업·같은 매개변수에 한해 아래 기간·횟수 동안 암호 없이 다시 실행 허용</label>'+
+        '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="'+numberValue('minutes',1440,1,1440)+'">'+
+        '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="'+numberValue('runs',10,1,50)+'"></fieldset>'
         :'<p>이 작업은 반복 승인 대상이 아니며 이번 1건만 승인됩니다.</p>')+
       (preview.clientScopedReviewEligible?
         '<fieldset><legend>업무메일 연속 검토 (선택, 최초 1회 승인)</legend>'+
-        '<label><input type="checkbox" name="review" value="1" style="width:auto"> 이 PC의 현재 업무메일 계정에서 지정 기간 동기화 + 다양한 제목·발신자 검색을 연속 허용</label>'+
-        '<label for="review_minutes">세션 유효기간 (1~60분)</label><input id="review_minutes" name="review_minutes" type="number" min="1" max="60" value="30">'+
-        '<label for="review_jobs">추가 작업 횟수 (1~60회)</label><input id="review_jobs" name="review_jobs" type="number" min="1" max="60" value="30">'+
-        '<label><input type="checkbox" name="review_body" value="1" style="width:auto"> 선택한 메일 본문도 읽기 허용 (별도 명시 동의)</label>'+
-        '<label for="review_reads">본문 최대 조회 횟수 (1~20회)</label><input id="review_reads" name="review_reads" type="number" min="1" max="20" value="10">'+
+        '<label><input type="checkbox" name="review" value="1" style="width:auto"'+checked('review')+'> 이 PC의 현재 업무메일 계정에서 지정 기간 동기화 + 다양한 제목·발신자 검색을 연속 허용</label>'+
+        '<label for="review_minutes">세션 유효기간 (1~60분)</label><input id="review_minutes" name="review_minutes" type="number" min="1" max="60" value="'+numberValue('review_minutes',30,1,60)+'">'+
+        '<label for="review_jobs">추가 작업 횟수 (1~60회)</label><input id="review_jobs" name="review_jobs" type="number" min="1" max="60" value="'+numberValue('review_jobs',30,1,60)+'">'+
+        '<label><input type="checkbox" name="review_body" value="1" style="width:auto"'+checked('review_body')+'> 선택한 메일 본문도 읽기 허용 (별도 명시 동의)</label>'+
+        '<label for="review_reads">본문 최대 조회 횟수 (1~20회)</label><input id="review_reads" name="review_reads" type="number" min="1" max="20" value="'+numberValue('review_reads',10,1,20)+'">'+
         '<p>범위: 같은 소유자·OAuth 연결·PC, 동기화 최대 '+escapeHtml(String(preview.params.days))+'일 / '+escapeHtml(String(preview.params.maxMessages))+'건. 메일 제목·발신자 검색은 기존 로컬 색인 전체가 대상일 수 있습니다. 본문은 이 세션의 검색 결과에 나온 최근 지정 기간의 메일만 열 수 있습니다. 첨부파일·발송·삭제·이동·읽음표시 변경은 불가합니다. 언제든 철회할 수 있습니다.</p></fieldset>'
         :'')+
       '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
@@ -203,7 +209,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let preview;try{preview=queue.approvalPreview(jobId);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
     if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
-    if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 다시 입력하세요.');
+    if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 선택 범위를 유지했습니다. 암호를 다시 입력하세요.',form);
     const ip=(request.headers.get('x-forwarded-for')||'local').split(',')[0].trim().slice(0,60),key=preview.tenantId+'|'+ip;
     // Per client and per job: a spoofed X-Forwarded-For cannot buy unlimited guesses for one job.
     const jobKey='job|'+jobId;
@@ -211,7 +217,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     let g=failures.get(jobKey);if(!g||g.until<nowS())g={count:0,until:nowS()+900};
     if(f.count>=5||g.count>=10)return page('<h1>암호 시도 횟수 초과</h1><p>잠시 뒤 다시 시도하세요.</p>',429);
     const approver=approverMap.get(preview.tenantId+'|'+preview.ownerId);
-    if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다.');}
+    if(!passwordOK(approver,form.get('password')||'')){f.count++;g.count++;failures.set(key,f);failures.set(jobKey,g);return approvalPage(preview,'승인 암호가 일치하지 않습니다. 선택 범위를 유지했습니다. 암호를 다시 입력하세요.',form);}
     failures.delete(key);
     let grant=null,review=null;
     if(form.get('standing')==='1'){
@@ -225,9 +231,16 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     }
     try{
       const r=queue.approve({approver:{tenantId:preview.tenantId,ownerId:preview.ownerId},jobId,grant,review});
-      return page('<h1>승인 완료</h1><p>작업이 대기열에 들어갔습니다. PC 에이전트가 가져가 실행하며, ChatGPT에서 rian_v2_job_status로 진행률과 결과를 확인할 수 있습니다.</p>'+
-        (r.grantId?'<p>반복 승인 '+escapeHtml(String(grant.maxRuns))+'회 / '+escapeHtml(String(grant.minutes))+'분이 같은 범위에 한해 적용됩니다. ChatGPT의 rian_v2_revoke_grant로 즉시 취소할 수 있습니다.</p>':'')+
-        (r.reviewId?'<p>업무메일 읽기 전용 연속 검토 세션을 승인했습니다. 추가 작업 '+escapeHtml(String(review.extraJobs))+'회, '+escapeHtml(String(review.minutes))+'분, 본문 최대 '+escapeHtml(String(review.bodyReads))+'건. 다른 고객·PC·OAuth 연결에는 적용되지 않습니다. rian_v2_revoke_grant로 언제든 철회할 수 있습니다.</p>':''));
+      const g=r.approvedGrant;
+      const title=r.reviewId?'업무메일 연속 검토 승인 완료':r.grantId?'동일 작업 반복 승인 완료':'이번 작업 1건 승인 완료';
+      const details=g?'<p>grant_id: <code>'+escapeHtml(g.grant_id)+'</code><br>권한 상태: '+escapeHtml(g.state)+
+        (g.state==='PENDING_SYNC'?' (첫 동기화 성공 후 ACTIVE)':'')+'<br>만료: '+escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+
+        ' (한국시간)<br>남은 호출: '+escapeHtml(String(g.runs_left))+
+        (g.body_reads_left===null?'':'<br>남은 본문 조회: '+escapeHtml(String(g.body_reads_left)))+'</p>':
+        '<p>연속 권한은 생성되지 않았습니다. 후속 작업에는 별도 승인이 필요합니다.</p>';
+      return page('<h1>'+title+'</h1><p>작업 ID: <code>'+escapeHtml(r.jobId)+'</code><br>작업 상태: '+escapeHtml(r.state)+
+        '</p><p>PC 에이전트가 대기열의 작업을 실행합니다. ChatGPT에서 rian_v2_job_status로 완료를 확인하세요.</p>'+details+
+        (g?'<p>같은 소유자·장치·OAuth 연결과 승인된 범위에만 적용됩니다. rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>':''));
     }catch(e){return page('<h1>승인하지 못했습니다</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
   }
 

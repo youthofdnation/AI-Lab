@@ -118,7 +118,10 @@ test('real browsers can submit the approval form (Origin is not nulled by the re
  assert.equal((await post({origin:'null'})).status,403,'null origin without browser fetch metadata stays blocked');
  assert.equal((await post({origin:'https://evil.example','sec-fetch-site':'same-origin'})).status,403);
  const ok=await post({origin:'null','sec-fetch-site':'same-origin'});
- assert.equal(ok.status,200);assert.match(await ok.text(),/승인 완료/);
+ assert.equal(ok.status,200);
+ const single=await ok.text();
+ assert.match(single,/이번 작업 1건 승인 완료/);
+ assert.match(single,/연속 권한은 생성되지 않았습니다/);
 });
 
 test('approval page: exact scope, origin check, CSRF ticket, wrong password, then queued',async t=>{
@@ -133,7 +136,8 @@ test('approval page: exact scope, origin check, CSRF ticket, wrong password, the
  assert.match((await f.submit(s.job_id,{ticket:p.ticket,password:f.pwB})).html,/일치하지 않습니다/,'tenant B password cannot approve tenant A');
  assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:s.job_id})).state,'AWAITING_APPROVAL');
  const ok=await f.submit(s.job_id,{ticket:p.ticket,password:f.pwA,standing:'1',minutes:'1440',runs:'3'});
- assert.equal(ok.status,200);assert.match(ok.html,/승인 완료/);assert.match(ok.html,/반복 승인 3회/);
+ assert.equal(ok.status,200);assert.match(ok.html,/동일 작업 반복 승인 완료/);
+ assert.match(ok.html,/grant_id:/);assert.match(ok.html,/남은 호출: 3/);assert.match(ok.html,/권한 상태: ACTIVE/);
  assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:s.job_id})).state,'QUEUED');
  assert.equal((await f.approvePage(s.job_id)).status,409,'approval cannot be replayed');
  const grants=await f.tool('oa','rian_v2_list_grants',{});
@@ -146,6 +150,25 @@ test('password attempts are rate limited per tenant and client',async t=>{
  const {ticket}=await f.approvePage(s.job_id);
  for(let i=0;i<5;i++)await f.submit(s.job_id,{ticket,password:'wrong-password-but-long-enough'});
  assert.equal((await f.submit(s.job_id,{ticket,password:f.pwA})).status,429);
+});
+
+test('password error preserves the selected mail review scope without echoing the password',async t=>{
+ const f=fixture(t),oauth={'x-rian-client-ref':'a'.repeat(32)};
+ const job=await f.tool('oa','mail_sync',{device:'pcA',days:14,max_messages:1000},oauth);
+ const p=await f.approvePage(job.job_id);
+ const bad=await f.submit(job.job_id,{ticket:p.ticket,password:'incorrect-owner-password',review:'1',
+   review_minutes:'30',review_jobs:'10',review_body:'1',review_reads:'1'});
+ assert.match(bad.html,/승인 암호가 일치하지 않습니다/);
+ assert.match(bad.html,/name="review" value="1"[^>]* checked/);
+ assert.match(bad.html,/name="review_body" value="1"[^>]* checked/);
+ assert.match(bad.html,/id="review_jobs"[^>]*value="10"/);
+ assert.match(bad.html,/id="review_reads"[^>]*value="1"/);
+ assert.doesNotMatch(bad.html,/incorrect-owner-password/);
+ const newTicket=/name="ticket" value="([^"]+)"/.exec(bad.html)?.[1];
+ const ok=await f.submit(job.job_id,{ticket:newTicket,password:f.pwA,review:'1',
+   review_minutes:'30',review_jobs:'10',review_body:'1',review_reads:'1'});
+ assert.match(ok.html,/업무메일 연속 검토 승인 완료/);
+ assert.match(ok.html,/남은 본문 조회: 1/);
 });
 
 test('agent API: claim, heartbeat with progress, complete; owner sees result via MCP',async t=>{
@@ -213,7 +236,9 @@ test('mail-review: one browser approval permits multiple different searches and 
  const approved=await f.submit(sync.job_id,{ticket:form.ticket,password:f.pwA,review:'1',
    review_minutes:'60',review_jobs:'8',review_body:'1',review_reads:'2'});
  assert.equal(approved.status,200);
- assert.match(approved.html,/연속 검토 세션을 승인/);
+ assert.match(approved.html,/업무메일 연속 검토 승인 완료/);
+ assert.match(approved.html,/권한 상태: PENDING_SYNC/);
+ assert.match(approved.html,/남은 호출: 8/);
  const active=await f.tool('oa','rian_v2_list_grants',{});
  assert.equal(active.grants.length,1);
  const review=active.grants[0];
