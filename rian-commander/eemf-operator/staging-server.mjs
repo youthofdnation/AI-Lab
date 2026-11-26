@@ -62,7 +62,7 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
       return;
     }
     const url=req.url||'';
-    const target=url.startsWith('/v2/mcp')||url.startsWith('/v2/agent/')||url.startsWith('/v2/approve/')?jobHandler:url.startsWith('/v2/')?artifactHandler:null;
+    const target=url.startsWith('/v2/mcp')||url.startsWith('/v2/agent/')||url.startsWith('/v2/approve/')||url.startsWith('/v2/policy/')?jobHandler:url.startsWith('/v2/')?artifactHandler:null;
     if(!target){res.writeHead(404,{'content-type':'application/json'});res.end('{"error":"NOT_FOUND"}');return;}
     const chunks=[];let size=0;
     try{

@@ -73,7 +73,8 @@ function tools(kinds){
       inputSchema:{type:'object',properties:{job_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['job_id'],additionalProperties:false}},
     {name:'rian_v2_list_jobs',description:'List recent jobs of this tenant (no results).',inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false}},
     {name:'rian_v2_cancel_job',description:'Cancel a pending approval, a queued job, or request a running job to stop safely.',inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false}},
-    {name:'rian_v2_list_grants',description:'List active exact-scope standing grants and owner-approved read-only mail review sessions (time/device/OAuth-client restricted), including remaining jobs/reads.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
+    ...(kindNames.includes('mail.status')?[{name:'rian_v2_request_read_policy',description:'Prepare a persistent, per-device/account/OAuth-client read-only Outlook mail policy. Owner password approval on the returned page is required once; no sync runs during registration. Durations: day, week, month, until_revoked. Only explicitly selected mail features are allowed. Proton needs its own adapter and is currently blocked.',inputSchema:{type:'object',properties:{device:{type:'string'},account:{type:'string'},account_type:{type:'string',enum:['outlook']},features:{type:'array',items:{type:'string'}},duration:{type:'string',enum:['day','week','month','until_revoked']},max_sync_days:{type:'integer'},max_sync_messages:{type:'integer'}},required:['device','account','account_type','features','duration'],additionalProperties:false}}]:[]),
+    {name:'rian_v2_list_grants',description:'List active exact-scope, short review and read-only policies, scoped to owner/device/OAuth client.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
     {name:'rian_v2_revoke_grant',description:'Revoke an exact-scope standing grant or read-only mail review session immediately; queued review jobs are cancelled.',inputSchema:{type:'object',properties:{grant_id:{type:'string'}},required:['grant_id'],additionalProperties:false}}
   ];
 }
@@ -128,6 +129,12 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       exact(args,['device','kind','params','request_key'],['device','kind','params']);
       if(typeof args.device!=='string')throw Error('INVALID_ARGUMENTS');
       return withApproval(queue.request({actor,deviceId:args.device,kind:args.kind,params:args.params,requestKey:args.request_key,clientRef}));
+    }
+    if(name==='rian_v2_request_read_policy'){
+      exact(args,['device','account','account_type','features','duration','max_sync_days','max_sync_messages'],['device','account','account_type','features','duration']);
+      const request=queue.prepareReadPolicy({actor,deviceId:args.device,clientRef,scope:{account:args.account,accountType:args.account_type,
+        features:args.features,duration:args.duration,maxSyncDays:args.max_sync_days??14,maxSyncMessages:args.max_sync_messages??1000}});
+      return {...request,approval_url:publicOrigin+'/v2/policy/'+request.request_id};
     }
     if(name==='rian_v2_job_status'){
       exact(args,['job_id','wait_seconds'],['job_id']);
@@ -246,10 +253,52 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     }catch(e){return page('<h1>승인하지 못했습니다</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
   }
 
+  function policyPage(p,msg=''){
+    const ticket=formTicket(p.request_id,nowS()+600);
+    return page('<h1>읽기 전용 사전 승인 정책 등록</h1><p>장치: <strong>'+escapeHtml(p.device)+
+      '</strong><br>계정: <strong>'+escapeHtml(p.account)+'</strong> ('+escapeHtml(p.account_type)+
+      ')<br>OAuth 연결: 현재 요청 연결로만 제한</p><p>허용 기능:</p><ul>'+p.features.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+
+      '</ul><p>기간: '+escapeHtml(p.duration)+'<br>동기화 한도: 최근 '+escapeHtml(String(p.max_days))+'일, 최대 '+
+      escapeHtml(String(p.max_messages))+'건</p><p>메일 발송·삭제·이동, 임의 셸과 파일 쓰기는 허용되지 않습니다. 이 정책은 동기화 작업 승인과 별개이며 언제든 철회할 수 있습니다.</p>'+
+      (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
+      '<form method="POST" action="/v2/policy/'+escapeHtml(p.request_id)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
+      '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
+      '<button type="submit">이 읽기 전용 정책 등록</button></form>');
+  }
+
+  async function approvePolicy(request,id){
+    const origin=request.headers.get('origin');
+    if(origin!==publicOrigin&&!(origin==='null'&&request.headers.get('sec-fetch-site')==='same-origin'))return page('<h1>다른 출처의 승인 요청 차단</h1>',403);
+    if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
+    let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
+    let p;try{p=queue.readPolicyPreview(id);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+    if(p.state!=='PENDING')return page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+    if(!ticketOK(form.get('ticket'),id))return policyPage(p,'승인 양식이 만료되었습니다. 암호를 다시 입력하세요.');
+    const key='policy|'+id,f=failures.get(key)||{count:0,until:nowS()+900};
+    if(f.count>=5&&f.until>nowS())return page('<h1>암호 시도 횟수 초과</h1>',429);
+    const approver=approverMap.get(p.tenant+'|'+p.owner);
+    if(!passwordOK(approver,form.get('password')||'')){
+      failures.set(key,{count:f.until>nowS()?f.count+1:1,until:nowS()+900});
+      return policyPage(p,'승인 암호가 일치하지 않습니다. 정책 범위는 변경되지 않았습니다.');
+    }
+    failures.delete(key);
+    try{const g=queue.approveReadPolicy({id,tenant:p.tenant,owner:p.owner});
+      return page('<h1>읽기 전용 사전 승인 정책 등록 완료</h1><p>grant_id: <code>'+escapeHtml(g.grant_id)+
+        '</code><br>권한 상태: '+escapeHtml(g.state)+'<br>만료: '+(g.expires_at===null?'직접 철회 시까지':
+          escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간)')+
+        '<br>현재 사용 호출: 0</p><p>같은 장치·계정·OAuth 연결과 선택한 기능에만 적용됩니다. rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>');
+    }catch(e){return page('<h1>정책 등록 실패</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
+  }
+
   async function agent(request,path){
     const actor=authenticate(request,'agent');
     const body=await jsonBody(request);
-    if(path==='/v2/agent/claim'){exact(body,['deviceId'],['deviceId']);return json(queue.claim({actor,deviceId:body.deviceId}));}
+    if(path==='/v2/agent/claim'){
+      exact(body,['deviceId','accountFingerprint','accountType'],['deviceId']);
+      if(body.accountFingerprint!==undefined&&!/^[a-f0-9]{64}$/.test(body.accountFingerprint))throw Error('INVALID_ACCOUNT_FINGERPRINT');
+      if(body.accountType!==undefined&&!['outlook','proton'].includes(body.accountType))throw Error('INVALID_ACCOUNT_TYPE');
+      return json(queue.claim({actor,deviceId:body.deviceId,accountFp:body.accountFingerprint??null,accountType:body.accountType??null}));
+    }
     const m=/^\/v2\/agent\/jobs\/([0-9a-f-]{36})\/(heartbeat|complete)$/.exec(path);
     if(!m)return json({error:'NOT_FOUND'},404);
     if(m[2]==='heartbeat'){exact(body,['leaseToken','progress'],['leaseToken']);return json(queue.heartbeat({actor,jobId:m[1],leaseToken:body.leaseToken,progress:body.progress??{}}));}
@@ -261,10 +310,11 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     const url=new URL(request.url),path=url.pathname,method=request.method.toUpperCase();
     try{
       const approveMatch=/^\/v2\/approve\/([0-9a-f-]{36})$/.exec(path);
+      const policyMatch=/^\/v2\/policy\/([0-9a-f-]{36})$/.exec(path);
       // ChatGPT adds this tracking parameter when the owner opens an approval
       // link. Accept it only on the read-only approval preview, never on POST
       // or an authenticated API route.
-      const chatgptApprovalLink=method==='GET'&&approveMatch&&
+      const chatgptApprovalLink=method==='GET'&&(approveMatch||policyMatch)&&
         url.searchParams.size===1&&url.searchParams.get('utm_source')==='chatgpt.com';
       if(url.hash||(url.search&&!chatgptApprovalLink))return json({error:'NOT_FOUND'},404);
       if(approveMatch&&UUID.test(approveMatch[1])){
@@ -274,6 +324,13 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
           return approvalPage(preview);
         }
         if(method==='POST')return await approve(request,approveMatch[1]);
+      }
+      if(policyMatch&&UUID.test(policyMatch[1])){
+        if(method==='GET'){
+          let p;try{p=queue.readPolicyPreview(policyMatch[1]);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+          return p.state==='PENDING'?policyPage(p):page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+        }
+        if(method==='POST')return await approvePolicy(request,policyMatch[1]);
       }
       if(method==='POST'&&path==='/v2/mcp')return await mcp(request);
       if(method==='POST'&&path.startsWith('/v2/agent/'))return await agent(request,path);

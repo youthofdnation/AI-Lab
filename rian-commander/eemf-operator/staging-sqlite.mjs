@@ -21,7 +21,7 @@ export class StagingSqlite {
     try {
       this.#db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
       const version=Number(this.#db.prepare('PRAGMA user_version').get().user_version);
-      if (version!==0 && version!==1 && version!==2) throw Error('UNSUPPORTED_SCHEMA_VERSION');
+      if (version!==0 && version!==1 && version!==2 && version!==3) throw Error('UNSUPPORTED_SCHEMA_VERSION');
       const ddl=[
         'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, cipher BLOB NOT NULL, iv BLOB NOT NULL, tag BLOB NOT NULL)',
         'CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, filename TEXT NOT NULL, size INTEGER NOT NULL CHECK (size>0), sha TEXT NOT NULL, chunks_total INTEGER NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL)',
@@ -45,7 +45,13 @@ export class StagingSqlite {
         'CREATE INDEX IF NOT EXISTS idx_mail_review_scope ON mail_review_sessions(tenant,owner,device,client_ref,state,expires)',
         'CREATE TABLE IF NOT EXISTS mail_review_message_hashes (session_id TEXT NOT NULL REFERENCES mail_review_sessions(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, PRIMARY KEY(session_id,msg_sha))',
         'CREATE TABLE IF NOT EXISTS mail_review_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, session_id TEXT NOT NULL REFERENCES mail_review_sessions(id))',
-        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))'
+        'CREATE TABLE IF NOT EXISTS agent_seen (tenant TEXT NOT NULL, device TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(tenant,device))',
+        // Separate from short mail-review sessions: a policy is approved independently of a sync.
+        'CREATE TABLE IF NOT EXISTS read_policy_requests (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, account_cipher BLOB NOT NULL, account_iv BLOB NOT NULL, account_tag BLOB NOT NULL, account_fp TEXT NOT NULL, account_type TEXT NOT NULL, features TEXT NOT NULL, duration TEXT NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, created INTEGER NOT NULL, approval_expires INTEGER NOT NULL, state TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS read_policies (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, device TEXT NOT NULL, client_ref TEXT NOT NULL, account_fp TEXT NOT NULL, account_type TEXT NOT NULL, features TEXT NOT NULL, max_days INTEGER NOT NULL, max_messages INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, calls_used INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL)',
+        'CREATE INDEX IF NOT EXISTS idx_read_policies_scope ON read_policies(tenant,owner,device,client_ref,state,expires)',
+        'CREATE TABLE IF NOT EXISTS read_policy_job_links (job_id TEXT PRIMARY KEY REFERENCES long_jobs(id) ON DELETE CASCADE, policy_id TEXT NOT NULL REFERENCES read_policies(id))',
+        'CREATE TABLE IF NOT EXISTS read_policy_message_hashes (policy_id TEXT NOT NULL REFERENCES read_policies(id) ON DELETE CASCADE, msg_sha TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(policy_id,msg_sha))'
       ];
       this.#db.exec(ddl.join(';')+';');
       // PR #13 has not been deployed, but keep local/staging databases made by
@@ -57,7 +63,7 @@ export class StagingSqlite {
         // on upgrade; the owner can approve a new bounded scope explicitly.
         this.#db.exec("UPDATE mail_review_sessions SET state='REVOKED',runs_left=0,reads_left=0 WHERE state IN ('ACTIVE','PENDING_SYNC');");
       }
-      if (version!==2) this.#db.exec('PRAGMA user_version=2;');
+      if (version!==3) this.#db.exec('PRAGMA user_version=3;');
       const sentinel=this.#db.prepare('SELECT cipher,iv,tag FROM meta WHERE key=?').get('storage-sentinel');
       if (sentinel) {
         const plaintext=this.decrypt(sentinel,'riancmd:v1:sentinel');

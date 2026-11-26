@@ -55,7 +55,7 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  const list=await f.rpc('oa','tools/list');
  const names=list.body.result.tools.map(x=>x.name);
  assert.deepEqual(names,['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending',
-   'rian_v2_devices','rian_v2_start_job','rian_v2_job_status','rian_v2_list_jobs','rian_v2_cancel_job','rian_v2_list_grants','rian_v2_revoke_grant']);
+   'rian_v2_devices','rian_v2_start_job','rian_v2_job_status','rian_v2_list_jobs','rian_v2_cancel_job','rian_v2_request_read_policy','rian_v2_list_grants','rian_v2_revoke_grant']);
  assert.ok(!names.some(n=>/approve/.test(n)));
  const t0=Date.now();
  const s=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'diag.wait',params:{seconds:60}});
@@ -67,6 +67,45 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  assert.equal((await f.rpc('aa','tools/list')).status,401,'agent token is not an owner');
  const anon=await f.handler(new Request(ORIGIN+'/v2/mcp',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}));
  assert.equal(anon.status,401,'anonymous MCP call rejected');
+});
+
+test('owner-approved read policy survives failed sync, binds account and OAuth, and revokes queued work',async t=>{
+ const f=fixture(t);
+ const ref='a'.repeat(32), headers={'x-rian-client-ref':ref};
+ const account='owner@example.test',fp=sha('rian-mail-account-v2|'+account);
+ const requested=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'outlook',
+   features:['mail.status','mail.sync','mail.search','mail.recent','mail.read'],duration:'day'},headers);
+ assert.equal(requested.state,'PENDING');
+ assert.equal((await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'proton',
+   features:['mail.status'],duration:'day'},headers)).error,'ACCOUNT_TYPE_NOT_SUPPORTED');
+ const page=await f.handler(new Request(requested.approval_url));
+ assert.equal(page.status,200);
+ const html=await page.text(),ticket=/name="ticket" value="([^"]+)"/.exec(html)?.[1];
+ assert.match(html,/owner@example.test/);
+ const denied=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+   body:new URLSearchParams({ticket,password:'incorrect-password-long-enough'})}));
+ assert.match(await denied.text(),/정책 범위는 변경되지 않았습니다/);
+ const approved=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+   body:new URLSearchParams({ticket,password:f.pwA})}));
+ assert.equal(approved.status,200);
+ assert.match(await approved.text(),/grant_id/);
+ const grants=(await f.tool('oa','rian_v2_list_grants',{})).grants;
+ const policy=grants.find(g=>g.kind==='read.policy');
+ assert.equal(policy.grant_id,requested.request_id);
+ assert.equal(policy.state,'ACTIVE');
+ const status=await f.tool('oa','mail_status',{device:'pcA'},headers);
+ assert.equal(status.state,'QUEUED');assert.equal(status.approval_required,false);
+ assert.equal(status.via_read_policy,true);
+ const wrongClient=await f.tool('oa','mail_status',{device:'pcA'},{'x-rian-client-ref':'b'.repeat(32)});
+ assert.equal(wrongClient.error,'ACTIVE_JOB_CONFLICT');
+ const wrongOwner=await f.tool('oa2','mail_status',{device:'pcA'},headers);
+ assert.equal(wrongOwner.error,'ACTIVE_JOB_CONFLICT');
+ const deniedClaim=await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA',accountFingerprint:'f'.repeat(64),accountType:'outlook'});
+ assert.equal(deniedClaim.body.job,null);
+ assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.some(g=>g.grant_id===policy.grant_id),false);
+ assert.equal((await f.tool('oa','mail_status',{device:'pcA'},headers)).state,'AWAITING_APPROVAL');
+ const changed=await f.tool('oa','rian_v2_revoke_grant',{grant_id:policy.grant_id});
+ assert.equal(changed.state,'REVOKED');
 });
 
 test('ChatGPT approval link tracking parameter opens only the read-only preview',async t=>{

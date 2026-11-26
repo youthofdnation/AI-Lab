@@ -78,7 +78,7 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   writeFileSync(join(dir,'agentA.token'),tokens.aa);
   writeFileSync(agentCfg,JSON.stringify({relay_url:relay,device_id:'E2E-PC-A',token_file:join(dir,'agentA.token'),state_dir:join(dir,'agentA-state'),
     allowed_kinds:['diag.wait','mail.status','mail.sync','mail.search','mail.read','mail.recent','mail.review_pending'],allow_test_loopback:true,poll_seconds:1,
-    mail:{data_dir:join(dir,'rian-mail-v2'),account_fingerprint:sha('rian-mail-account-v2|e2e.user@example.test'),legacy_index:join(dir,'legacy-index.json'),source:{type:'fixture',path:join(dir,'mailbox.json')}}}));
+    mail:{data_dir:join(dir,'rian-mail-v2'),account_fingerprint:sha('rian-mail-account-v2|e2e.user@example.test'),account_type:'outlook',legacy_index:join(dir,'legacy-index.json'),source:{type:'fixture',path:join(dir,'mailbox.json')}}}));
   const startAgent=async()=>{const a=launch('agentA',PYTHON,['rian-v2-agent.py','run','--config',agentCfg],{});await waitLine(a,/AGENT_STARTED/);return a;};
 
   // ---- OAuth Owner Gateway (real gateway.ts) --------------------------------------------------
@@ -109,7 +109,7 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   assert.equal((await mcp('tools/list',{},'not-a-token')).status,401,'gateway requires OAuth');
   const names=(await mcp('tools/list',{})).body.result.tools.map(x=>x.name);
   assert.ok(names.includes('rian_v2_start_job')&&names.includes('rian_v2_job_status')&&
-    ['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending'].every(n=>names.includes(n)),'V2 mail tools exposed through OAuth gateway');
+    ['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending','rian_v2_request_read_policy'].every(n=>names.includes(n)),'V2 mail tools exposed through OAuth gateway');
   assert.ok(!names.some(n=>/approve/.test(n)));
 
   const browserApprove=async(approvalUrl,password,extra={})=>{
@@ -234,4 +234,31 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   assert.equal(sync3.state,'AWAITING_APPROVAL','revoked grant no longer skips approval');
   assert.equal((await call('rian_v2_cancel_job',{job_id:sync3.job_id})).state,'APPROVAL_CANCELLED');
   mark('mail review grant revoked; approval required again; pending approval cancelled');
+  const requested=await call('rian_v2_request_read_policy',{device:'E2E-PC-A',account:'e2e.user@example.test',account_type:'outlook',
+    features:['mail.status','mail.sync','mail.search','mail.recent','mail.read','mail.review_pending'],duration:'day'});
+  assert.equal(requested.state,'PENDING');
+  const policyApproved=await browserApprove(requested.approval_url,pwA);
+  assert.equal(policyApproved.status,200);assert.match(policyApproved.html,/grant_id/);
+  const policyStatus=await call('mail_status',{device:'E2E-PC-A'});
+  assert.equal(policyStatus.state,'QUEUED');assert.equal(policyStatus.approval_url,undefined);
+  assert.equal((await waitState(policyStatus.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const policySync=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
+  assert.equal(policySync.state,'QUEUED');assert.equal(policySync.approval_url,undefined);
+  assert.equal((await waitState(policySync.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const policySearch=await call('mail_search',{device:'E2E-PC-A',query:'합성',limit:5});
+  assert.equal(policySearch.state,'QUEUED');
+  const policySearchResult=await waitState(policySearch.job_id,['SUCCEEDED','FAILED']);
+  assert.equal(policySearchResult.state,'SUCCEEDED');
+  const policyRead=await call('mail_read',{device:'E2E-PC-A',message_id:policySearchResult.result.results[0].message_id});
+  assert.equal(policyRead.state,'QUEUED');assert.equal(policyRead.approval_url,undefined);
+  assert.equal((await waitState(policyRead.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  await hardKill(server);server=await startServer();
+  const afterRestart=await call('mail_status',{device:'E2E-PC-A'});
+  assert.equal(afterRestart.state,'QUEUED','read policy persists across process restart');
+  assert.equal((await waitState(afterRestart.job_id,['SUCCEEDED','FAILED'])).state,'SUCCEEDED');
+  const current=(await call('rian_v2_list_grants',{})).grants.find(g=>g.grant_id===requested.request_id);
+  assert.equal(current.state,'ACTIVE');
+  assert.equal((await call('rian_v2_revoke_grant',{grant_id:requested.request_id})).state,'REVOKED');
+  assert.equal((await call('mail_status',{device:'E2E-PC-A'})).state,'AWAITING_APPROVAL');
+  mark('persistent read policy: one owner approval, sync/search/body, restart, then revocation');
 });

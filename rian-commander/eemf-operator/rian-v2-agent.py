@@ -172,6 +172,9 @@ def run_job(job_dir, cfg):
             if not data_dir:
                 raise mail.MailError("MAIL_DATA_DIR_REQUIRED")
             account_pin = mcfg.get("account_fingerprint")
+            if job.get("policyAccountFp") is not None:
+                if job.get("policyAccountFp") != account_pin or job.get("policyAccountType") != mcfg.get("account_type"):
+                    raise mail.MailError("READ_POLICY_ACCOUNT_MISMATCH")
             if account_pin is not None:
                 mail.verify_mail_account(data_dir, account_pin)
             if job["kind"] == "mail.sync":
@@ -311,7 +314,11 @@ class Supervisor:
         return proc
 
     def claim(self):
-        reply = self.client.request("POST", "/v2/agent/claim", {"deviceId": self.cfg["device_id"]})
+        mcfg = self.cfg.get("mail") or {}
+        request = {"deviceId": self.cfg["device_id"]}
+        if mcfg.get("account_fingerprint") and mcfg.get("account_type") == "outlook":
+            request.update(accountFingerprint=mcfg["account_fingerprint"], accountType=mcfg["account_type"])
+        reply = self.client.request("POST", "/v2/agent/claim", request)
         job = reply.get("job")
         if not job:
             return None

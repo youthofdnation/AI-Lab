@@ -25,6 +25,7 @@
 import {randomUUID,randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
+import {ReadPolicyStore} from './read-policy-store.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
 import {planMailReview,reviewAllows,reviewMessageHash,recentMessageHashes} from './mail-review-scope.mjs';
 
@@ -59,7 +60,7 @@ export function longJobGuidance(state){
 }
 
 export class LongJobQueue {
-  #store;#directory;#kinds;#clock;#limits;#deviceKinds;
+  #store;#directory;#kinds;#clock;#limits;#deviceKinds;#policies;
   /**
    * deviceKinds (optional): Map/entries of deviceId -> allowed kind names. A listed device can
    * only be asked for those kinds (server-side, before any approval page); unlisted devices keep
@@ -67,7 +68,7 @@ export class LongJobQueue {
    */
   constructor({directory,store,kinds=new LongJobKinds(),clock=()=>Date.now(),limits={},deviceKinds=null}){
     if(!(directory instanceof TenantDirectory)||!(store instanceof StagingSqlite)||!(kinds instanceof LongJobKinds)||typeof clock!=='function')throw Error('INVALID_LONG_JOB_QUEUE');
-    this.#store=store;this.#directory=directory;this.#kinds=kinds;this.#clock=clock;
+    this.#store=store;this.#directory=directory;this.#kinds=kinds;this.#clock=clock;this.#policies=new ReadPolicyStore(store,clock);
     this.#limits=Object.freeze({...LONG_JOB_LIMITS,...limits});
     this.#deviceKinds=new Map();
     const known=new Set(kinds.names());
@@ -125,6 +126,7 @@ export class LongJobQueue {
       approved_at:j.approved_at,started_at:j.started,heartbeat_at:j.heartbeat_at,finished_at:j.finished,
       run_deadline:j.run_deadline,via_standing_grant:!!j.grant_id,
       via_mail_review_session:!!this.#db().prepare('SELECT session_id FROM mail_review_job_links WHERE job_id=?').get(j.id),
+      via_read_policy:!!this.#policies.forJob(j.id),
       progress:j.progress_pct===null&&j.progress_stage===null?null:{percent:j.progress_pct,stage:j.progress_stage,done:j.progress_done,total:j.progress_total},
       outcome:j.outcome,exit_code:j.exit_code,
       result:withResult&&terminal?this.#result(j):null,
@@ -180,6 +182,17 @@ export class LongJobQueue {
       ...(this.#deviceKinds.has(d.id)?{allowed_kinds:[...this.#deviceKinds.get(d.id)]}:{})}));
   }
   /** Owner request. Returns immediately with a job id; never waits for execution. */
+  prepareReadPolicy({actor,deviceId,clientRef,scope}){
+    this.#directory.assertOwner(actor);this.#directory.assertDevice(actor.tenantId,deviceId);
+    // The currently shipped agent uses the Outlook Bridge only. Proton needs its
+    // own verified adapter before any policy for that provider can become active.
+    if(scope?.accountType!=='outlook')throw Error('ACCOUNT_TYPE_NOT_SUPPORTED');
+    if(!scope||!Array.isArray(scope.features)||scope.features.some(kind=>!this.#kindAllowed(deviceId,kind)))
+      throw Error('KIND_NOT_ALLOWED_FOR_DEVICE');
+    return this.#policies.prepare({actor,device:deviceId,clientRef,scope});
+  }
+  readPolicyPreview(id){return this.#policies.preview(id);}
+  approveReadPolicy({id,tenant,owner}){return this.#policies.approve({id,tenant,owner});}
   request({actor,deviceId,kind,params,requestKey,clientRef=null}){
     this.#directory.assertOwner(actor);
     this.#directory.assertDevice(actor.tenantId,deviceId);
@@ -204,13 +217,15 @@ export class LongJobQueue {
         if(active.owner===actor.id&&active.client_ref===clientRef&&active.spec_sha===specSha)
           return {...this.#summary(active,{withResult:false}),deduplicated:true};
         // Never reveal a different owner's job ID or result in a deduplication response.
-        if(active.owner!==actor.id)throw Error('ACTIVE_JOB_CONFLICT');
+        if(active.owner!==actor.id||active.client_ref!==clientRef)throw Error('ACTIVE_JOB_CONFLICT');
         throw Error('ACTIVE_JOB_CONFLICT:'+active.id);
       }
       const open=db.prepare(`SELECT COUNT(*) AS n FROM long_jobs WHERE tenant=? AND device=? AND state IN (${placeholder(ACTIVE.length)})`).get(actor.tenantId,deviceId,...ACTIVE).n;
       if(open>=this.#limits.maxOpenPerDevice)throw Error('QUEUE_FULL');
       const id=randomUUID();
-      const grant=spec.grantable?db.prepare("SELECT * FROM long_job_grants WHERE tenant=? AND owner=? AND device=? AND kind=? AND spec_sha=? AND state='ACTIVE' AND expires>? AND runs_left>0 ORDER BY expires LIMIT 1")
+      // Legacy exact grants have no OAuth-client column. They cannot be used to
+      // widen a client-bound mail policy across a different OAuth connection.
+      const grant=spec.grantable&&!(clientRef!==null&&kind.startsWith('mail.'))?db.prepare("SELECT * FROM long_job_grants WHERE tenant=? AND owner=? AND device=? AND kind=? AND spec_sha=? AND state='ACTIVE' AND expires>? AND runs_left>0 ORDER BY expires LIMIT 1")
         .get(actor.tenantId,actor.id,deviceId,kind,specSha,now):null;
       // Unlike an exact-params grant, the user-approved mail review session is
       // bound to this owner + device + OAuth client and permits bounded, varied queries.
@@ -227,12 +242,14 @@ export class LongJobQueue {
           }else if(reviewAllows(candidate,kind,safe))review=candidate;
         }
       }
+      const policy=!grant&&!review&&clientRef!==null?this.#policies.find({actor,device:deviceId,clientRef,kind,params:safe}):null;
       const row={id,tenant:actor.tenantId};
       const enc=this.#store.encrypt(Buffer.from(JSON.stringify(safe),'utf8'),this.#aad('params',row));
-      const state=(grant||review)?'QUEUED':'AWAITING_APPROVAL';
+      const state=(grant||review||policy)?'QUEUED':'AWAITING_APPROVAL';
       db.prepare('INSERT INTO long_jobs(id,tenant,owner,client_ref,request_key,spec_sha,device,kind,lock_group,params_cipher,params_iv,params_tag,state,grant_id,created,approval_expires,queue_deadline,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id,actor.tenantId,actor.id,clientRef,requestKey||null,specSha,deviceId,kind,spec.lockGroup,enc.cipher,enc.iv,enc.tag,state,grant?grant.id:null,now,
-          (grant||review)?null:now+this.#limits.approvalTtlSeconds,(grant||review)?now+this.#limits.queueTtlSeconds:null,(grant||review)?now:null);
+          (grant||review||policy)?null:now+this.#limits.approvalTtlSeconds,(grant||review||policy)?now+this.#limits.queueTtlSeconds:null,(grant||review||policy)?now:null);
+      if(policy)this.#policies.link(id,policy,kind,safe);
       if(review){
         db.prepare('INSERT INTO mail_review_job_links(job_id,session_id) VALUES(?,?)').run(id,review.id);
         db.prepare('UPDATE mail_review_sessions SET runs_left=runs_left-1, reads_left=reads_left-? WHERE id=?')
@@ -245,8 +262,8 @@ export class LongJobQueue {
         db.prepare("UPDATE long_job_grants SET runs_left=?,state=? WHERE id=?").run(left,left>0?'ACTIVE':'EXHAUSTED',grant.id);
         this.#store.audit(actor.tenantId,actor.id,grant.id,'LONG_JOB_GRANT_USED',now);
       }
-      this.#store.audit(actor.tenantId,actor.id,id,review?'LONG_JOB_QUEUED_BY_MAIL_REVIEW':grant?'LONG_JOB_QUEUED_BY_GRANT':'LONG_JOB_AWAITING_APPROVAL',now);
-      return {...this.#summary(this.#row(id),{withResult:false}),deduplicated:false,approval_required:!(grant||review)};
+      this.#store.audit(actor.tenantId,actor.id,id,policy?'LONG_JOB_QUEUED_BY_READ_POLICY':review?'LONG_JOB_QUEUED_BY_MAIL_REVIEW':grant?'LONG_JOB_QUEUED_BY_GRANT':'LONG_JOB_AWAITING_APPROVAL',now);
+      return {...this.#summary(this.#row(id),{withResult:false}),deduplicated:false,approval_required:!(grant||review||policy)};
     });
   }
   /** Unauthenticated approval page preview: the job id is an unguessable UUID shown only to its owner. */
@@ -348,11 +365,13 @@ export class LongJobQueue {
       .map(g=>({grant_id:g.id,device:g.device,kind:g.kind,created_at:g.created,expires_at:g.expires,runs_left:g.runs_left,state:g.state}));
     const review=this.#db().prepare("SELECT id,device,created,expires,runs_left,reads_left,max_days,max_messages,state FROM mail_review_sessions WHERE tenant=? AND owner=? AND state IN ('ACTIVE','PENDING_SYNC') ORDER BY expires").all(actor.tenantId,actor.id)
       .map(g=>({grant_id:g.id,device:g.device,kind:'mail.review.readonly',created_at:g.created,expires_at:g.expires,runs_left:g.runs_left,body_reads_left:g.reads_left,max_sync_days:g.max_days,max_sync_messages:g.max_messages,state:g.state}));
-    return [...exact,...review];
+    return [...exact,...review,...this.#policies.list(actor)];
   }
   revokeGrant({actor,grantId}){
     this.#directory.assertOwner(actor);
     if(typeof grantId!=='string'||!UUID.test(grantId))throw Error('GRANT_NOT_FOUND');
+    if(this.#db().prepare('SELECT 1 FROM read_policies WHERE id=? AND tenant=? AND owner=?').get(grantId,actor.tenantId,actor.id))
+      return this.#policies.revoke(actor,grantId);
     return this.#store.transaction(()=>{
       const g=this.#db().prepare('SELECT * FROM long_job_grants WHERE id=? AND tenant=? AND owner=?').get(grantId,actor.tenantId,actor.id);
       if(!g){
@@ -369,7 +388,7 @@ export class LongJobQueue {
     });
   }
   /** Agent claims the oldest approved job for its own device. Exactly-once dispatch. */
-  claim({actor,deviceId}){
+  claim({actor,deviceId,accountFp=null,accountType=null}){
     this.#directory.assertAgent(actor,actor.tenantId,deviceId);
     const now=this.#now(),db=this.#db();
     return this.#store.transaction(()=>{
@@ -377,6 +396,16 @@ export class LongJobQueue {
       this.#reapLocked(now,' AND tenant=? AND device=?',[actor.tenantId,deviceId]);
       const j=db.prepare("SELECT * FROM long_jobs WHERE tenant=? AND device=? AND state='QUEUED' AND queue_deadline>? ORDER BY approved_at ASC,created ASC LIMIT 1").get(actor.tenantId,deviceId,now);
       if(!j)return {job:null};
+      const policy=this.#policies.forJob(j.id);
+      if(policy&&(policy.state!=='ACTIVE'||policy.expires<=now||policy.account_fp!==accountFp||policy.account_type!==accountType)){
+        db.prepare("UPDATE long_jobs SET state='CANCELLED',finished=? WHERE id=? AND state='QUEUED'").run(now,j.id);
+        if(accountFp!==null&&accountType!==null&&(policy.account_fp!==accountFp||policy.account_type!==accountType)){
+          db.prepare("UPDATE read_policies SET state='SUSPENDED' WHERE id=? AND state='ACTIVE'").run(policy.id);
+          this.#store.audit(policy.tenant,actor.id,policy.id,'READ_POLICY_ACCOUNT_CHANGED',now);
+        }
+        this.#audit(j,'system','READ_POLICY_CLAIM_DENIED');
+        return {job:null};
+      }
       const review=this.#reviewForJob(j.id);
       if(review&&(!((review.state==='ACTIVE')||(review.state==='PENDING_SYNC'&&review.initial_job_id===j.id))||review.expires<=now)){
         db.prepare("UPDATE long_jobs SET state='CANCELLED',finished=? WHERE id=? AND state='QUEUED'").run(now,j.id);
@@ -394,7 +423,8 @@ export class LongJobQueue {
         .run(now,now+kind.maxRuntimeSeconds,sha(token),now+kind.leaseSeconds,now,j.id);
       if(changed.changes!==1)throw Error('JOB_CLAIM_CONFLICT');
       this.#audit(j,actor.id,'LONG_JOB_DISPATCHED');
-      return {job:{jobId:j.id,kind:j.kind,params:this.#params(j),leaseToken:token,leaseSeconds:kind.leaseSeconds,maxRuntimeSeconds:kind.maxRuntimeSeconds,runDeadline:now+kind.maxRuntimeSeconds}};
+      return {job:{jobId:j.id,kind:j.kind,params:this.#params(j),leaseToken:token,leaseSeconds:kind.leaseSeconds,maxRuntimeSeconds:kind.maxRuntimeSeconds,runDeadline:now+kind.maxRuntimeSeconds,
+        ...(policy?{policyAccountFp:policy.account_fp,policyAccountType:policy.account_type}:{})}};
     });
   }
   heartbeat({actor,jobId,leaseToken,progress={}}){
@@ -457,6 +487,9 @@ export class LongJobQueue {
             .run(review.id,idHash);
         }
       }
+      const policy=this.#policies.forJob(j.id);
+      if(policy&&['mail.search','mail.recent','mail.review_pending'].includes(j.kind)&&outcome==='SUCCEEDED'&&exitCode===0&&
+        policy.state==='ACTIVE'&&policy.expires>now)this.#policies.recordSearch(policy,parsed);
       const enc=this.#store.encrypt(Buffer.from(JSON.stringify(parsed),'utf8'),this.#aad('result',j));
       const late=j.state==='UNKNOWN_DO_NOT_RETRY';
       this.#db().prepare('UPDATE long_jobs SET state=?,outcome=?,exit_code=?,finished=?,result_sha=?,result_cipher=?,result_iv=?,result_tag=?,progress_pct=CASE WHEN ?=\'SUCCEEDED\' THEN 100 ELSE progress_pct END WHERE id=?')
