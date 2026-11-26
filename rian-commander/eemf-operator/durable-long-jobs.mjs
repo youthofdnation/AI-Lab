@@ -43,7 +43,7 @@ const placeholder=(n)=>Array(n).fill('?').join(',');
 /** Korean guidance shown to ChatGPT so it never asks the user to rerun PowerShell or to retry blindly. */
 export function longJobGuidance(state){
   return ({
-    AWAITING_APPROVAL:'소유자 승인 대기 중입니다. approval_url을 브라우저에서 열어 정확한 범위를 확인하고 승인하세요. 아직 아무것도 실행되지 않았습니다.',
+    AWAITING_APPROVAL:'소유자 승인 대기 중입니다. 고정 권한 관리센터에서 정확한 범위를 확인하고 패스키로 승인하세요. 아직 아무것도 실행되지 않았습니다.',
     QUEUED:'승인 완료, PC 에이전트가 가져가기를 기다리는 중입니다. PC가 꺼져 있으면 켜지는 즉시 실행됩니다.',
     RUNNING:'PC에서 실행 중입니다. 진행률은 job_status로 확인하세요. 같은 작업을 다시 요청하지 마세요.',
     CANCEL_REQUESTED:'취소를 요청했습니다. PC 에이전트가 안전한 지점에서 중단하면 CANCELLED로 바뀝니다.',
@@ -191,8 +191,17 @@ export class LongJobQueue {
       throw Error('KIND_NOT_ALLOWED_FOR_DEVICE');
     return this.#policies.prepare({actor,device:deviceId,clientRef,scope});
   }
+  prepareReadPolicyChange({actor,grantId,scope}){
+    this.#directory.assertOwner(actor);
+    if(!scope||!Array.isArray(scope.features))throw Error('INVALID_POLICY_SCOPE');
+    const old=this.#policies.list(actor).find(x=>x.grant_id===grantId);
+    if(!old)throw Error('GRANT_NOT_FOUND');
+    if(scope.features.some(kind=>!this.#kindAllowed(old.device,kind)))throw Error('KIND_NOT_ALLOWED_FOR_DEVICE');
+    return this.#policies.prepareChange({actor,grantId,scope});
+  }
+  listReadPolicyRequests(actor,limit=50){this.#directory.assertOwner(actor);return this.#policies.listRequests(actor,limit);}
   readPolicyPreview(id){return this.#policies.preview(id);}
-  approveReadPolicy({id,tenant,owner}){return this.#policies.approve({id,tenant,owner});}
+  approveReadPolicy({id,tenant,owner,scopeOverride=null}){return this.#policies.approve({id,tenant,owner,scopeOverride});}
   request({actor,deviceId,kind,params,requestKey,clientRef=null}){
     this.#directory.assertOwner(actor);
     this.#directory.assertDevice(actor.tenantId,deviceId);

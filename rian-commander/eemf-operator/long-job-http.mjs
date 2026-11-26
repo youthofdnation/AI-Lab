@@ -97,13 +97,14 @@ function tools(kinds){
   const kindForTool={mail_status:'mail.status',mail_sync:'mail.sync',mail_search:'mail.search',mail_read:'mail.read',mail_recent:'mail.recent',mail_review_pending:'mail.review_pending'};
   return [...mailTools.filter(t=>kindNames.includes(kindForTool[t.name])),
     {name:'rian_v2_devices',description:'List this tenant\'s registered PCs and whether each V2 agent is online. Read only.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
-    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If no exact-scope standing grant exists, the result contains approval_url for the owner to approve once in a browser. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
+    {name:'rian_v2_start_job',description:'Start a long-running remote job and return job_id IMMEDIATELY (no 28 s limit). If approval is required, the result points to one fixed permission center for the owner to review and approve with a passkey. Kinds: mail.sync {days 1-14, maxMessages 1-1000} merges new mail into the local index with automatic backup; mail.search {query, limit 1-20} returns metadata only; mail.read {messageId} returns ONE selected message body (normally a separate approval; an explicitly approved time-bounded mail-review session can read only recent IDs returned by its own successful searches)'+(kindNames.includes('diag.wait')?'; diag.wait {seconds 1-900} is a synthetic progress-only test job':'')+'. Never sends, deletes or moves mail. Re-sending the same request returns the same job (duplicate prevention).',
       inputSchema:{type:'object',properties:{device:{type:'string'},kind:{type:'string',enum:kindNames},params:{type:'object'},request_key:{type:'string',pattern:'^[A-Za-z0-9_-]{16,80}$'}},required:['device','kind','params'],additionalProperties:false}},
     {name:'rian_v2_job_status',description:'Get state, progress and (when finished) the result of a job. wait_seconds (0-20) waits for a change. Never retry a job whose state is RUNNING or UNKNOWN_DO_NOT_RETRY.',
       inputSchema:{type:'object',properties:{job_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['job_id'],additionalProperties:false}},
     {name:'rian_v2_list_jobs',description:'List recent jobs of this tenant (no results).',inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false}},
     {name:'rian_v2_cancel_job',description:'Cancel a pending approval, a queued job, or request a running job to stop safely.',inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false}},
-    ...(kindNames.includes('mail.status')?[{name:'rian_v2_request_read_policy',description:'Prepare a persistent, per-device/account/OAuth-client read-only Outlook mail policy. Owner password approval on the returned page is required once; no sync runs during registration. Durations: day, week, month, until_revoked. Only explicitly selected mail features are allowed. Proton needs its own adapter and is currently blocked.',inputSchema:{type:'object',properties:{device:{type:'string'},account:{type:'string'},account_type:{type:'string',enum:['outlook']},features:{type:'array',items:{type:'string'}},duration:{type:'string',enum:['day','week','month','until_revoked']},max_sync_days:{type:'integer'},max_sync_messages:{type:'integer'}},required:['device','account','account_type','features','duration'],additionalProperties:false}}]:[]),
+    ...(kindNames.includes('mail.status')?[{name:'rian_v2_request_read_policy',description:'Prepare or reuse a persistent, per-device/account/OAuth-client read-only Outlook mail policy. The owner approves at one fixed RIAN permission center using a passkey; first passkey enrollment needs the owner recovery password. No sync runs during registration. Durations: day, week, month, until_revoked. Proton needs its own adapter and is currently blocked.',inputSchema:{type:'object',properties:{device:{type:'string'},account:{type:'string'},account_type:{type:'string',enum:['outlook']},features:{type:'array',items:{type:'string'}},duration:{type:'string',enum:['day','week','month','until_revoked']},max_sync_days:{type:'integer'},max_sync_messages:{type:'integer'}},required:['device','account','account_type','features','duration'],additionalProperties:false}},
+      {name:'rian_v2_policy_status',description:'Check a policy request from this same owner and OAuth connection, optionally waiting up to 20 seconds while the conversation remains active. Return its current grant state and the fixed permission center URL. A closed ChatGPT session does not auto-resume.',inputSchema:{type:'object',properties:{request_id:{type:'string'},wait_seconds:{type:'integer',minimum:0,maximum:20}},required:['request_id'],additionalProperties:false}}]:[]),
     {name:'rian_v2_list_grants',description:'List active exact-scope, short review and read-only policies, scoped to owner/device/OAuth client.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
     {name:'rian_v2_revoke_grant',description:'Revoke an exact-scope standing grant or read-only mail review session immediately; queued review jobs are cancelled.',inputSchema:{type:'object',properties:{grant_id:{type:'string'}},required:['grant_id'],additionalProperties:false}}
   ];
@@ -137,8 +138,8 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     // 'same-origin', not 'no-referrer': with no-referrer browsers send "Origin: null" on the
     // approval form POST (Fetch spec), so the Origin check below rejected every real browser.
     {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-"+APPROVAL_SCRIPT_HASH+"'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
-  const approvalUrl=id=>publicOrigin+'/v2/approve/'+id;
-  const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:approvalUrl(s.job_id)}:s;
+  const managementUrl=publicOrigin+'/v2/permissions';
+  const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:managementUrl,management_url:managementUrl}:s;
 
   async function callTool(actor,name,args,clientRef){
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('INVALID_ARGUMENTS');
@@ -164,7 +165,23 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       exact(args,['device','account','account_type','features','duration','max_sync_days','max_sync_messages'],['device','account','account_type','features','duration']);
       const request=queue.prepareReadPolicy({actor,deviceId:args.device,clientRef,scope:{account:args.account,accountType:args.account_type,
         features:args.features,duration:args.duration,maxSyncDays:args.max_sync_days??14,maxSyncMessages:args.max_sync_messages??1000}});
-      return {...request,approval_url:publicOrigin+'/v2/policy/'+request.request_id};
+      return {...request,...(request.request_id?{approval_url:managementUrl,management_url:managementUrl}:{management_url:managementUrl})};
+    }
+    if(name==='rian_v2_policy_status'){
+      exact(args,['request_id','wait_seconds'],['request_id']);
+      const wait=args.wait_seconds??0;
+      if(!Number.isInteger(wait)||wait<0||wait>20)throw Error('INVALID_ARGUMENTS');
+      const preview=()=>{
+        const p=queue.readPolicyPreview(args.request_id);
+        if(p.tenant!==actor.tenantId||p.owner!==actor.id||p.client_ref!==clientRef)throw Error('POLICY_REQUEST_NOT_FOUND');
+        return p;
+      };
+      let p=preview();const before=JSON.stringify([p.state,p.grant]),until=Date.now()+wait*1000;
+      while(p.state!=='APPROVED'&&p.renewable&&Date.now()<until){
+        await sleep(Math.min(1000,until-Date.now()));p=preview();if(JSON.stringify([p.state,p.grant])!==before)break;
+      }
+      return {request_id:p.request_id,state:p.state,renewable:p.renewable,grant:p.grant,
+        management_url:managementUrl};
     }
     if(name==='rian_v2_job_status'){
       exact(args,['job_id','wait_seconds'],['job_id']);

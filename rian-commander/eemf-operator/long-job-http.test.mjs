@@ -13,6 +13,7 @@ import {createLongJobHandler,hashApprovalPassword,clientRefFor} from './long-job
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const ORIGIN='https://rian-commander-tenant-staging.example.test';
+const policyUrl=request=>ORIGIN+'/v2/policy/'+request.request_id; // legacy password recovery page, not issued by MCP
 function fixture(t,clock=()=>Date.now()){
  const dir=mkdtempSync(join(tmpdir(),'rian-ljhttp-'));
  const tkn=Object.fromEntries(['oa','oa2','ob','aa','ab'].map(x=>[x,randomBytes(40).toString('base64url')]));
@@ -56,13 +57,14 @@ test('MCP: tools list has no approve tool; start returns job_id + approval_url i
  const list=await f.rpc('oa','tools/list');
  const names=list.body.result.tools.map(x=>x.name);
  assert.deepEqual(names,['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending',
-   'rian_v2_devices','rian_v2_start_job','rian_v2_job_status','rian_v2_list_jobs','rian_v2_cancel_job','rian_v2_request_read_policy','rian_v2_list_grants','rian_v2_revoke_grant']);
+   'rian_v2_devices','rian_v2_start_job','rian_v2_job_status','rian_v2_list_jobs','rian_v2_cancel_job','rian_v2_request_read_policy','rian_v2_policy_status','rian_v2_list_grants','rian_v2_revoke_grant']);
  assert.ok(!names.some(n=>/approve/.test(n)));
  const t0=Date.now();
  const s=await f.tool('oa','rian_v2_start_job',{device:'pcA',kind:'diag.wait',params:{seconds:60}});
  assert.ok(Date.now()-t0<2000,'no synchronous execution wait');
  assert.equal(s.state,'AWAITING_APPROVAL');
- assert.equal(s.approval_url,ORIGIN+'/v2/approve/'+s.job_id);
+ assert.equal(s.approval_url,ORIGIN+'/v2/permissions');
+ assert.equal(s.management_url,ORIGIN+'/v2/permissions');
  assert.match(s.guidance,/승인/);
  assert.equal((await f.rpc('oa','notifications/initialized')).status,202);
  assert.equal((await f.rpc('aa','tools/list')).status,401,'agent token is not an owner');
@@ -77,9 +79,16 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  const requested=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'outlook',
    features:['mail.status','mail.sync','mail.search','mail.recent','mail.read'],duration:'day'},headers);
  assert.equal(requested.state,'PENDING');
+ assert.equal(requested.management_url,ORIGIN+'/v2/permissions');
+ const duplicate=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'outlook',
+   features:['mail.status','mail.sync','mail.search','mail.recent','mail.read'],duration:'day'},headers);
+ assert.equal(duplicate.request_id,requested.request_id);
+ assert.equal(duplicate.deduplicated,true);
+ assert.equal((await f.tool('oa','rian_v2_policy_status',{request_id:requested.request_id},headers)).state,'PENDING');
+ assert.equal((await f.tool('oa','rian_v2_policy_status',{request_id:requested.request_id},{'x-rian-client-ref':'b'.repeat(32)})).error,'POLICY_REQUEST_NOT_FOUND');
  assert.equal((await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'proton',
    features:['mail.status'],duration:'day'},headers)).error,'ACCOUNT_TYPE_NOT_SUPPORTED');
- const page=await f.handler(new Request(requested.approval_url));
+ const page=await f.handler(new Request(policyUrl(requested)));
  assert.equal(page.status,200);
  assert.match(page.headers.get('content-security-policy'),/script-src 'sha256-[^']+'; connect-src 'self'/);
  const html=await page.text(),ticket=/name="ticket" value="([^"]+)"/.exec(html)?.[1];
@@ -89,17 +98,17 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  assert.ok(script);
  assert.doesNotThrow(()=>new Script(script));
  assert.ok(page.headers.get('content-security-policy').includes("'sha256-"+createHash('sha256').update(script).digest('base64')+"'"));
- const denied=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+ const denied=await f.handler(new Request(policyUrl(requested),{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
    body:new URLSearchParams({ticket,password:'incorrect-password-long-enough'})}));
  assert.match(await denied.text(),/정책 범위는 변경되지 않았습니다/);
- const approved=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+ const approved=await f.handler(new Request(policyUrl(requested),{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
    body:new URLSearchParams({ticket,password:f.pwA})}));
  assert.equal(approved.status,200);
  assert.match(await approved.text(),/grant_id/);
- const reopened=await f.handler(new Request(requested.approval_url));
+ const reopened=await f.handler(new Request(policyUrl(requested)));
  assert.equal(reopened.status,200,'reopening the same link shows the actual result');
  assert.match(await reopened.text(),/권한 상태: ACTIVE/);
- const repeated=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+ const repeated=await f.handler(new Request(policyUrl(requested),{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
    body:new URLSearchParams({ticket,password:f.pwA})}));
  assert.equal(repeated.status,200,'a retry reports the existing grant instead of creating a second one');
  assert.match(await repeated.text(),/권한 상태: ACTIVE/);
@@ -107,6 +116,11 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  const policy=grants.find(g=>g.kind==='read.policy');
  assert.equal(policy.grant_id,requested.request_id);
  assert.equal(policy.state,'ACTIVE');
+ assert.equal((await f.tool('oa','rian_v2_policy_status',{request_id:requested.request_id},headers)).grant.state,'ACTIVE');
+ const reused=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account,account_type:'outlook',
+   features:['mail.status','mail.sync'],duration:'day'},headers);
+ assert.equal(reused.grant_id,requested.request_id);
+ assert.equal(reused.reused,true);
  const status=await f.tool('oa','mail_status',{device:'pcA'},headers);
  assert.equal(status.state,'QUEUED');assert.equal(status.approval_required,false);
  assert.equal(status.via_read_policy,true);
@@ -116,7 +130,7 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  assert.equal(wrongOwner.error,'ACTIVE_JOB_CONFLICT');
  const deniedClaim=await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA',accountFingerprint:'f'.repeat(64),accountType:'outlook'});
  assert.equal(deniedClaim.body.job,null);
- const afterMismatch=await f.handler(new Request(requested.approval_url));
+ const afterMismatch=await f.handler(new Request(policyUrl(requested)));
  assert.match(await afterMismatch.text(),/권한 상태: SUSPENDED/);
  assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.some(g=>g.grant_id===policy.grant_id),false);
  assert.equal((await f.tool('oa','mail_status',{device:'pcA'},headers)).state,'AWAITING_APPROVAL');
@@ -129,15 +143,15 @@ test('an expired, unapproved read policy uses the same link for one owner approv
  const f=fixture(t,()=>ms),headers={'x-rian-client-ref':'c'.repeat(32)};
  const request=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account:'owner@example.test',account_type:'outlook',
    features:['mail.status'],duration:'day'},headers);
- const first=await f.handler(new Request(request.approval_url));
+ const first=await f.handler(new Request(policyUrl(request)));
  const firstHtml=await first.text(),ticket=/name="ticket" value="([^"]+)"/.exec(firstHtml)?.[1];
  assert.ok(ticket);
  ms+=16*60*1000;
- const sameLink=await f.handler(new Request(request.approval_url+'?utm_source=chatgpt.com'));
+ const sameLink=await f.handler(new Request(policyUrl(request)+'?utm_source=chatgpt.com'));
  assert.equal(sameLink.status,200);
  assert.match(await sameLink.text(),/같은 링크에서 소유자 암호로 등록/);
  assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.length,0,'expiry alone never grants access');
- const approved=await f.handler(new Request(request.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+ const approved=await f.handler(new Request(policyUrl(request),{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
    body:new URLSearchParams({ticket,password:f.pwA})}));
  assert.equal(approved.status,200);
  assert.match(await approved.text(),/권한 상태: ACTIVE/);
@@ -145,7 +159,7 @@ test('an expired, unapproved read policy uses the same link for one owner approv
  const late=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account:'other@example.test',account_type:'outlook',
    features:['mail.status'],duration:'day'},headers);
  ms+=86401*1000;
- assert.equal((await f.handler(new Request(late.approval_url))).status,409,'same link closes after 24 hours');
+ assert.equal((await f.handler(new Request(policyUrl(late)))).status,409,'same link closes after 24 hours');
  assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.length,0,'expired grants and requests never reactivate');
 });
 

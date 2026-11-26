@@ -1,6 +1,35 @@
 # Owner approval UX: passkey design gate
 
-Status: design only. No passkey credential, approval endpoint, or production permission is active.
+Status: implemented in the PR #14 EEMFO3L V2 staging code. Production permission is
+not enabled. Actual Windows Hello, Touch ID, mobile authenticator, ChatGPT MCP,
+and Railway persistence checks still require live staging verification.
+
+The fixed management URL is `https://rian-v2-eemf-mail-stage-staging.up.railway.app/v2/permissions`.
+It lists pending, approved, and expired requests, active device/account grants,
+recent jobs, and approval audit records. It polls while open. The MCP returns
+this URL and exposes `rian_v2_policy_status` so a waiting ChatGPT session can
+observe completion without asking the owner to report it in chat. A closed
+ChatGPT session is not automatically resumed.
+
+The implementation uses pinned `@simplewebauthn/server` and
+`@simplewebauthn/browser` packages. The initial owner password authenticates
+passkey enrollment or recovery. Passkey login and each approval use separate,
+short-lived, single-use challenges. Policy approval binds tenant, owner, OAuth
+client, device, account, requested scope, selected scope, duration, and limits.
+Server verification requires the expected HTTPS origin, RP ID, user verification,
+signature, and stored credential counter. Sessions, challenges, credentials,
+and policy grants persist in the existing encrypted SQLite volume. Revocation
+is immediate. The server does not offer an MCP approval tool.
+
+Read-only policy changes create a pending replacement and leave the old grant
+active until the owner approves the new scope. The replacement then revokes the
+old grant atomically. The four periods are 24 hours, 7 days, 30 days, and until
+revoked. Mail send, delete, move, and arbitrary shell are excluded.
+
+Rollback: restore the previous stage image pinned to `a9e6979` and retain the
+existing volume. The new SQLite tables and column are additive; the old image
+uses schema version 3 and ignores them. A remote volume backup/restore must be
+verified before treating the staging migration as recoverable in practice.
 
 ## Immediate behavior
 

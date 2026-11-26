@@ -12,6 +12,7 @@ import {createStagingArtifactHandler} from './tenant-artifact-http.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
 import {LongJobKinds} from './long-job-kinds.mjs';
 import {createLongJobHandler} from './long-job-http.mjs';
+import {createOwnerCenter} from './owner-center.mjs';
 
 const LIMIT=110000;
 function parseJson(text,label){
@@ -37,7 +38,7 @@ export function stagingConfigFromEnv(env){
 
 export function createStagingService({store,config,clock=()=>Date.now(),log=()=>{}}){
   if(!(store instanceof StagingSqlite))throw Error('INVALID_STORE');
-  let artifactHandler=null,jobHandler=null,jobs=null,directory=null;
+  let artifactHandler=null,jobHandler=null,ownerCenter=null,jobs=null,directory=null;
   if(config.artifactsEnabled||config.jobsEnabled)directory=new TenantDirectory({principals:config.principals,devices:config.devices});
   if(config.artifactsEnabled){
     const approval=new OwnerTransferApproval(config.artifactApprovalSecret);
@@ -50,6 +51,7 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
     jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true,allowMailReviewTools:config.allowMailReviewTools===true}),clock,deviceKinds});
     recovery=jobs.recoverAfterRestart();
     jobHandler=createLongJobHandler({directory,queue:jobs,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
+    ownerCenter=createOwnerCenter({store,queue:jobs,directory,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
   }
   const reaper=jobs?setInterval(()=>{try{jobs.reap();store.sweep(Math.floor(clock()/1000));}catch{log('RIAN_STAGING_REAP_FAILED');}},5000):null;
   reaper?.unref?.();
@@ -62,7 +64,8 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
       return;
     }
     const url=req.url||'';
-    const target=url.startsWith('/v2/mcp')||url.startsWith('/v2/agent/')||url.startsWith('/v2/approve/')||url.startsWith('/v2/policy/')?jobHandler:url.startsWith('/v2/')?artifactHandler:null;
+    const target=url==='/v2/permissions'||url.startsWith('/v2/permissions/')?ownerCenter:
+      url.startsWith('/v2/mcp')||url.startsWith('/v2/agent/')||url.startsWith('/v2/approve/')||url.startsWith('/v2/policy/')?jobHandler:url.startsWith('/v2/')?artifactHandler:null;
     if(!target){res.writeHead(404,{'content-type':'application/json'});res.end('{"error":"NOT_FOUND"}');return;}
     const chunks=[];let size=0;
     try{

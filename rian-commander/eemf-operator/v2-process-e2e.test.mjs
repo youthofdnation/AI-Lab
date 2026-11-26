@@ -109,7 +109,7 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   assert.equal((await mcp('tools/list',{},'not-a-token')).status,401,'gateway requires OAuth');
   const names=(await mcp('tools/list',{})).body.result.tools.map(x=>x.name);
   assert.ok(names.includes('rian_v2_start_job')&&names.includes('rian_v2_job_status')&&
-    ['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending','rian_v2_request_read_policy'].every(n=>names.includes(n)),'V2 mail tools exposed through OAuth gateway');
+    ['mail_status','mail_sync','mail_search','mail_read','mail_recent','mail_review_pending','rian_v2_request_read_policy','rian_v2_policy_status'].every(n=>names.includes(n)),'V2 mail tools exposed through OAuth gateway');
   assert.ok(!names.some(n=>/approve/.test(n)));
 
   const browserApprove=async(approvalUrl,password,extra={})=>{
@@ -135,7 +135,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const started=await call('rian_v2_start_job',{device:'E2E-PC-A',kind:'diag.wait',params:{seconds:40},request_key:'e2e-long-job-0001'});
   assert.equal(started.state,'AWAITING_APPROVAL');
   mark('job requested, id returned immediately',started.job_id);
-  const ok=await browserApprove(started.approval_url,pwA);
+  assert.equal(started.management_url,relay+'/v2/permissions');
+  const ok=await browserApprove(relay+'/v2/approve/'+started.job_id,pwA);
   assert.equal(ok.status,200);
   const running=await waitState(started.job_id,['RUNNING']);
   mark('RUNNING on agent; progress',JSON.stringify(running.progress));
@@ -185,7 +186,7 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
 
   // ---- C: one browser approval across the read-only mail workflow ---------------------------
   const sync1=await call('mail_sync',{device:'E2E-PC-A',days:14,max_messages:1000});
-  const sApprove=await browserApprove(sync1.approval_url,pwA,{review:'1',review_minutes:'60',review_jobs:'10',review_body:'1',review_reads:'2'});
+  const sApprove=await browserApprove(relay+'/v2/approve/'+sync1.job_id,pwA,{review:'1',review_minutes:'60',review_jobs:'10',review_body:'1',review_reads:'2'});
   assert.match(sApprove.preview,/최근 14일, 최대 1000건/);assert.equal(sApprove.status,200);
   const s1=await waitState(sync1.job_id,['SUCCEEDED','FAILED']);
   assert.equal(s1.state,'SUCCEEDED',JSON.stringify(s1));
@@ -237,7 +238,8 @@ test('V2 long-running jobs across real processes with crash/restart, OAuth and m
   const requested=await call('rian_v2_request_read_policy',{device:'E2E-PC-A',account:'e2e.user@example.test',account_type:'outlook',
     features:['mail.status','mail.sync','mail.search','mail.recent','mail.read','mail.review_pending'],duration:'day'});
   assert.equal(requested.state,'PENDING');
-  const policyApproved=await browserApprove(requested.approval_url,pwA);
+  assert.equal(requested.management_url,relay+'/v2/permissions');
+  const policyApproved=await browserApprove(relay+'/v2/policy/'+requested.request_id,pwA);
   assert.equal(policyApproved.status,200);assert.match(policyApproved.html,/grant_id/);
   const policyStatus=await call('mail_status',{device:'E2E-PC-A'});
   assert.equal(policyStatus.state,'QUEUED');assert.equal(policyStatus.approval_url,undefined);
