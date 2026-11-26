@@ -170,7 +170,8 @@ class MailStore:
         return self.bodies / (message_id + ".txt")
 
     def has_body(self, message_id):
-        return self.body_path(message_id).is_file()
+        path = self.body_path(message_id)
+        return path.is_file() and path.stat().st_size > 0
 
     def put_body(self, message_id, text):
         data = (text or "").encode("utf-8")[:MAX_BODY_STORE_BYTES]
@@ -350,6 +351,11 @@ class OutlookBridgeSource:
             raise MailError("OUTLOOK_BRIDGE_CONFIG_INVALID") from None
         if not bridge.secret_present():
             raise MailError("MAIL_CREDENTIALS_MISSING")
+        # The installed Bridge's safe_text reads text/plain only. Some business
+        # messages are HTML-only, so use the V2 parser for this process without
+        # changing the owner-installed Bridge or touching the original mailbox.
+        if callable(getattr(bridge, "safe_text", None)):
+            bridge.safe_text = _text_body
         self.account = config["username"]
         self._bridge = bridge
         self._host, self._port = config["host"], config["port"]
@@ -693,6 +699,8 @@ def read_message(data_dir, message_id, max_bytes=MAX_BODY_RETURN_BYTES):
     if not path.is_file():
         raise MailError("BODY_NOT_CACHED")
     raw = path.read_bytes()
+    if not raw:
+        raise MailError("BODY_NOT_CACHED")
     body = raw[:max_bytes].decode("utf-8", "ignore")
     return {"ok": True, "message_id": message_id, "date": meta.get("date"), "from": meta.get("from"), "subject": meta.get("subject"),
             "body": body, "truncated": len(raw) > max_bytes, "messages_returned": 1}

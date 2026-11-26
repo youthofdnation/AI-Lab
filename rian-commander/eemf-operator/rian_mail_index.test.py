@@ -98,6 +98,9 @@ class SyncTests(Fixture):
         index["messages"][key].pop("to")
         store.save(index)
         store.put_body(key, "")
+        self.assertFalse(store.has_body(key))
+        with self.assertRaisesRegex(mail.MailError, "BODY_NOT_CACHED"):
+            mail.read_message(self.data, key)
         repaired = mail.sync(self.data, source, 14, 10, now=NOW + dt.timedelta(hours=1), legacy_index=legacy_path)
         self.assertEqual(repaired["bodies_backfilled"], 1)
         self.assertEqual(store.load()["messages"][key]["to"], ACCOUNT)
@@ -229,6 +232,41 @@ class ReadSearchTests(Fixture):
 
 
 class BridgeAdapterTests(Fixture):
+    def test_local_bridge_html_only_mail_gets_bounded_plain_text(self):
+        bridge_dir = self.root / "html-bridge"
+        bridge_dir.mkdir()
+        (bridge_dir / "outlook_bridge.py").write_text('''
+from pathlib import Path
+from email.message import EmailMessage
+import datetime as dt
+CONFIG = Path(__file__).with_name("config.json")
+def load_json(path, default): return {"username":"synthetic.user@example.test", "host":"mail.example.test", "port":993}
+def validate_config(cfg): return cfg
+def secret_present(): return True
+def get_secret(): return "synthetic-password"
+def safe_text(msg): return ""  # legacy Bridge ignores HTML-only mail
+class FakeImap:
+    def __init__(self, host, port, timeout): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def login(self, user, password): assert password == "synthetic-password"
+    def logout(self): pass
+class imaplib:
+    IMAP4_SSL = FakeImap
+def fetch_imap_messages(imap, days, limit):
+    msg = EmailMessage()
+    msg.set_content("<p>확인 <b>요청</b></p><script>secret()</script>", subtype="html")
+    return ([{"id":"html-id", "date":dt.datetime.now(dt.timezone.utc).isoformat(),
+             "from":"sender@example.test", "to":"synthetic.user@example.test",
+             "subject":"synthetic", "folder":"INBOX", "body":safe_text(msg), "has_attachments":False}], [])
+''', "utf-8")
+        source = mail.source_from_config({"type": "outlook_bridge_v1", "root": str(bridge_dir)})
+        result = source.fetch_since(mail.utcnow() - dt.timedelta(days=2), 20)
+        self.assertIn("확인", result[0]["body"])
+        self.assertIn("요청", result[0]["body"])
+        self.assertNotIn("secret()", result[0]["body"])
+        self.assertNotIn("<", result[0]["body"])
+
     def test_local_bridge_adapter_reuses_bounded_read_only_fetch_without_returning_credential(self):
         bridge_dir = self.root / "bridge"
         bridge_dir.mkdir()
