@@ -14,7 +14,7 @@ async function post(path,data){
   return result;
 }
 function available(){
-  if(!webauthn?.browserSupportsWebAuthn?.()){notify('이 브라우저에서 패스키를 사용할 수 없습니다. Windows Chrome/Edge 또는 Mac Safari에서 이 고정 주소를 열어 주세요.',true);return false;}
+  if(!webauthn?.browserSupportsWebAuthn?.()){notify('이 브라우저에서 패스키를 사용할 수 없습니다. 휴대폰 Chrome/Safari 또는 Windows Chrome/Edge, Mac Safari에서 이 고정 주소를 열어 주세요.',true);return false;}
   return true;
 }
 async function passkeyLogin(){
