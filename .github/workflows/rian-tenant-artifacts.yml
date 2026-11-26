@@ -37,6 +37,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install pinned staging WebAuthn dependencies
+        working-directory: rian-commander/eemf-operator
+        run: npm ci --omit=dev
       - name: Confirm isolated staging code parses
         run: |
           node --check rian-commander/eemf-operator/tenant-artifact-core.mjs
@@ -115,3 +118,4 @@ jobs:
         run: |
           python -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
           python rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
+
