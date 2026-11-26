@@ -4,6 +4,7 @@ import {randomBytes,createHash} from 'node:crypto';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {Script} from 'node:vm';
 import {TenantDirectory} from './tenant-artifact-core.mjs';
 import {StagingSqlite} from './staging-sqlite.mjs';
 import {LongJobQueue} from './durable-long-jobs.mjs';
@@ -80,8 +81,14 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
    features:['mail.status'],duration:'day'},headers)).error,'ACCOUNT_TYPE_NOT_SUPPORTED');
  const page=await f.handler(new Request(requested.approval_url));
  assert.equal(page.status,200);
+ assert.match(page.headers.get('content-security-policy'),/script-src 'sha256-[^']+'; connect-src 'self'/);
  const html=await page.text(),ticket=/name="ticket" value="([^"]+)"/.exec(html)?.[1];
  assert.match(html,/owner@example.test/);
+ assert.match(html,/data-owner-approval="1"/);
+ const script=/<script>([\s\S]*?)<\/script>/.exec(html)?.[1];
+ assert.ok(script);
+ assert.doesNotThrow(()=>new Script(script));
+ assert.ok(page.headers.get('content-security-policy').includes("'sha256-"+createHash('sha256').update(script).digest('base64')+"'"));
  const denied=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
    body:new URLSearchParams({ticket,password:'incorrect-password-long-enough'})}));
  assert.match(await denied.text(),/정책 범위는 변경되지 않았습니다/);
@@ -89,6 +96,13 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
    body:new URLSearchParams({ticket,password:f.pwA})}));
  assert.equal(approved.status,200);
  assert.match(await approved.text(),/grant_id/);
+ const reopened=await f.handler(new Request(requested.approval_url));
+ assert.equal(reopened.status,200,'reopening the same link shows the actual result');
+ assert.match(await reopened.text(),/권한 상태: ACTIVE/);
+ const repeated=await f.handler(new Request(requested.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+   body:new URLSearchParams({ticket,password:f.pwA})}));
+ assert.equal(repeated.status,200,'a retry reports the existing grant instead of creating a second one');
+ assert.match(await repeated.text(),/권한 상태: ACTIVE/);
  const grants=(await f.tool('oa','rian_v2_list_grants',{})).grants;
  const policy=grants.find(g=>g.kind==='read.policy');
  assert.equal(policy.grant_id,requested.request_id);
@@ -102,6 +116,8 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  assert.equal(wrongOwner.error,'ACTIVE_JOB_CONFLICT');
  const deniedClaim=await f.agentCall('aa','/v2/agent/claim',{deviceId:'pcA',accountFingerprint:'f'.repeat(64),accountType:'outlook'});
  assert.equal(deniedClaim.body.job,null);
+ const afterMismatch=await f.handler(new Request(requested.approval_url));
+ assert.match(await afterMismatch.text(),/권한 상태: SUSPENDED/);
  assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.some(g=>g.grant_id===policy.grant_id),false);
  assert.equal((await f.tool('oa','mail_status',{device:'pcA'},headers)).state,'AWAITING_APPROVAL');
  const changed=await f.tool('oa','rian_v2_revoke_grant',{grant_id:policy.grant_id});
@@ -225,10 +241,9 @@ test('an expired unexecuted request can be approved at its original link with a 
  assert.equal(renewed.status,200);
  assert.match(renewed.html,/같은 링크에서 소유자 암호로 다시 승인/);
  assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:job.job_id})).state,'APPROVAL_EXPIRED');
- const stale=await f.submit(job.job_id,{ticket:original.ticket,password:f.pwA,review:'1'});
- assert.match(stale.html,/양식이 만료/);
- const wrong=await f.submit(job.job_id,{ticket:renewed.ticket,password:'incorrect-owner-password',review:'1',
+ const wrong=await f.submit(job.job_id,{ticket:original.ticket,password:'incorrect-owner-password',review:'1',
    review_minutes:'30',review_jobs:'10'});
+ assert.doesNotMatch(wrong.html,/양식이 만료/,'the original page ticket remains valid after 15 minutes');
  assert.match(wrong.html,/name="review" value="1"[^>]* checked/);
  const ticket=/name="ticket" value="([^"]+)"/.exec(wrong.html)?.[1];
  const approved=await f.submit(job.job_id,{ticket,password:f.pwA,review:'1',review_minutes:'30',review_jobs:'10'});

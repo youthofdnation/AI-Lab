@@ -275,7 +275,8 @@ export class LongJobQueue {
     if(j.state==='AWAITING_APPROVAL'&&j.approval_expires<=now){this.reap();return this.approvalPreview(jobId);}
     const kind=this.#kinds.get(j.kind),params=this.#params(j);
     return {jobId:j.id,tenantId:j.tenant,ownerId:j.owner,device:j.device,kind:j.kind,label:kind.label,lines:kind.describe(params),params,
-      state:j.state,approvalExpiresAt:j.approval_expires,maxRuntimeSeconds:kind.maxRuntimeSeconds,grantable:kind.grantable,lockGroup:kind.lockGroup,
+      state:j.state,approvalExpiresAt:j.approval_expires,renewableUntilAt:j.created+86400,
+      maxRuntimeSeconds:kind.maxRuntimeSeconds,grantable:kind.grantable,lockGroup:kind.lockGroup,
       renewable:j.state==='APPROVAL_EXPIRED'&&j.started===null&&j.approved_at===null&&now-j.created<=86400,
       clientScopedReviewEligible:j.kind==='mail.sync'&&typeof j.client_ref==='string'&&j.client_ref.length>=16};
   }

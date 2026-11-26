@@ -20,6 +20,36 @@ const JSON_HEADERS={'cache-control':'no-store','content-type':'application/json;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:JSON_HEADERS});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// A failed approval stays on the same page. The HTML form still works when
+// JavaScript is unavailable; CSP permits only this pinned inline script.
+const APPROVAL_SCRIPT=`document.addEventListener('submit',async(event)=>{
+  const form=event.target;
+  if(!(form instanceof HTMLFormElement)||form.dataset.ownerApproval!=='1')return;
+  const target=new URL(form.action,location.href);
+  if(target.origin!==location.origin||!/^\\/v2\\/(?:approve|policy)\\/[0-9a-f-]{36}$/.test(target.pathname))return;
+  event.preventDefault();
+  const button=form.querySelector('button[type="submit"]');
+  const label=button?.textContent;
+  if(button){button.disabled=true;button.textContent='확인 중…';}
+  try{
+    const body=new URLSearchParams(new FormData(form));
+    const response=await fetch(target.pathname,{method:'POST',credentials:'same-origin',
+      headers:{'content-type':'application/x-www-form-urlencoded'},body:body.toString()});
+    const documentFromServer=new DOMParser().parseFromString(await response.text(),'text/html');
+    const next=documentFromServer.querySelector('main');
+    if(!next)throw Error('INVALID_APPROVAL_RESPONSE');
+    document.querySelector('main').replaceWith(next);
+    document.title=documentFromServer.title;
+    const notice=next.querySelector('[role="alert"], [role="status"], h1');
+    if(notice){notice.setAttribute('tabindex','-1');notice.focus({preventScroll:true});}
+  }catch{
+    if(button){button.disabled=false;button.textContent=label;}
+    let notice=form.querySelector('[role="alert"]');
+    if(!notice){notice=document.createElement('p');notice.setAttribute('role','alert');form.prepend(notice);}
+    notice.textContent='연결 오류로 승인 결과를 확인하지 못했습니다. 새 요청을 만들지 말고 이 링크를 다시 열어 상태를 확인하세요.';
+  }
+});`;
+const APPROVAL_SCRIPT_HASH=createHash('sha256').update(APPROVAL_SCRIPT).digest('base64');
 const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function readBody(request,max=MAX_BODY){
@@ -103,10 +133,10 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(!approver||typeof password!=='string'||password.length<16||password.length>256)return false;
     return timingSafeEqual(scryptSync(password,Buffer.from(approver.salt,'hex'),32),Buffer.from(approver.hash,'hex'));
   };
-  const page=(body,status=200)=>new Response('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RIAN Commander V2 승인</title><style>body{background:#0b1423;color:#e3ebfa;font:16px system-ui;margin:0}main{max-width:560px;margin:6vh auto;padding:28px;background:#172840;border:1px solid #334965;border-radius:16px}li,p{color:#c4d0e3;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;font:inherit}button{background:#367afa;color:#fff;border:0;margin-top:16px;font-weight:600}fieldset{border:1px solid #334965;border-radius:10px;margin-top:14px}code{overflow-wrap:anywhere}</style><main>'+body+'</main></html>',
+  const page=(body,status=200)=>new Response('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RIAN Commander V2 승인</title><style>body{background:#0b1423;color:#e3ebfa;font:16px system-ui;margin:0}main{max-width:560px;margin:6vh auto;padding:28px;background:#172840;border:1px solid #334965;border-radius:16px}li,p{color:#c4d0e3;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;font:inherit}button{background:#367afa;color:#fff;border:0;margin-top:16px;font-weight:600}fieldset{border:1px solid #334965;border-radius:10px;margin-top:14px}code{overflow-wrap:anywhere}button:disabled{opacity:.6}[role=alert]{border-left:3px solid #ffb36b;padding:8px 12px;background:#382b2f}[role=status]{border-left:3px solid #74d8a2;padding:8px 12px;background:#1b3b38}</style><main>'+body+'</main><script>'+APPROVAL_SCRIPT+'</script></html>',
     // 'same-origin', not 'no-referrer': with no-referrer browsers send "Origin: null" on the
     // approval form POST (Fetch spec), so the Origin check below rejected every real browser.
-    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
+    {status,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'same-origin','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-"+APPROVAL_SCRIPT_HASH+"'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
   const approvalUrl=id=>publicOrigin+'/v2/approve/'+id;
   const withApproval=s=>s.state==='AWAITING_APPROVAL'?{...s,approval_url:approvalUrl(s.job_id)}:s;
 
@@ -174,7 +204,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   }
 
   function approvalPage(preview,msg='',values=null){
-    const exp=nowS()+600,ticket=formTicket(preview.jobId,exp);
+    const ticket=formTicket(preview.jobId,preview.renewableUntilAt);
     const when=t=>new Date(t*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'});
     // A failed password must not silently turn an opted-in review into a single-job approval.
     // Restore only bounded scope controls; never echo or retain the submitted password.
@@ -190,7 +220,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
         ' · 승인 요청 만료: '+escapeHtml(when(preview.approvalExpiresAt))+' (한국시간)')+'</p>'+
       '<p>임의 명령, PowerShell, 다른 PC, 메일 발송·삭제는 포함되지 않습니다. 승인 전에는 아무것도 실행되지 않습니다.</p>'+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
-      '<form method="POST" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
+      '<form method="POST" data-owner-approval="1" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
       (preview.grantable?'<fieldset><legend>반복 승인 (선택)</legend><label><input type="checkbox" name="standing" value="1" style="width:auto"'+checked('standing')+'> 같은 PC·같은 작업·같은 매개변수에 한해 아래 기간·횟수 동안 암호 없이 다시 실행 허용</label>'+
         '<label for="minutes">기간(분, 1~1440)</label><input id="minutes" name="minutes" type="number" min="1" max="1440" value="'+numberValue('minutes',1440,1,1440)+'">'+
         '<label for="runs">추가 실행 횟수 (1~50)</label><input id="runs" name="runs" type="number" min="1" max="50" value="'+numberValue('runs',10,1,50)+'"></fieldset>'
@@ -247,7 +277,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
         ' (한국시간)<br>남은 호출: '+escapeHtml(String(g.runs_left))+
         (g.body_reads_left===null?'':'<br>남은 본문 조회: '+escapeHtml(String(g.body_reads_left)))+'</p>':
         '<p>연속 권한은 생성되지 않았습니다. 후속 작업에는 별도 승인이 필요합니다.</p>';
-      return page('<h1>'+title+'</h1><p>작업 ID: <code>'+escapeHtml(r.jobId)+'</code><br>작업 상태: '+escapeHtml(r.state)+
+      return page('<h1>'+title+'</h1><p role="status">작업 ID: <code>'+escapeHtml(r.jobId)+'</code><br>작업 상태: '+escapeHtml(r.state)+
         '</p><p>PC 에이전트가 대기열의 작업을 실행합니다. ChatGPT에서 rian_v2_job_status로 완료를 확인하세요.</p>'+details+
         (g?'<p>같은 소유자·장치·OAuth 연결과 승인된 범위에만 적용됩니다. rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>':''));
     }catch(e){return page('<h1>승인하지 못했습니다</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
@@ -263,9 +293,25 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       (p.state==='EXPIRED'&&p.renewable?'<p>첫 15분의 요청 시간이 지났습니다. 이 요청은 실행되지 않았으며, 같은 링크에서 소유자 암호로 등록할 수 있습니다. 재승인 가능 기한: '+
         escapeHtml(new Date(p.renewable_until_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간).</p>':'')+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
-      '<form method="POST" action="/v2/policy/'+escapeHtml(p.request_id)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
+      '<form method="POST" data-owner-approval="1" action="/v2/policy/'+escapeHtml(p.request_id)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
       '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
       '<button type="submit">이 읽기 전용 정책 등록</button></form>');
+  }
+
+  function policyResultPage(p){
+    const g=p.grant;
+    if(!g)return page('<h1>정책 상태를 확인하지 못했습니다</h1><p role="alert">권한을 추정하지 마세요. ChatGPT에서 권한 목록을 확인하세요.</p>',409);
+    const active=g.state==='ACTIVE';
+    return page('<h1>'+(active?'읽기 전용 사전 승인 정책 등록 완료':'읽기 전용 정책 권한 종료')+'</h1>'+
+      '<p role="status">grant_id: <code>'+escapeHtml(g.grant_id)+'</code><br>권한 상태: '+escapeHtml(g.state)+
+      '<br>만료: '+(g.expires_at===null?'직접 철회 시까지':
+        escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간)')+
+      '<br>사용 호출: '+escapeHtml(String(g.calls_used))+'</p><p>장치: '+escapeHtml(p.device)+
+      '<br>계정: '+escapeHtml(p.account)+' ('+escapeHtml(p.account_type)+')'+
+      '<br>OAuth 연결: 이 요청의 연결로만 제한<br>동기화 한도: 최근 '+escapeHtml(String(p.max_days))+
+      '일, 최대 '+escapeHtml(String(p.max_messages))+'건</p><p>허용 기능:</p><ul>'+
+      p.features.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+'</ul><p>이 페이지를 다시 열어도 권한이 중복 등록되지 않습니다. '+
+      'rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>');
   }
 
   async function approvePolicy(request,id){
@@ -274,6 +320,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let p;try{p=queue.readPolicyPreview(id);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+    if(p.state==='APPROVED')return policyResultPage(p);
     if(p.state!=='PENDING'&&!p.renewable)return page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
     if(!ticketOK(form.get('ticket'),id))return policyPage(p,'제출된 양식의 보안 서명이 만료되었습니다. 권한은 등록되지 않았습니다. 같은 링크의 새 양식에서 암호를 다시 입력하세요.');
     const key='policy|'+id,f=failures.get(key)||{count:0,until:nowS()+900};
@@ -284,11 +331,8 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       return policyPage(p,'승인 암호가 일치하지 않습니다. 정책 범위는 변경되지 않았습니다.');
     }
     failures.delete(key);
-    try{const g=queue.approveReadPolicy({id,tenant:p.tenant,owner:p.owner});
-      return page('<h1>읽기 전용 사전 승인 정책 등록 완료</h1><p>grant_id: <code>'+escapeHtml(g.grant_id)+
-        '</code><br>권한 상태: '+escapeHtml(g.state)+'<br>만료: '+(g.expires_at===null?'직접 철회 시까지':
-          escapeHtml(new Date(g.expires_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간)')+
-        '<br>현재 사용 호출: 0</p><p>같은 장치·계정·OAuth 연결과 선택한 기능에만 적용됩니다. rian_v2_revoke_grant로 즉시 철회할 수 있습니다.</p>');
+    try{queue.approveReadPolicy({id,tenant:p.tenant,owner:p.owner});
+      return policyResultPage(queue.readPolicyPreview(id));
     }catch(e){return page('<h1>정책 등록 실패</h1><p>'+escapeHtml(publicError(e))+'</p>',409);}
   }
 
@@ -330,6 +374,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       if(policyMatch&&UUID.test(policyMatch[1])){
         if(method==='GET'){
           let p;try{p=queue.readPolicyPreview(policyMatch[1]);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
+          if(p.state==='APPROVED')return policyResultPage(p);
           return p.state==='PENDING'||p.renewable?policyPage(p):page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
         }
         if(method==='POST')return await approvePolicy(request,policyMatch[1]);

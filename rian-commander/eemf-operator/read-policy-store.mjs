@@ -34,10 +34,13 @@ export class ReadPolicyStore {
     if(!row)throw Error('POLICY_REQUEST_NOT_FOUND');
     const now=this.#now(),state=row.state==='PENDING'&&row.approval_expires<=now?'EXPIRED':row.state;
     const renewable=row.state==='PENDING'&&now>=row.created&&now<row.created+REAPPROVAL_SECONDS;
+    const grant=row.state==='APPROVED'?this.#db().prepare('SELECT id,state,expires,calls_used FROM read_policies WHERE id=?').get(id):null;
     return {request_id:id,tenant:row.tenant,owner:row.owner,device:row.device,client_ref:row.client_ref,
       account:this.#account(row),account_type:row.account_type,features:JSON.parse(row.features),duration:row.duration,
       max_days:row.max_days,max_messages:row.max_messages,state,approval_expires_at:row.approval_expires,
-      renewable,renewable_until_at:row.created+REAPPROVAL_SECONDS};
+      renewable,renewable_until_at:row.created+REAPPROVAL_SECONDS,
+      grant:grant?{grant_id:grant.id,state:grant.state==='ACTIVE'&&grant.expires<=now?'EXPIRED':grant.state,
+        expires_at:grant.expires===FOREVER?null:grant.expires,calls_used:grant.calls_used}:null};
   }
   approve({id,tenant,owner}){
     const now=this.#now();
