@@ -227,8 +227,9 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
     if(googleOwner&&method==='GET'&&path==='/v2/permissions/google/callback'){
       const received=url.searchParams.get('state'),code=url.searchParams.get('code');
       const clear=googleCookie('',0);
-      if(url.searchParams.has('error')||[...url.searchParams.keys()].some(k=>!['state','code','scope','authuser','prompt'].includes(k))||
-        url.searchParams.getAll('state').length!==1||url.searchParams.getAll('code').length!==1||typeof received!=='string'||
+      if(url.searchParams.has('error')||url.searchParams.getAll('state').length!==1||
+        url.searchParams.getAll('code').length!==1||url.searchParams.getAll('iss').length!==1||
+        url.searchParams.get('iss')!=='https://accounts.google.com'||typeof received!=='string'||
         received!==cookie(request,'__Host-rian_google')||typeof code!=='string'||code.length<8||code.length>4096)
         return html('<main><h1>휴대폰 소유자 확인 실패</h1><p>Google 로그인 결과를 확인할 수 없습니다.</p><a href="/v2/permissions">관리센터로 돌아가기</a></main>',401);
       try{

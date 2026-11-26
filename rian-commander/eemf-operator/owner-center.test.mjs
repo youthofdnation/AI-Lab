@@ -120,8 +120,12 @@ test('mobile Google identity can enroll a passkey but cannot approve work withou
   assert.equal(new URL(start.headers.get('location')).origin,'https://accounts.google.com');
   assert.equal(authorization.code_challenge_method,'S256');
   assert.deepEqual(authorization.scope,['openid','email']);
+  const callbackUrl=state=>origin+'/v2/permissions/google/callback?code=synthetic-code&state='+
+    encodeURIComponent(state)+'&iss=https%3A%2F%2Faccounts.google.com';
   const state=authorization.state,flowCookie=start.headers.get('set-cookie').split(';')[0];
-  const callback=await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+encodeURIComponent(state),
+  assert.equal((await center(new Request(callbackUrl(state).replace('accounts.google.com','attacker.example.test'),
+    {headers:{cookie:flowCookie}}))).status,401,'a wrong authorization-server issuer is denied');
+  const callback=await center(new Request(callbackUrl(state),
     {headers:{cookie:flowCookie}}));
   assert.equal(callback.status,303);
   assert.equal(tokenExchange.redirect_uri,origin+'/v2/permissions/google/callback');
@@ -130,17 +134,17 @@ test('mobile Google identity can enroll a passkey but cannot approve work withou
   const stateResponse=await center(new Request(origin+'/v2/permissions/api/state',{headers:{cookie:sessionCookie}}));
   assert.equal((await stateResponse.json()).auth_method,'google');
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM owner_identity_bindings WHERE tenant='A'").get().n,1);
-  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+encodeURIComponent(state),
+  assert.equal((await center(new Request(callbackUrl(state),
     {headers:{cookie:flowCookie}}))).status,401,'the OAuth state is single-use');
   const changed=await center(new Request(origin+'/v2/permissions/google/start'));
   subject='different-google-account';
-  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+
-    encodeURIComponent(authorization.state),{headers:{cookie:changed.headers.get('set-cookie').split(';')[0]}}))).status,401,
+  assert.equal((await center(new Request(callbackUrl(authorization.state),
+    {headers:{cookie:changed.headers.get('set-cookie').split(';')[0]}}))).status,401,
     'a different Google subject cannot take over the same owner');
   const wrongEmail=await center(new Request(origin+'/v2/permissions/google/start'));
   subject='synthetic-google-sub';email='other@example.test';
-  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+
-    encodeURIComponent(authorization.state),{headers:{cookie:wrongEmail.headers.get('set-cookie').split(';')[0]}}))).status,401,
+  assert.equal((await center(new Request(callbackUrl(authorization.state),
+    {headers:{cookie:wrongEmail.headers.get('set-cookie').split(';')[0]}}))).status,401,
     'a different verified email cannot log in');
   const post=(path,data)=>center(new Request(origin+path,{method:'POST',headers:{origin,
     'content-type':'application/json',cookie:sessionCookie},body:JSON.stringify(data)}));
