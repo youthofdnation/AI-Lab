@@ -1,5 +1,43 @@
 # Repeated approval investigation and implementation status (2026-11-26 KST)
 
+## Field update — 2026-11-26 19:43 KST
+
+This section supersedes the earlier source-only status below. The owner used
+Google identity bootstrap and a phone passkey to approve one 30-day Outlook
+read-only policy for EEMFO3L and the exact account/OAuth connection. The six
+mail tools are visible and callable from this ChatGPT connection. The EEMFO3L
+V2 agent is online and ran actual jobs. No production or other-device grant was
+changed.
+
+- Latest PR head `b4edb56`: all 16 CI checks passed, including Windows, macOS,
+  Linux process E2E, gateway, Docker image, staging volume and tenant isolation.
+- The EEMFO3L mail staging service deployed validated commit `381e563` as
+  Railway deployment `370f1077-ad98-4423-ade1-fd966a31c97d` (SUCCESS).
+  The previous successful deployment `2107b62e-5f3c-4a59-a6d0-27b0f3d2f82c`
+  remains the rollback reference. The later PR commit only bounds the local
+  Bridge body parser output; the PC agent has not received that fix.
+- The first 14-day sync ended `RUNNER_PERMISSIONERROR` at 5% with no automatic
+  retry. One manually initiated retry succeeded: 100 fetched, six added, 116
+  total, zero removed, local index backup created, mailbox unchanged. The
+  exception was transient in this run; its underlying OS cause is not proven.
+- Status, sync, paginated recent mail, multiple searches, sent comparison and
+  selected body reads all queued and completed without another browser approval.
+  The policy survived the Railway redeploy; a post-redeploy status, search and
+  nonempty body read succeeded under the same grant. A 15-day sync was denied
+  with `MAIL_SCOPE_DENIED` before execution.
+- Some older messages have empty cached bodies despite appearing cached in
+  current PC-agent results. The installed Bridge extracts only `text/plain`.
+  PR #14 now provides an HTML-to-text fallback and reports zero-byte body files
+  as uncached. These changes passed tests but cannot repair the local index
+  until the EEMFO3L agent is updated through an authorized deployment path and
+  resynced. Remote Desktop Commander for EEMFO3L is offline; the mail-only
+  policy grants no code-write or shell permission. Do not bypass that scope.
+- The live grant has not been revoked because doing so would remove the user's
+  working read-only policy. Actual revocation, new-ChatGPT-session reuse,
+  Railway volume backup/restore, Proton isolation and Level 1/2 fleet behavior
+  remain unverified. Mail business review is partial while older bodies remain
+  unavailable. **MAIL E2E and RELEASE remain BLOCKED.**
+
 ## Observed cause
 
 The production `rian-eemf-owner-gateway` is a legacy Railway Function. Its deployed
