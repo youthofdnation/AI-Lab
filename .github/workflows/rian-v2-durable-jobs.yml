@@ -164,8 +164,8 @@ jobs:
           other="$(curl -fs -X POST -H "authorization: Bearer $ob" -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rian_v2_list_jobs","arguments":{}}}' http://127.0.0.1:31889/v2/mcp)"
           echo "$other" | grep -q '\\"jobs\\":\[\]'
           docker restart rian-stage-v2 >/dev/null
-          for i in $(seq 1 25); do docker logs rian-stage-v2 2>&1 | grep -q 'RIAN_STAGING_VOLUME_BOOT_SEQUENCE 2' && break; sleep 1; done
-          docker logs rian-stage-v2 2>&1 | grep -q 'RIAN_STAGING_LONG_JOBS_RECOVERED'
+          for i in $(seq 1 25); do docker logs rian-stage-v2 2>&1 | grep -F 'RIAN_STAGING_VOLUME_BOOT_SEQUENCE 2' >/dev/null && break; sleep 1; done
+          docker logs rian-stage-v2 2>&1 | grep -F 'RIAN_STAGING_LONG_JOBS_RECOVERED' >/dev/null
           sleep 2
           after="$(curl -fs -X POST -H "authorization: Bearer $oa" -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"rian_v2_list_jobs","arguments":{}}}' http://127.0.0.1:31889/v2/mcp)"
           echo "$after" | grep -q AWAITING_APPROVAL
