@@ -170,4 +170,3 @@ jobs:
           after="$(curl -fs -X POST -H "authorization: Bearer $oa" -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"rian_v2_list_jobs","arguments":{}}}' http://127.0.0.1:31889/v2/mcp)"
           echo "$after" | grep -q AWAITING_APPROVAL
           echo 'RIAN_V2_STAGING_IMAGE_PASS'
-
