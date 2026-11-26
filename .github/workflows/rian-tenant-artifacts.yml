@@ -118,4 +118,3 @@ jobs:
         run: |
           python -m py_compile rian-commander/eemf-operator/tenant-artifact-agent.py
           python rian-commander/eemf-operator/tenant-artifact-agent.test.py -v
-
