@@ -98,6 +98,24 @@ test('Google owner configuration resolves only an existing device with one owner
     /AMBIGUOUS_GOOGLE_OWNER_CONFIGURATION/);
 });
 
+test('real Google OAuth client starts only a code and PKCE identity flow',async t=>{
+  const f=fixture(t),googleOwner={tenantId:'A',ownerId:'oa',email:'owner@example.test',
+    clientId:'synthetic-client.apps.googleusercontent.com',clientSecret:'synthetic-client-secret-long-enough'};
+  const center=createOwnerCenter({store:f.store,queue:f.queue,directory:f.directory,approvers:f.approvers,
+    publicOrigin:origin,formSecret:f.secret,googleOwner});
+  const response=await center(new Request(origin+'/v2/permissions/google/start'));
+  assert.equal(response.status,303);
+  const destination=new URL(response.headers.get('location'));
+  assert.equal(destination.origin,'https://accounts.google.com');
+  assert.equal(destination.searchParams.get('response_type'),'code');
+  assert.equal(destination.searchParams.get('client_id'),googleOwner.clientId);
+  assert.equal(destination.searchParams.get('redirect_uri'),origin+'/v2/permissions/google/callback');
+  assert.equal(destination.searchParams.get('code_challenge_method'),'S256');
+  assert.deepEqual(destination.searchParams.get('scope').split(' ').sort(),['email','openid']);
+  assert.ok(destination.searchParams.get('nonce').length>=32);
+  assert.equal(destination.searchParams.has('access_type')&&destination.searchParams.get('access_type'),'online');
+});
+
 test('mobile Google identity can enroll a passkey but cannot approve work without that passkey',async t=>{
   const f=fixture(t),passkey=syntheticPasskey();
   const clientId='synthetic-client.apps.googleusercontent.com';
