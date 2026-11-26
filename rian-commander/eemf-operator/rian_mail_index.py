@@ -355,7 +355,7 @@ class OutlookBridgeSource:
         # messages are HTML-only, so use the V2 parser for this process without
         # changing the owner-installed Bridge or touching the original mailbox.
         if callable(getattr(bridge, "safe_text", None)):
-            bridge.safe_text = _text_body
+            bridge.safe_text = lambda msg: _text_body(msg)[:100000]
         self.account = config["username"]
         self._bridge = bridge
         self._host, self._port = config["host"], config["port"]
