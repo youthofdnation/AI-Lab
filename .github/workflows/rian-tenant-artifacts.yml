@@ -94,7 +94,8 @@ jobs:
             # API disabled by default. No tenant or device operation is exposed.
             [ "$(curl --silent --output /dev/null --write-out '%{http_code}' \
               http://127.0.0.1:31888/v2/tenant/devices)" = 404 ]
-            docker logs rian-stage-ci 2>&1 | grep -q "RIAN_STAGING_VOLUME_BOOT_SEQUENCE $cycle"
+            logs="$(docker logs rian-stage-ci 2>&1)"
+            grep -q "RIAN_STAGING_VOLUME_BOOT_SEQUENCE $cycle" <<< "$logs"
             docker rm -f rian-stage-ci >/dev/null
           done
           echo 'RIAN_ISOLATED_STAGING_VOLUME_RESTART_PASS'
