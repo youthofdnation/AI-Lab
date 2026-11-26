@@ -108,6 +108,31 @@ test('owner-approved read policy survives failed sync, binds account and OAuth, 
  assert.equal(changed.state,'REVOKED');
 });
 
+test('an expired, unapproved read policy uses the same link for one owner approval',async t=>{
+ let ms=Date.now();
+ const f=fixture(t,()=>ms),headers={'x-rian-client-ref':'c'.repeat(32)};
+ const request=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account:'owner@example.test',account_type:'outlook',
+   features:['mail.status'],duration:'day'},headers);
+ const first=await f.handler(new Request(request.approval_url));
+ const firstHtml=await first.text(),ticket=/name="ticket" value="([^"]+)"/.exec(firstHtml)?.[1];
+ assert.ok(ticket);
+ ms+=16*60*1000;
+ const sameLink=await f.handler(new Request(request.approval_url+'?utm_source=chatgpt.com'));
+ assert.equal(sameLink.status,200);
+ assert.match(await sameLink.text(),/같은 링크에서 소유자 암호로 등록/);
+ assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.length,0,'expiry alone never grants access');
+ const approved=await f.handler(new Request(request.approval_url,{method:'POST',headers:{origin:ORIGIN,'content-type':'application/x-www-form-urlencoded'},
+   body:new URLSearchParams({ticket,password:f.pwA})}));
+ assert.equal(approved.status,200);
+ assert.match(await approved.text(),/권한 상태: ACTIVE/);
+ assert.equal((await f.tool('oa','mail_status',{device:'pcA'},headers)).approval_required,false);
+ const late=await f.tool('oa','rian_v2_request_read_policy',{device:'pcA',account:'other@example.test',account_type:'outlook',
+   features:['mail.status'],duration:'day'},headers);
+ ms+=86401*1000;
+ assert.equal((await f.handler(new Request(late.approval_url))).status,409,'same link closes after 24 hours');
+ assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants.length,0,'expired grants and requests never reactivate');
+});
+
 test('ChatGPT approval link tracking parameter opens only the read-only preview',async t=>{
  const f=fixture(t);
  const job=await f.tool('oa','mail_sync',{device:'pcA',days:14,max_messages:100});

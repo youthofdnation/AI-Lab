@@ -5,6 +5,7 @@ import {recentMessageHashes,reviewMessageHash} from './mail-review-scope.mjs';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FOREVER=253402300799;
+const REAPPROVAL_SECONDS=86400;
 
 export class ReadPolicyStore {
   #store;#clock;
@@ -32,15 +33,18 @@ export class ReadPolicyStore {
     const row=this.#db().prepare('SELECT * FROM read_policy_requests WHERE id=?').get(id);
     if(!row)throw Error('POLICY_REQUEST_NOT_FOUND');
     const now=this.#now(),state=row.state==='PENDING'&&row.approval_expires<=now?'EXPIRED':row.state;
+    const renewable=row.state==='PENDING'&&now>=row.created&&now<row.created+REAPPROVAL_SECONDS;
     return {request_id:id,tenant:row.tenant,owner:row.owner,device:row.device,client_ref:row.client_ref,
       account:this.#account(row),account_type:row.account_type,features:JSON.parse(row.features),duration:row.duration,
-      max_days:row.max_days,max_messages:row.max_messages,state,approval_expires_at:row.approval_expires};
+      max_days:row.max_days,max_messages:row.max_messages,state,approval_expires_at:row.approval_expires,
+      renewable,renewable_until_at:row.created+REAPPROVAL_SECONDS};
   }
   approve({id,tenant,owner}){
     const now=this.#now();
     return this.#store.transaction(()=>{
       const row=this.#db().prepare('SELECT * FROM read_policy_requests WHERE id=? AND tenant=? AND owner=?').get(id,tenant,owner);
-      if(!row||row.state!=='PENDING'||row.approval_expires<=now)throw Error('POLICY_APPROVAL_EXPIRED');
+      if(!row||row.state!=='PENDING'||now<row.created||now>=row.created+REAPPROVAL_SECONDS)throw Error('POLICY_APPROVAL_EXPIRED');
+      const renewing=row.approval_expires<=now;
       const p=planReadPolicy({account:this.#account(row),accountType:row.account_type,features:JSON.parse(row.features),
         duration:row.duration,maxSyncDays:row.max_days,maxSyncMessages:row.max_messages});
       const duplicate=this.#db().prepare("SELECT id FROM read_policies WHERE tenant=? AND owner=? AND device=? AND client_ref=? AND account_fp=? AND state='ACTIVE' AND expires>?")
@@ -51,6 +55,7 @@ export class ReadPolicyStore {
           now,p.seconds===null?FOREVER:now+p.seconds);
       this.#db().prepare("UPDATE read_policy_requests SET state='APPROVED' WHERE id=?").run(id);
       this.#store.audit(tenant,owner,id,'READ_POLICY_APPROVED',now);
+      if(renewing)this.#store.audit(tenant,owner,id,'READ_POLICY_APPROVED_AFTER_REQUEST_EXPIRY',now);
       return {grant_id:id,state:'ACTIVE',expires_at:p.seconds===null?null:now+p.seconds,
         calls_used:0,features:p.features,account_type:p.accountType,device:row.device};
     });

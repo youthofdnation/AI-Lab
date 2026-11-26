@@ -254,12 +254,14 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
   }
 
   function policyPage(p,msg=''){
-    const ticket=formTicket(p.request_id,nowS()+600);
+    const ticket=formTicket(p.request_id,p.renewable_until_at);
     return page('<h1>읽기 전용 사전 승인 정책 등록</h1><p>장치: <strong>'+escapeHtml(p.device)+
       '</strong><br>계정: <strong>'+escapeHtml(p.account)+'</strong> ('+escapeHtml(p.account_type)+
       ')<br>OAuth 연결: 현재 요청 연결로만 제한</p><p>허용 기능:</p><ul>'+p.features.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+
       '</ul><p>기간: '+escapeHtml(p.duration)+'<br>동기화 한도: 최근 '+escapeHtml(String(p.max_days))+'일, 최대 '+
       escapeHtml(String(p.max_messages))+'건</p><p>메일 발송·삭제·이동, 임의 셸과 파일 쓰기는 허용되지 않습니다. 이 정책은 동기화 작업 승인과 별개이며 언제든 철회할 수 있습니다.</p>'+
+      (p.state==='EXPIRED'&&p.renewable?'<p>첫 15분의 요청 시간이 지났습니다. 이 요청은 실행되지 않았으며, 같은 링크에서 소유자 암호로 등록할 수 있습니다. 재승인 가능 기한: '+
+        escapeHtml(new Date(p.renewable_until_at*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}))+' (한국시간).</p>':'')+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
       '<form method="POST" action="/v2/policy/'+escapeHtml(p.request_id)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
       '<label for="password">소유자 승인 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required>'+
@@ -272,8 +274,8 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let p;try{p=queue.readPolicyPreview(id);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
-    if(p.state!=='PENDING')return page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
-    if(!ticketOK(form.get('ticket'),id))return policyPage(p,'승인 양식이 만료되었습니다. 암호를 다시 입력하세요.');
+    if(p.state!=='PENDING'&&!p.renewable)return page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+    if(!ticketOK(form.get('ticket'),id))return policyPage(p,'제출된 양식의 보안 서명이 만료되었습니다. 권한은 등록되지 않았습니다. 같은 링크의 새 양식에서 암호를 다시 입력하세요.');
     const key='policy|'+id,f=failures.get(key)||{count:0,until:nowS()+900};
     if(f.count>=5&&f.until>nowS())return page('<h1>암호 시도 횟수 초과</h1>',429);
     const approver=approverMap.get(p.tenant+'|'+p.owner);
@@ -328,7 +330,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       if(policyMatch&&UUID.test(policyMatch[1])){
         if(method==='GET'){
           let p;try{p=queue.readPolicyPreview(policyMatch[1]);}catch{return page('<h1>정책 요청을 찾을 수 없습니다.</h1>',404);}
-          return p.state==='PENDING'?policyPage(p):page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
+          return p.state==='PENDING'||p.renewable?policyPage(p):page('<h1>정책 요청이 만료되었거나 처리되었습니다.</h1><p>상태: '+escapeHtml(p.state)+'</p>',409);
         }
         if(method==='POST')return await approvePolicy(request,policyMatch[1]);
       }
