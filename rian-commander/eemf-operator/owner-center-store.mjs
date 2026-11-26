@@ -11,7 +11,7 @@ export class OwnerCenterStore {
   #db(){return this.#store.db;}
   #now(){return Math.floor(this.#clock()/1000);}
   createSession({tenant,owner,method}){
-    if(!tenant||!owner||!['password','passkey'].includes(method))throw Error('INVALID_OWNER_SESSION');
+    if(!tenant||!owner||!['password','passkey','google'].includes(method))throw Error('INVALID_OWNER_SESSION');
     const token=randomBytes(32).toString('base64url'),now=this.#now(),digest=sha(token);
     this.#db().prepare('INSERT INTO owner_center_sessions(sha,tenant,owner,method,created,expires) VALUES(?,?,?,?,?,?)')
       .run(digest,tenant,owner,method,now,now+1800);
@@ -39,8 +39,21 @@ export class OwnerCenterStore {
     }
   }
   clearLoginFailure(key){this.#db().prepare('DELETE FROM owner_login_failures WHERE key=?').run(key);}
+  bindGoogleIdentity({tenant,owner,subject}){
+    if(typeof subject!=='string'||subject.length<6||subject.length>256||!tenant||!owner)
+      throw Error('INVALID_GOOGLE_IDENTITY');
+    const subjectSha=sha('google|'+subject),now=this.#now();
+    this.#store.transaction(()=>{
+      const prior=this.#db().prepare("SELECT subject_sha FROM owner_identity_bindings WHERE tenant=? AND owner=? AND provider='google'")
+        .get(tenant,owner);
+      if(prior){if(prior.subject_sha!==subjectSha)throw Error('GOOGLE_IDENTITY_CHANGED');return;}
+      this.#db().prepare("INSERT INTO owner_identity_bindings(tenant,owner,provider,subject_sha,created) VALUES(?,?,'google',?,?)")
+        .run(tenant,owner,subjectSha,now);
+      this.#store.audit(tenant,owner,subjectSha.slice(0,16),'GOOGLE_IDENTITY_BOUND',now);
+    });
+  }
   createChallenge({kind,challenge,tenant=null,owner=null,sessionSha=null,flowSha=null,requestId=null,scopeHash=null,scopeJson=null}){
-    if(!['register','login','approve_policy','approve_job'].includes(kind)||typeof challenge!=='string'||challenge.length<32)
+    if(!['register','login','approve_policy','approve_job','google_login'].includes(kind)||typeof challenge!=='string'||challenge.length<32)
       throw Error('INVALID_PASSKEY_CHALLENGE');
     const id=randomUUID(),now=this.#now();
     this.#db().prepare('INSERT INTO passkey_challenges(id,kind,challenge,tenant,owner,session_sha,flow_sha,request_id,scope_hash,scope_json,created,expires) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')

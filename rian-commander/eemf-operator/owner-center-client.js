@@ -54,7 +54,7 @@ function render(state){
   const accountFor=id=>state.requests.find(p=>p.request_id===id)?.account||'이 계정';
   center.innerHTML='<section><h2>소유자 보안</h2><p>'+esc(state.tenant)+' / '+esc(state.owner)+
     ' · 로그인 방식: '+esc(state.auth_method)+' · 세션 만료: '+esc(when(state.session_expires_at))+'</p><p>등록된 패스키: '+
-    state.passkeys.length+'개</p>'+(state.auth_method==='password'?'<button data-action="register">Windows Hello·Touch ID·모바일 패스키 등록</button>'+
+    state.passkeys.length+'개</p>'+(state.auth_method==='password'||state.auth_method==='google'?'<button data-action="register">Windows Hello·Touch ID·모바일 패스키 등록</button>'+
       state.passkeys.map(k=>'<p>패스키 …'+esc(k.id_suffix)+' · '+esc(when(k.created_at))+
         ' <button data-action="revoke-passkey" data-id="'+esc(k.id)+'">패스키 철회</button></p>').join(''):'')+
     '<button data-action="logout">로그아웃</button></section>'+

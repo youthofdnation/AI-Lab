@@ -11,7 +11,7 @@ import {LongJobKinds} from './long-job-kinds.mjs';
 import {hashApprovalPassword} from './long-job-http.mjs';
 import {createOwnerCenter} from './owner-center.mjs';
 import {OwnerCenterStore} from './owner-center-store.mjs';
-import {createStagingService} from './staging-server.mjs';
+import {createStagingService,stagingConfigFromEnv} from './staging-server.mjs';
 import {encodeCBOR} from '@levischuck/tiny-cbor';
 
 const origin='https://center.example.test';
@@ -84,6 +84,75 @@ test('the fixed permission address is wired into the actual staging HTTP service
   assert.equal(page.status,200);assert.match(await page.text(),/권한 관리센터/);
   const script=await fetch('http://127.0.0.1:'+port+'/v2/permissions/vendor.js');
   assert.equal(script.status,200);assert.match(script.headers.get('content-type'),/javascript/);
+});
+
+test('Google owner configuration resolves only an existing device with one owner',t=>{
+  const f=fixture(t),base={RIAN_STAGE_JOBS_ENABLED:'1',RIAN_STAGE_PRINCIPALS_JSON:JSON.stringify(f.principals),
+    RIAN_STAGE_DEVICES_JSON:JSON.stringify(f.devices),RIAN_STAGE_APPROVERS_JSON:JSON.stringify(f.approvers),
+    RIAN_STAGE_PUBLIC_URL:origin,RIAN_STAGE_FORM_SECRET:f.secret};
+  const google={deviceId:'pcA',email:'owner@example.test',clientId:'synthetic.apps.googleusercontent.com',
+    clientSecret:'synthetic-client-secret-long-enough'};
+  const config=stagingConfigFromEnv({...base,RIAN_STAGE_GOOGLE_OWNER_JSON:JSON.stringify(google)});
+  assert.equal(config.googleOwner.tenantId,'A');assert.equal(config.googleOwner.ownerId,'oa');
+  assert.throws(()=>stagingConfigFromEnv({...base,RIAN_STAGE_GOOGLE_OWNER_JSON:JSON.stringify({...google,deviceId:'unknown'})}),
+    /AMBIGUOUS_GOOGLE_OWNER_CONFIGURATION/);
+});
+
+test('mobile Google identity can enroll a passkey but cannot approve work without that passkey',async t=>{
+  const f=fixture(t),passkey=syntheticPasskey();
+  const clientId='synthetic-client.apps.googleusercontent.com';
+  const googleOwner={tenantId:'A',ownerId:'oa',email:'owner@example.test',clientId,
+    clientSecret:'synthetic-client-secret-long-enough'};
+  let authorization,tokenExchange,subject='synthetic-google-sub',email='owner@example.test';
+  const googleClient={
+    generateAuthUrl(options){authorization=options;return 'https://accounts.google.com/o/oauth2/v2/auth?state='+encodeURIComponent(options.state);},
+    async getToken(options){tokenExchange=options;return {tokens:{id_token:'synthetic-id-token'}};},
+    async verifyIdToken({idToken,audience}){
+      assert.equal(idToken,'synthetic-id-token');assert.equal(audience,clientId);
+      return {getPayload:()=>({iss:'https://accounts.google.com',audience:clientId,aud:clientId,
+        nonce:authorization.nonce,email,email_verified:true,sub:subject})};
+    }
+  };
+  const center=createOwnerCenter({store:f.store,queue:f.queue,directory:f.directory,
+    approvers:f.approvers,publicOrigin:origin,formSecret:f.secret,googleOwner,googleClient});
+  const start=await center(new Request(origin+'/v2/permissions/google/start'));
+  assert.equal(start.status,303);
+  assert.equal(new URL(start.headers.get('location')).origin,'https://accounts.google.com');
+  assert.equal(authorization.code_challenge_method,'S256');
+  assert.deepEqual(authorization.scope,['openid','email']);
+  const state=authorization.state,flowCookie=start.headers.get('set-cookie').split(';')[0];
+  const callback=await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+encodeURIComponent(state),
+    {headers:{cookie:flowCookie}}));
+  assert.equal(callback.status,303);
+  assert.equal(tokenExchange.redirect_uri,origin+'/v2/permissions/google/callback');
+  assert.ok(tokenExchange.codeVerifier.length>=43);
+  const sessionCookie=callback.headers.getSetCookie().find(x=>x.startsWith('__Host-rian_owner=')).split(';')[0];
+  const stateResponse=await center(new Request(origin+'/v2/permissions/api/state',{headers:{cookie:sessionCookie}}));
+  assert.equal((await stateResponse.json()).auth_method,'google');
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM owner_identity_bindings WHERE tenant='A'").get().n,1);
+  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+encodeURIComponent(state),
+    {headers:{cookie:flowCookie}}))).status,401,'the OAuth state is single-use');
+  const changed=await center(new Request(origin+'/v2/permissions/google/start'));
+  subject='different-google-account';
+  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+
+    encodeURIComponent(authorization.state),{headers:{cookie:changed.headers.get('set-cookie').split(';')[0]}}))).status,401,
+    'a different Google subject cannot take over the same owner');
+  const wrongEmail=await center(new Request(origin+'/v2/permissions/google/start'));
+  subject='synthetic-google-sub';email='other@example.test';
+  assert.equal((await center(new Request(origin+'/v2/permissions/google/callback?code=synthetic-code&state='+
+    encodeURIComponent(authorization.state),{headers:{cookie:wrongEmail.headers.get('set-cookie').split(';')[0]}}))).status,401,
+    'a different verified email cannot log in');
+  const post=(path,data)=>center(new Request(origin+path,{method:'POST',headers:{origin,
+    'content-type':'application/json',cookie:sessionCookie},body:JSON.stringify(data)}));
+  const pending=f.queue.prepareReadPolicy({actor:f.oa,deviceId:'pcA',clientRef:'a'.repeat(32),
+    scope:{account:'owner@example.test',accountType:'outlook',features:['mail.status'],duration:'day'}});
+  assert.equal((await post('/v2/permissions/api/approve/options',{request_id:pending.request_id,
+    scope:{features:['mail.status'],duration:'day',maxSyncDays:14,maxSyncMessages:1000}})).status,400,
+    'Google identity alone cannot approve mail access');
+  const registration=await (await post('/v2/permissions/api/register/options',{})).json();
+  assert.equal((await post('/v2/permissions/api/register/verify',{challenge_id:registration.challenge_id,
+    response:passkey.registration(registration.optionsJSON.challenge)})).status,200);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM passkey_credentials WHERE tenant='A'").get().n,1);
 });
 
 test('fixed center requires owner authentication and shows pending work without granting it',async t=>{

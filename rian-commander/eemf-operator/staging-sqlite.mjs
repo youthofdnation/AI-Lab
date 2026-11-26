@@ -58,7 +58,8 @@ export class StagingSqlite {
         'CREATE TABLE IF NOT EXISTS owner_login_failures (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL)',
         'CREATE TABLE IF NOT EXISTS passkey_credentials (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, rp_id TEXT NOT NULL, public_key_cipher BLOB NOT NULL, public_key_iv BLOB NOT NULL, public_key_tag BLOB NOT NULL, counter INTEGER NOT NULL, transports TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL)',
         'CREATE INDEX IF NOT EXISTS idx_passkeys_owner ON passkey_credentials(tenant,owner,status)',
-        'CREATE TABLE IF NOT EXISTS passkey_challenges (id TEXT PRIMARY KEY, kind TEXT NOT NULL, challenge TEXT NOT NULL, tenant TEXT, owner TEXT, session_sha TEXT, flow_sha TEXT, request_id TEXT, scope_hash TEXT, scope_json TEXT, created INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)'
+        'CREATE TABLE IF NOT EXISTS passkey_challenges (id TEXT PRIMARY KEY, kind TEXT NOT NULL, challenge TEXT NOT NULL, tenant TEXT, owner TEXT, session_sha TEXT, flow_sha TEXT, request_id TEXT, scope_hash TEXT, scope_json TEXT, created INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)',
+        'CREATE TABLE IF NOT EXISTS owner_identity_bindings (tenant TEXT NOT NULL, owner TEXT NOT NULL, provider TEXT NOT NULL, subject_sha TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(tenant,owner,provider), UNIQUE(provider,subject_sha))'
       ];
       this.#db.exec(ddl.join(';')+';');
       const policyRequestColumns=this.#db.prepare('PRAGMA table_info(read_policy_requests)').all().map(c=>c.name);

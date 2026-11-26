@@ -12,8 +12,15 @@ observe completion without asking the owner to report it in chat. A closed
 ChatGPT session is not automatically resumed.
 
 The implementation uses pinned `@simplewebauthn/server` and
-`@simplewebauthn/browser` packages. The initial owner password authenticates
-passkey enrollment or recovery. Passkey login and each approval use separate,
+`@simplewebauthn/browser` packages. The original owner password remains a
+recovery method. A separate, disabled-by-default Google OpenID Connect route
+can authenticate the preconfigured, verified owner email in the phone browser
+for initial passkey enrollment. It uses authorization code, PKCE, state, nonce,
+issuer and audience checks, a pinned Google subject after first login, and
+single-use five-minute challenges. It requests only `openid email`; it never
+receives mailbox access. Google login cannot approve a policy by itself: every
+policy approval still requires a registered passkey assertion. Passkey login
+and each approval use separate,
 short-lived, single-use challenges. Policy approval binds tenant, owner, OAuth
 client, device, account, requested scope, selected scope, duration, and limits.
 Server verification requires the expected HTTPS origin, RP ID, user verification,
@@ -45,7 +52,18 @@ Use WebAuthn passkeys, which can invoke Windows Hello, Touch ID, or a security
 key through a supported browser. A passkey cannot be borrowed from ChatGPT or
 the old Gateway: it is bound to the RIAN approval site's relying party ID.
 Enrollment therefore needs an explicit owner-authenticated ceremony once.
-The password remains the recovery method, not an automatically submitted input.
+The password remains a recovery method, not an automatically submitted input.
+
+The mobile bootstrap requires a dedicated Google OAuth web client with the
+exact redirect URI `https://rian-v2-eemf-mail-stage-staging.up.railway.app/v2/permissions/google/callback`.
+Set only the EEMFO3L staging service variable `RIAN_STAGE_GOOGLE_OWNER_JSON` to
+the verified owner email, exact `deviceId` (`DESKTOP-EEMFO3L`), dedicated client
+ID and client secret. The server derives the tenant and owner from the existing
+device and approver configuration and rejects ambiguous mappings. Keep this variable
+unconfigured until the owner confirms the Google account and the separate
+OAuth client is ready. Do not reuse an unrelated GovAI client or grant Gmail
+scopes. Existing grants and other Railway services are unaffected. The
+dedicated client and live phone ceremony still require verification.
 
 1. Give the staging approval host a stable HTTPS domain. Bind the RP ID and
    expected origin to that host; reject other origins, hosts, and staging to

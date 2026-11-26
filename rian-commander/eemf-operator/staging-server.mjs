@@ -32,6 +32,17 @@ export function stagingConfigFromEnv(env){
     cfg.approvers=parseJson(env.RIAN_STAGE_APPROVERS_JSON,'APPROVER_CONFIGURATION');
     cfg.publicOrigin=(env.RIAN_STAGE_PUBLIC_URL||'').replace(/\/+$/,'');
     cfg.formSecret=env.RIAN_STAGE_FORM_SECRET||'';
+    cfg.googleOwner=env.RIAN_STAGE_GOOGLE_OWNER_JSON?parseJson(env.RIAN_STAGE_GOOGLE_OWNER_JSON,'GOOGLE_OWNER_CONFIGURATION'):null;
+    if(cfg.googleOwner){
+      const g=cfg.googleOwner;
+      if(typeof g!=='object'||Array.isArray(g)||!g||
+        Object.keys(g).some(k=>!['deviceId','email','clientId','clientSecret'].includes(k))||
+        typeof g.deviceId!=='string')throw Error('INVALID_GOOGLE_OWNER_CONFIGURATION');
+      const device=cfg.devices.find(d=>d.id===g.deviceId);
+      const owners=cfg.approvers.filter(a=>a.tenantId===device?.tenantId);
+      if(!device||owners.length!==1)throw Error('AMBIGUOUS_GOOGLE_OWNER_CONFIGURATION');
+      cfg.googleOwner={...g,tenantId:owners[0].tenantId,ownerId:owners[0].ownerId};
+    }
   }
   return cfg;
 }
@@ -51,7 +62,8 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
     jobs=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:config.allowDiagnostics===true,allowMailReviewTools:config.allowMailReviewTools===true}),clock,deviceKinds});
     recovery=jobs.recoverAfterRestart();
     jobHandler=createLongJobHandler({directory,queue:jobs,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
-    ownerCenter=createOwnerCenter({store,queue:jobs,directory,approvers:config.approvers,publicOrigin:config.publicOrigin,formSecret:config.formSecret,clock});
+    ownerCenter=createOwnerCenter({store,queue:jobs,directory,approvers:config.approvers,publicOrigin:config.publicOrigin,
+      formSecret:config.formSecret,googleOwner:config.googleOwner,clock});
   }
   const reaper=jobs?setInterval(()=>{try{jobs.reap();store.sweep(Math.floor(clock()/1000));}catch{log('RIAN_STAGING_REAP_FAILED');}},5000):null;
   reaper?.unref?.();
@@ -74,7 +86,10 @@ export function createStagingService({store,config,clock=()=>Date.now(),log=()=>
       for(const [name,value] of Object.entries(req.headers))if(typeof value==='string')headers.set(name,value);
       const request=new Request('http://staging.internal'+url,{method:req.method,headers,...(body.length?{body}:{})});
       const response=await target(request);
-      res.writeHead(response.status,Object.fromEntries(response.headers.entries()));
+      const responseHeaders=Object.fromEntries(response.headers.entries());
+      const setCookies=response.headers.getSetCookie?.()||[];
+      if(setCookies.length)responseHeaders['set-cookie']=setCookies;
+      res.writeHead(response.status,responseHeaders);
       res.end(Buffer.from(await response.arrayBuffer()));
     }catch{
       if(!res.headersSent){res.writeHead(400,{'content-type':'application/json'});res.end('{"error":"INVALID_REQUEST"}');}

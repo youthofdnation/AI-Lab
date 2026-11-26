@@ -2,6 +2,7 @@
 import {createHash,createHmac,randomBytes,scryptSync,timingSafeEqual} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {generateRegistrationOptions,verifyRegistrationResponse,generateAuthenticationOptions,verifyAuthenticationResponse} from '@simplewebauthn/server';
+import {OAuth2Client} from 'google-auth-library';
 import {OwnerCenterStore} from './owner-center-store.mjs';
 import {planReadPolicy} from './read-policy-scope.mjs';
 
@@ -15,6 +16,7 @@ const json=(data,status=200,headers={})=>new Response(JSON.stringify(data),{stat
 const fail=(code,status=400)=>json({error:code},status);
 const sessionCookie=(token,maxAge)=>`__Host-rian_owner=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
 const flowCookie=(token,maxAge)=>`__Host-rian_flow=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+const googleCookie=(token,maxAge)=>`__Host-rian_google=${token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 function cookie(request,name){
   const header=request.headers.get('cookie')||'';
   if(header.length>4096)return null;
@@ -40,11 +42,21 @@ function html(content,status=200){
       'referrer-policy':'no-referrer','content-security-policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
 }
 
-export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,formSecret,clock=()=>Date.now()}){
+export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,formSecret,googleOwner=null,googleClient=null,clock=()=>Date.now()}){
   const rpID=new URL(publicOrigin).hostname;
   if(!/^https:\/\//.test(publicOrigin)&&!/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(publicOrigin))throw Error('HTTPS_ORIGIN_REQUIRED');
   if(typeof formSecret!=='string'||Buffer.byteLength(formSecret)<48)throw Error('INVALID_FORM_SECRET');
   if(!Array.isArray(approvers)||approvers.length<1||approvers.length>32)throw Error('INVALID_APPROVERS');
+  if(googleOwner){
+    if(typeof googleOwner.clientId!=='string'||!googleOwner.clientId.endsWith('.apps.googleusercontent.com')||
+      typeof googleOwner.clientSecret!=='string'||googleOwner.clientSecret.length<16||
+      typeof googleOwner.email!=='string'||googleOwner.email!==googleOwner.email.toLowerCase()||
+      !approvers.some(a=>a.tenantId===googleOwner.tenantId&&a.ownerId===googleOwner.ownerId))
+      throw Error('INVALID_GOOGLE_OWNER_CONFIGURATION');
+    directory.ownerFromVerifiedSession(googleOwner.tenantId,googleOwner.ownerId);
+  }
+  const oauth=googleOwner?(googleClient||new OAuth2Client({clientId:googleOwner.clientId,
+    clientSecret:googleOwner.clientSecret,redirectUri:publicOrigin+'/v2/permissions/google/callback'})):null;
   const auth=new OwnerCenterStore({store,clock,rpID});
   const now=()=>Math.floor(clock()/1000);
   const sameOrigin=request=>request.headers.get('origin')===publicOrigin||
@@ -120,7 +132,7 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
     }
     if(path==='/v2/permissions/api/register/options'){
       exact(x,[]);
-      if(s.method!=='password')return fail('PASSWORD_RECOVERY_LOGIN_REQUIRED',403);
+      if(!['password','google'].includes(s.method))return fail('OWNER_RECOVERY_LOGIN_REQUIRED',403);
       const existing=passkeys(s),userID=createHmac('sha256',formSecret).update('passkey-user|'+s.tenant+'|'+s.owner).digest();
       const options=await generateRegistrationOptions({rpName:'RIAN Commander V2',rpID,userName:s.owner,
         userID,attestationType:'none',supportedAlgorithmIDs:[-7,-257],
@@ -131,7 +143,7 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
     }
     if(path==='/v2/permissions/api/register/verify'){
       exact(x,['challenge_id','response'],['challenge_id','response']);
-      if(s.method!=='password')return fail('PASSWORD_RECOVERY_LOGIN_REQUIRED',403);
+      if(!['password','google'].includes(s.method))return fail('OWNER_RECOVERY_LOGIN_REQUIRED',403);
       const c=auth.consumeChallenge({id:x.challenge_id,kind:'register',tenant:s.tenant,owner:s.owner,sessionSha:s.sha});
       const verified=await verifyRegistrationResponse({response:x.response,expectedChallenge:c.challenge,
         expectedOrigin:publicOrigin,expectedRPID:rpID,requireUserVerification:true});
@@ -142,7 +154,7 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
     }
     if(path==='/v2/permissions/api/passkey/revoke'){
       exact(x,['id'],['id']);
-      if(s.method!=='password')return fail('PASSWORD_RECOVERY_LOGIN_REQUIRED',403);
+      if(!['password','google'].includes(s.method))return fail('OWNER_RECOVERY_LOGIN_REQUIRED',403);
       return json(auth.revokeCredential({tenant:s.tenant,owner:s.owner,id:x.id}));
     }
     if(path==='/v2/permissions/api/change'){
@@ -200,6 +212,51 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
 
   return async function handle(request){
     const url=new URL(request.url),path=url.pathname,method=request.method.toUpperCase();
+    if(googleOwner&&method==='GET'&&path==='/v2/permissions/google/start'&&!url.search){
+      const state=randomBytes(32).toString('base64url'),nonce=randomBytes(32).toString('base64url');
+      const verifier=randomBytes(32).toString('base64url');
+      const challenge=auth.createChallenge({kind:'google_login',challenge:nonce,flowSha:sha(state),
+        scopeJson:JSON.stringify({verifier})});
+      const fullState=challenge.id+'.'+state;
+      const destination=oauth.generateAuthUrl({access_type:'online',scope:['openid','email'],
+        response_type:'code',prompt:'select_account',state:fullState,nonce,
+        code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'});
+      return new Response(null,{status:303,headers:{location:destination,'cache-control':'no-store',
+        'set-cookie':googleCookie(fullState,300),'referrer-policy':'no-referrer'}});
+    }
+    if(googleOwner&&method==='GET'&&path==='/v2/permissions/google/callback'){
+      const received=url.searchParams.get('state'),code=url.searchParams.get('code');
+      const clear=googleCookie('',0);
+      if(url.searchParams.has('error')||[...url.searchParams.keys()].some(k=>!['state','code','scope','authuser','prompt'].includes(k))||
+        url.searchParams.getAll('state').length!==1||url.searchParams.getAll('code').length!==1||typeof received!=='string'||
+        received!==cookie(request,'__Host-rian_google')||typeof code!=='string'||code.length<8||code.length>4096)
+        return html('<main><h1>휴대폰 소유자 확인 실패</h1><p>Google 로그인 결과를 확인할 수 없습니다.</p><a href="/v2/permissions">관리센터로 돌아가기</a></main>',401);
+      try{
+        const [id,state]=received.split('.');
+        if(!UUID.test(id)||!state||state.length!==43)throw Error('INVALID_STATE');
+        const challenge=auth.consumeChallenge({id,kind:'google_login',flowSha:sha(state)});
+        const {verifier}=JSON.parse(challenge.scope_json);
+        const tokenResult=await oauth.getToken({code,codeVerifier:verifier,
+          redirect_uri:publicOrigin+'/v2/permissions/google/callback'});
+        const idToken=tokenResult.tokens?.id_token;
+        if(typeof idToken!=='string')throw Error('ID_TOKEN_MISSING');
+        const ticket=await oauth.verifyIdToken({idToken,audience:googleOwner.clientId});
+        const claims=ticket.getPayload();
+        if(!claims||!['https://accounts.google.com','accounts.google.com'].includes(claims.iss)||
+          claims.aud!==googleOwner.clientId||claims.nonce!==challenge.challenge||
+          claims.email_verified!==true||claims.email?.toLowerCase()!==googleOwner.email||!claims.sub)
+          throw Error('OWNER_IDENTITY_MISMATCH');
+        auth.bindGoogleIdentity({tenant:googleOwner.tenantId,owner:googleOwner.ownerId,subject:claims.sub});
+        const created=auth.createSession({tenant:googleOwner.tenantId,owner:googleOwner.ownerId,method:'google'});
+        const response=new Response(null,{status:303,headers:{location:'/v2/permissions','cache-control':'no-store',
+          'referrer-policy':'no-referrer'}});
+        response.headers.append('set-cookie',clear);
+        response.headers.append('set-cookie',sessionCookie(created.token,1800));
+        return response;
+      }catch{
+        return html('<main><h1>휴대폰 소유자 확인 실패</h1><p>계정 또는 인증 결과가 일치하지 않습니다. 권한은 변경되지 않았습니다.</p><a href="/v2/permissions">관리센터로 돌아가기</a></main>',401);
+      }
+    }
     if(url.search||url.hash)return fail('NOT_FOUND',404);
     if(method==='GET'&&path==='/v2/permissions/vendor.js')return new Response(BROWSER,{headers:{'content-type':'text/javascript; charset=utf-8','cache-control':'public, max-age=86400','x-content-type-options':'nosniff'}});
     if(method==='GET'&&path==='/v2/permissions/app.js')return new Response(CLIENT,{headers:{'content-type':'text/javascript; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}});
@@ -207,7 +264,8 @@ export function createOwnerCenter({store,queue,directory,approvers,publicOrigin,
     if(method==='GET'&&path==='/v2/permissions'){
       return html(s?'<main><h1>RIAN Commander 권한 관리센터</h1><p class="muted">승인 대기 요청을 자동 확인합니다. 새 링크가 필요하지 않습니다.</p><div id="notice" role="status"></div><div id="center"></div></main>':
         '<main><h1>RIAN Commander 권한 관리센터</h1><section><p>최초 소유자 인증 후 패스키를 등록할 수 있습니다. 이후 Windows Hello, Touch ID 또는 호환 모바일 인증으로 로그인하고 승인합니다.</p>'+
-        '<form method="POST" action="/v2/permissions/login"><label for="password">소유자 복구 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required><button type="submit">최초 인증 또는 복구 로그인</button></form><p>등록된 패스키가 있다면 아래 버튼을 사용하세요.</p><button id="passkey-login" type="button">패스키로 로그인</button><p id="notice" role="status"></p></section></main>');
+        (googleOwner?'<p><a href="/v2/permissions/google/start">휴대폰 Google 계정으로 소유자 확인</a></p>':'')+
+        '<form method="POST" action="/v2/permissions/login"><label for="password">소유자 복구 암호</label><input id="password" name="password" type="password" minlength="16" autocomplete="current-password" required><button type="submit">암호로 최초 인증 또는 복구</button></form><p>등록된 패스키가 있다면 아래 버튼을 사용하세요.</p><button id="passkey-login" type="button">패스키로 로그인</button><p id="notice" role="status"></p></section></main>');
     }
     if(method==='GET'&&path==='/v2/permissions/api/state'){
       if(!s)return fail('OWNER_LOGIN_REQUIRED',401);

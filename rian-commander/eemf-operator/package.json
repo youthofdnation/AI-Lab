@@ -8,7 +8,8 @@
   },
   "dependencies": {
     "@simplewebauthn/browser": "14.0.0",
-    "@simplewebauthn/server": "14.1.0"
+    "@simplewebauthn/server": "14.1.0",
+    "google-auth-library": "11.3.4"
   },
   "devDependencies": {
     "@levischuck/tiny-cbor": "0.2.2"
