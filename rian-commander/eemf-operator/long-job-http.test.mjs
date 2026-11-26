@@ -12,18 +12,18 @@ import {createLongJobHandler,hashApprovalPassword,clientRefFor} from './long-job
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const ORIGIN='https://rian-commander-tenant-staging.example.test';
-function fixture(t){
+function fixture(t,clock=()=>Date.now()){
  const dir=mkdtempSync(join(tmpdir(),'rian-ljhttp-'));
  const tkn=Object.fromEntries(['oa','oa2','ob','aa','ab'].map(x=>[x,randomBytes(40).toString('base64url')]));
  const directory=new TenantDirectory({devices:[{id:'pcA',tenantId:'A'},{id:'pcB',tenantId:'B'}],
   principals:[['oa','A','owner'],['oa2','A','owner'],['ob','B','owner'],['aa','A','agent','pcA'],['ab','B','agent','pcB']]
    .map(([id,tenantId,kind,deviceId])=>({id,tenantId,kind,...(deviceId?{deviceId}:{}),tokenSha256:sha(tkn[id])}))});
  const store=new StagingSqlite({filename:join(dir,'s.db'),encryptionKeyHex:randomBytes(32).toString('hex')});
- const queue=new LongJobQueue({directory,store,kinds:new LongJobKinds({allowDiagnostics:true,allowMailReviewTools:true}),
+ const queue=new LongJobQueue({directory,store,clock,kinds:new LongJobKinds({allowDiagnostics:true,allowMailReviewTools:true}),
   deviceKinds:{pcA:['diag.wait','mail.sync','mail.search','mail.read','mail.status','mail.recent','mail.review_pending']}});
  const pwA='synthetic-owner-A-password-'+randomBytes(4).toString('hex'),pwB='synthetic-owner-B-password-'+randomBytes(4).toString('hex');
  const approvers=[{tenantId:'A',ownerId:'oa',...hashApprovalPassword(pwA)},{tenantId:'B',ownerId:'ob',...hashApprovalPassword(pwB)}];
- const handler=createLongJobHandler({directory,queue,approvers,publicOrigin:ORIGIN,formSecret:randomBytes(48).toString('hex')});
+ const handler=createLongJobHandler({directory,queue,approvers,publicOrigin:ORIGIN,formSecret:randomBytes(48).toString('hex'),clock});
  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true});});
  const rpc=async(who,method,params={},extra={})=>{
   const r=await handler(new Request(ORIGIN+'/v2/mcp',{method:'POST',headers:{authorization:'Bearer '+tkn[who],'content-type':'application/json',...extra},body:JSON.stringify({jsonrpc:'2.0',id:7,method,params})}));
@@ -150,6 +150,27 @@ test('password attempts are rate limited per tenant and client',async t=>{
  const {ticket}=await f.approvePage(s.job_id);
  for(let i=0;i<5;i++)await f.submit(s.job_id,{ticket,password:'wrong-password-but-long-enough'});
  assert.equal((await f.submit(s.job_id,{ticket,password:f.pwA})).status,429);
+});
+
+test('an expired unexecuted request can be approved at its original link with a new ticket and owner password',async t=>{
+ let now=Date.now();const f=fixture(t,()=>now),oauth={'x-rian-client-ref':'a'.repeat(32)};
+ const job=await f.tool('oa','mail_sync',{device:'pcA',days:14,max_messages:1000},oauth);
+ const original=await f.approvePage(job.job_id);
+ now+=901000;
+ const renewed=await f.approvePage(job.job_id);
+ assert.equal(renewed.status,200);
+ assert.match(renewed.html,/같은 링크에서 소유자 암호로 다시 승인/);
+ assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:job.job_id})).state,'APPROVAL_EXPIRED');
+ const stale=await f.submit(job.job_id,{ticket:original.ticket,password:f.pwA,review:'1'});
+ assert.match(stale.html,/양식이 만료/);
+ const wrong=await f.submit(job.job_id,{ticket:renewed.ticket,password:'incorrect-owner-password',review:'1',
+   review_minutes:'30',review_jobs:'10'});
+ assert.match(wrong.html,/name="review" value="1"[^>]* checked/);
+ const ticket=/name="ticket" value="([^"]+)"/.exec(wrong.html)?.[1];
+ const approved=await f.submit(job.job_id,{ticket,password:f.pwA,review:'1',review_minutes:'30',review_jobs:'10'});
+ assert.match(approved.html,/업무메일 연속 검토 승인 완료/);
+ assert.equal((await f.tool('oa','rian_v2_job_status',{job_id:job.job_id})).state,'QUEUED');
+ assert.equal((await f.tool('oa','rian_v2_list_grants',{})).grants[0].state,'PENDING_SYNC');
 });
 
 test('password error preserves the selected mail review scope without echoing the password',async t=>{

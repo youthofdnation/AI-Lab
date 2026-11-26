@@ -259,6 +259,7 @@ export class LongJobQueue {
     const kind=this.#kinds.get(j.kind),params=this.#params(j);
     return {jobId:j.id,tenantId:j.tenant,ownerId:j.owner,device:j.device,kind:j.kind,label:kind.label,lines:kind.describe(params),params,
       state:j.state,approvalExpiresAt:j.approval_expires,maxRuntimeSeconds:kind.maxRuntimeSeconds,grantable:kind.grantable,lockGroup:kind.lockGroup,
+      renewable:j.state==='APPROVAL_EXPIRED'&&j.started===null&&j.approved_at===null&&now-j.created<=86400,
       clientScopedReviewEligible:j.kind==='mail.sync'&&typeof j.client_ref==='string'&&j.client_ref.length>=16};
   }
   /**
@@ -272,7 +273,8 @@ export class LongJobQueue {
       this.#reapLocked(now);
       const j=typeof jobId==='string'&&UUID.test(jobId)?this.#row(jobId):null;
       if(!j||j.tenant!==approver.tenantId||j.owner!==approver.ownerId)throw Error('JOB_NOT_FOUND');
-      if(j.state!=='AWAITING_APPROVAL')throw Error('APPROVAL_NOT_PENDING');
+      const renewing=j.state==='APPROVAL_EXPIRED'&&j.started===null&&j.approved_at===null&&now-j.created<=86400;
+      if(j.state!=='AWAITING_APPROVAL'&&!renewing)throw Error('APPROVAL_NOT_PENDING');
       const kind=this.#kinds.get(j.kind);
       let grantId=null,reviewId=null;
       if(grant!==null&&review!==null)throw Error('CONFLICTING_APPROVAL_SCOPE');
@@ -300,8 +302,10 @@ export class LongJobQueue {
           .run(grantId,j.tenant,j.owner,j.device,j.kind,j.spec_sha,now,now+minutes*60,maxRuns);
         this.#store.audit(j.tenant,approver.ownerId,grantId,'LONG_JOB_GRANT_CREATED',now);
       }
-      const changed=db.prepare("UPDATE long_jobs SET state='QUEUED',approved_at=?,queue_deadline=?,approval_expires=NULL WHERE id=? AND state='AWAITING_APPROVAL'").run(now,now+this.#limits.queueTtlSeconds,j.id);
+      const changed=db.prepare("UPDATE long_jobs SET state='QUEUED',approved_at=?,queue_deadline=?,approval_expires=NULL,finished=NULL WHERE id=? AND state=?")
+        .run(now,now+this.#limits.queueTtlSeconds,j.id,j.state);
       if(changed.changes!==1)throw Error('APPROVAL_NOT_PENDING');
+      if(renewing)this.#audit(j,approver.ownerId,'LONG_JOB_APPROVED_AFTER_EXPIRY');
       this.#audit(j,approver.ownerId,'LONG_JOB_APPROVED');
       const approvedGrant=reviewId
         ?db.prepare('SELECT id,state,expires,runs_left,reads_left FROM mail_review_sessions WHERE id=?').get(reviewId)

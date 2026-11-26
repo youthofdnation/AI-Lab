@@ -178,7 +178,9 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     return page('<h1>RIAN Commander V2 작업 승인</h1>'+
       '<p>대상 PC: <strong>'+escapeHtml(preview.device)+'</strong><br>작업: <strong>'+escapeHtml(preview.label)+'</strong></p>'+
       '<ul>'+preview.lines.map(l=>'<li>'+escapeHtml(l)+'</li>').join('')+'</ul>'+
-      '<p>정확한 매개변수: <code>'+escapeHtml(JSON.stringify(preview.params))+'</code><br>최대 실행 시간: '+Math.round(preview.maxRuntimeSeconds/60)+'분 · 승인 요청 만료: '+escapeHtml(when(preview.approvalExpiresAt))+' (한국시간)</p>'+
+      '<p>정확한 매개변수: <code>'+escapeHtml(JSON.stringify(preview.params))+'</code><br>최대 실행 시간: '+Math.round(preview.maxRuntimeSeconds/60)+'분'+
+      (preview.renewable?' · 기존 요청이 만료됐습니다. 같은 링크에서 소유자 암호로 다시 승인할 수 있습니다.':
+        ' · 승인 요청 만료: '+escapeHtml(when(preview.approvalExpiresAt))+' (한국시간)')+'</p>'+
       '<p>임의 명령, PowerShell, 다른 PC, 메일 발송·삭제는 포함되지 않습니다. 승인 전에는 아무것도 실행되지 않습니다.</p>'+
       (msg?'<p role="alert"><strong>'+escapeHtml(msg)+'</strong></p>':'')+
       '<form method="POST" action="/v2/approve/'+escapeHtml(preview.jobId)+'"><input type="hidden" name="ticket" value="'+escapeHtml(ticket)+'">'+
@@ -208,7 +210,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
     if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/x-www-form-urlencoded')return page('<h1>잘못된 승인 양식</h1>',400);
     let form;try{form=new URLSearchParams(new TextDecoder('utf-8',{fatal:true}).decode(await readBody(request,8000)));}catch{return page('<h1>잘못된 승인 양식</h1>',400);}
     let preview;try{preview=queue.approvalPreview(jobId);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
-    if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
+    if(preview.state!=='AWAITING_APPROVAL'&&!preview.renewable)return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
     if(!ticketOK(form.get('ticket'),jobId))return approvalPage(preview,'승인 양식이 만료되었습니다. 선택 범위를 유지했습니다. 암호를 다시 입력하세요.',form);
     const ip=(request.headers.get('x-forwarded-for')||'local').split(',')[0].trim().slice(0,60),key=preview.tenantId+'|'+ip;
     // Per client and per job: a spoofed X-Forwarded-For cannot buy unlimited guesses for one job.
@@ -268,7 +270,7 @@ export function createLongJobHandler({directory,queue,approvers,publicOrigin,for
       if(approveMatch&&UUID.test(approveMatch[1])){
         if(method==='GET'){
           let preview;try{preview=queue.approvalPreview(approveMatch[1]);}catch{return page('<h1>작업을 찾을 수 없습니다.</h1>',404);}
-          if(preview.state!=='AWAITING_APPROVAL')return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
+          if(preview.state!=='AWAITING_APPROVAL'&&!preview.renewable)return page('<h1>이미 처리되었거나 만료된 승인 요청입니다.</h1><p>현재 상태: '+escapeHtml(preview.state)+'</p>',409);
           return approvalPage(preview);
         }
         if(method==='POST')return await approve(request,approveMatch[1]);

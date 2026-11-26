@@ -166,7 +166,7 @@ test('approval expiry, approval cancel, queued cancel and running cancel signal'
  const e=start(q,f.actors.oa,'pcA','diag.wait',{seconds:5});
  f.advance(901);
  assert.equal(q.get({actor:f.actors.oa,jobId:e.job_id}).state,'APPROVAL_EXPIRED');
- assert.throws(()=>q.approve({approver:f.owner.A,jobId:e.job_id}),/APPROVAL_NOT_PENDING/);
+ assert.equal(q.approvalPreview(e.job_id).renewable,true,'expired, unexecuted link requires a fresh browser ticket and owner password');
  const c=start(q,f.actors.oa,'pcA','diag.wait',{seconds:6});
  assert.equal(q.cancel({actor:f.actors.oa,jobId:c.job_id}).state,'APPROVAL_CANCELLED');
  assert.throws(()=>q.approve({approver:f.owner.A,jobId:c.job_id}),/APPROVAL_NOT_PENDING/);
